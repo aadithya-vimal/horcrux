@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+from horcrux.models import (
+    Action,
+    Credential,
+    ExploitCandidate,
+    Finding,
+    Service,
+    Software,
+    WorkspaceState,
+)
+
+
+def safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
+class Workspace:
+    def __init__(self, target: str, base: str = "workspaces"):
+        self.target = target
+        self.root = Path(base) / safe_name(target)
+        self.raw = self.root / "raw"
+        self.responses = self.root / "responses"
+        self.headers = self.root / "headers"
+        self.reports = self.root / "reports"
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        for directory in (self.raw, self.responses, self.headers, self.reports):
+            directory.mkdir(exist_ok=True)
+
+        self.state_file = self.root / "state.json"
+
+    def load(self) -> WorkspaceState:
+        if self.state_file.exists():
+            return WorkspaceState.model_validate_json(
+                self.state_file.read_text(encoding="utf-8")
+            )
+        state = WorkspaceState(target=self.target)
+        self.save(state)
+        return state
+
+    def save(self, state: WorkspaceState) -> None:
+        from datetime import datetime, timezone
+        state.updated_at = datetime.now(timezone.utc)
+        self.state_file.write_text(
+            state.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    def write(self, relative: str, content: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", errors="replace")
+        return path
+
+    def write_json(self, relative: str, data) -> Path:
+        return self.write(relative, json.dumps(data, indent=2, default=str))
+
+    def upsert_services(self, items: list[Service]) -> None:
+        state = self.load()
+        current = {(x.port, x.protocol): x for x in state.services}
+        for item in items:
+            current[(item.port, item.protocol)] = item
+        state.services = list(current.values())
+        self.save(state)
+
+    def upsert_software(self, items: list[Software]) -> None:
+        state = self.load()
+        seen = {(x.product, x.version, x.service, x.source) for x in state.software}
+        for item in items:
+            key = (item.product, item.version, item.service, item.source)
+            if key not in seen:
+                state.software.append(item)
+                seen.add(key)
+        self.save(state)
+
+    def add_credentials(self, items: list[Credential]) -> None:
+        if not items:
+            return
+        state = self.load()
+        seen = {(x.username, x.secret, x.kind, x.source) for x in state.credentials}
+        for item in items:
+            key = (item.username, item.secret, item.kind, item.source)
+            if key not in seen:
+                state.credentials.append(item)
+                seen.add(key)
+        self.save(state)
+
+    def upsert_finding(self, finding: Finding) -> None:
+        state = self.load()
+        for idx, old in enumerate(state.findings):
+            if old.id == finding.id:
+                state.findings[idx] = finding
+                break
+        else:
+            state.findings.append(finding)
+        self.save(state)
+
+    def set_actions(self, items: list[Action]) -> None:
+        state = self.load()
+        state.actions = sorted(items, key=lambda x: -x.score)
+        self.save(state)
+
+    def set_exploits(self, items: list[ExploitCandidate]) -> None:
+        state = self.load()
+        state.exploits = items
+        self.save(state)
