@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 from horcrux.core.parsers import parse_nmap
-from horcrux.models import Finding, Severity
+from horcrux.models import Finding, FindingStatus, ScanProfile, Severity, ValidationState
 
 
-def run_network(ws, runner, target: str, deep: bool = False):
+def run_network(ws, runner, target: str, profile: ScanProfile | None = None, deep: bool = False):
     xml = ws.root / "raw" / "nmap.xml"
+
+    # Profile port spec evaluation
+    if profile:
+        deep = profile.port_spec == "full" or deep
+        timeout = profile.command_timeout
+        include_udp = profile.include_udp
+        udp_count = profile.udp_port_count
+    else:
+        timeout = 900 if deep else 450
+        include_udp = not deep
+        udp_count = 50
 
     tcp_args = [
         "nmap",
@@ -16,8 +27,10 @@ def run_network(ws, runner, target: str, deep: bool = False):
         str(xml),
     ]
 
-    if deep:
+    if deep or (profile and profile.port_spec == "full"):
         tcp_args += ["-p-"]
+    elif profile and profile.port_spec == "top100":
+        tcp_args += ["--top-ports", "100"]
     else:
         tcp_args += ["--top-ports", "1000"]
 
@@ -26,7 +39,7 @@ def run_network(ws, runner, target: str, deep: bool = False):
     result = runner.run(
         tcp_args,
         "nmap-tcp",
-        timeout=900 if deep else 450,
+        timeout=timeout,
     )
 
     services, software = parse_nmap(
@@ -37,14 +50,14 @@ def run_network(ws, runner, target: str, deep: bool = False):
     ws.upsert_services(services)
     ws.upsert_software(software)
 
-    if not deep:
+    if include_udp:
         runner.run(
             [
-                "nmap", "-Pn", "-sU", "--top-ports", "50",
+                "nmap", "-Pn", "-sU", f"--top-ports", str(udp_count),
                 "--version-light", target,
             ],
             "nmap-udp",
-            timeout=450,
+            timeout=timeout,
         )
 
     findings = []
@@ -56,11 +69,19 @@ def run_network(ws, runner, target: str, deep: bool = False):
                     title="Telnet exposed",
                     category="network",
                     severity=Severity.medium,
-                    confidence=.99,
+                    confidence=0.99,
+                    status=FindingStatus.verified,
+                    validation_state=ValidationState.confirmed,
                     target=target,
-                    evidence=["TCP/23 is open."],
+                    affected_asset=f"{target}:23",
+                    protocol=service.protocol,
+                    port=23,
+                    source_tool="nmap",
+                    evidence=["TCP/23 is open; cleartext Telnet protocol in use."],
                     artifacts=["raw/nmap-tcp.xml"],
-                    next_action="Assess cleartext authentication and configuration.",
+                    why_it_matters="Cleartext telnet protocol transmits credentials unencrypted over the network.",
+                    recommended_next_action="Assess cleartext authentication and upgrade to SSH.",
+                    next_action="Assess cleartext authentication and upgrade to SSH.",
                 )
             )
         elif service.port == 21:
@@ -70,10 +91,18 @@ def run_network(ws, runner, target: str, deep: bool = False):
                     title="FTP exposed",
                     category="network",
                     severity=Severity.info,
-                    confidence=.99,
+                    confidence=0.99,
+                    status=FindingStatus.verified,
+                    validation_state=ValidationState.confirmed,
                     target=target,
+                    affected_asset=f"{target}:21",
+                    protocol=service.protocol,
+                    port=21,
+                    source_tool="nmap",
                     evidence=["TCP/21 is open."],
                     artifacts=["raw/nmap-tcp.xml"],
+                    why_it_matters="FTP can allow anonymous access or cleartext password transmission.",
+                    recommended_next_action="Check anonymous access and server capabilities.",
                     next_action="Check anonymous access and server capabilities.",
                 )
             )

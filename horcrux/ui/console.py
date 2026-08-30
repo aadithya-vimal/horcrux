@@ -199,9 +199,18 @@ class ConsoleApp:
 
         if command == "scan":
             if len(args) < 2:
-                raise ValueError("usage: scan <target> [--deep] [--verify]")
+                raise ValueError("usage: scan <target> [--profile <name>] [--deep] [--verify]")
 
             target = args[1]
+            deep = "--deep" in args[2:]
+            verify = "--verify" in args[2:]
+            profile_name = "deep" if deep else "standard"
+
+            # Parse optional --profile <name>
+            for i, arg in enumerate(args[2:], start=2):
+                if arg in {"--profile", "-p"} and i + 1 < len(args):
+                    profile_name = args[i + 1]
+
             self.workspace = Workspace(target)
             banner(self.console, duration=0.4)
 
@@ -209,9 +218,10 @@ class ConsoleApp:
                 target,
                 self.workspace,
                 self.console,
+                profile=profile_name,
             ).scan(
-                deep="--deep" in args[2:],
-                verify="--verify" in args[2:],
+                deep=deep,
+                verify=verify,
             )
 
             fanfare(self.console, f"TARGET SYNTHESIS COMPLETE: {target}")
@@ -733,10 +743,14 @@ class ConsoleApp:
         table.add_column("Tool", style="bold bright_white")
         table.add_column("Status", justify="center", no_wrap=True)
         table.add_column("Purpose", style="dim white")
+        table.add_column("Install Guidance", style="italic yellow")
 
-        for name, path, purpose in tools:
+        for item in tools:
+            name, path, purpose = item[0], item[1], item[2]
+            install_guide = item[3] if len(item) > 3 else ""
             status_text = "[bold green]✔ OK[/bold green]" if path else "[bold red]✖ MISSING[/bold red]"
-            table.add_row(name, status_text, purpose)
+            guide_text = "" if path else install_guide
+            table.add_row(name, status_text, purpose, guide_text)
 
         self.console.print()
         self.console.print(table)

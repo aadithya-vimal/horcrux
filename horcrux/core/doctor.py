@@ -97,13 +97,55 @@ WORDLISTS = [
     "seclists/Discovery/SNMP/common-snmp-community-strings.txt",
 ]
 
+import sys
+
 BASES = [
     Path("/usr/share/wordlists"),
     Path("/usr/share/seclists"),
     Path("/usr/share/SecLists"),
     Path("/opt/SecLists"),
     Path.home() / "SecLists",
+    Path.home() / "wordlists",
+    Path("C:/SecLists"),
+    Path("C:/wordlists"),
 ]
+
+
+INSTALL_GUIDES = {
+    "nmap": {
+        "win32": "winget install Insecure.Nmap  OR  choco install nmap",
+        "linux": "sudo apt install nmap  OR  sudo pacman -S nmap",
+        "darwin": "brew install nmap",
+    },
+    "ffuf": {
+        "win32": "winget install ffuf.ffuf  OR  go install github.com/ffuf/ffuf/v2@latest",
+        "linux": "sudo apt install ffuf  OR  go install github.com/ffuf/ffuf/v2@latest",
+        "darwin": "brew install ffuf",
+    },
+    "nuclei": {
+        "win32": "winget install ProjectDiscovery.Nuclei  OR  go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+        "linux": "sudo apt install nuclei  OR  go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+        "darwin": "brew install nuclei",
+    },
+    "searchsploit": {
+        "win32": "git clone https://gitlab.com/exploit-database/exploitdb.git && add to PATH",
+        "linux": "sudo apt install exploitdb",
+        "darwin": "brew install exploitdb",
+    },
+    "gobuster": {
+        "win32": "go install github.com/OJ/gobuster/v3@latest",
+        "linux": "sudo apt install gobuster",
+        "darwin": "brew install gobuster",
+    },
+}
+
+
+def get_install_instruction(tool_name: str) -> str:
+    platform_key = sys.platform
+    if platform_key not in {"win32", "darwin"}:
+        platform_key = "linux"
+    guide = INSTALL_GUIDES.get(tool_name, {})
+    return guide.get(platform_key, "Check package manager or vendor documentation.")
 
 
 def find_wordlist(name: str):
@@ -116,7 +158,7 @@ def find_wordlist(name: str):
 
 def check_tools():
     tool_rows = [
-        (name, shutil.which(name), purpose)
+        (name, shutil.which(name), purpose, get_install_instruction(name))
         for name, purpose in TOOLS.items()
     ]
     word_rows = [

@@ -17,8 +17,10 @@ class CommandResult:
 
 
 class CommandRunner:
-    def __init__(self, workspace):
+    def __init__(self, workspace, on_start=None, on_finish=None):
         self.workspace = workspace
+        self.on_start = on_start
+        self.on_finish = on_finish
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
@@ -33,6 +35,12 @@ class CommandRunner:
                 args, 127, "", f"{args[0]}: not installed", 0.0, False
             )
         else:
+            if callable(self.on_start):
+                try:
+                    self.on_start(args)
+                except Exception:
+                    pass
+
             try:
                 proc = subprocess.run(
                     args,
@@ -58,6 +66,12 @@ class CommandRunner:
                     duration=time.monotonic() - start,
                     installed=True,
                 )
+            finally:
+                if callable(self.on_finish):
+                    try:
+                        self.on_finish(args, getattr(result, "returncode", -1))
+                    except Exception:
+                        pass
 
         self.workspace.write(f"raw/{artifact}.command", " ".join(args))
         self.workspace.write(f"raw/{artifact}.stdout", result.stdout)

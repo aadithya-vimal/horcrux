@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from horcrux.models import Finding, Severity
+from horcrux.models import Finding, FindingStatus, Severity, ValidationState
 
 
 def enumerate_services(ws, runner, target: str):
@@ -22,18 +22,26 @@ def enumerate_services(ws, runner, target: str):
         findings.append(
             Finding(
                 id="smb-exposed",
-                title="SMB exposed",
+                title="SMB service active",
                 category="smb",
                 severity=Severity.info,
-                confidence=.99,
+                confidence=0.99,
+                status=FindingStatus.verified,
+                validation_state=ValidationState.confirmed,
                 target=target,
-                evidence=["TCP/139 and/or TCP/445 detected."],
+                affected_asset=f"{target}:445",
+                protocol="tcp",
+                port=445 if 445 in ports else 139,
+                source_tool="smb-enum",
+                evidence=["TCP/139 and/or TCP/445 active with responding SMB listeners."],
                 artifacts=[
                     "raw/netexec-smb.stdout",
                     "raw/smbclient.stdout",
                     "raw/enum4linux-ng.stdout",
                 ],
-                next_action="Inspect shares, anonymous access, and domain information.",
+                why_it_matters="SMB exposes network shares, user account names, domain membership, and authentication opportunities.",
+                recommended_next_action="Inspect accessible shares, test anonymous/null sessions, and extract domain SID.",
+                next_action="Inspect accessible shares, test anonymous/null sessions, and extract domain SID.",
             )
         )
 
@@ -55,14 +63,22 @@ def enumerate_services(ws, runner, target: str):
         findings.append(
             Finding(
                 id="ldap-exposed",
-                title="LDAP exposed",
+                title="Active Directory / LDAP RootDSE accessible",
                 category="directory-services",
                 severity=Severity.info,
-                confidence=.99,
+                confidence=0.99,
+                status=FindingStatus.verified,
+                validation_state=ValidationState.confirmed,
                 target=target,
-                evidence=["LDAP service detected."],
+                affected_asset=f"{target}:389",
+                protocol="tcp",
+                port=389 if 389 in ports else 636,
+                source_tool="ldap-enum",
+                evidence=["Responding LDAP listener detected."],
                 artifacts=["raw/ldap-rootdse.stdout"],
-                next_action="Inspect RootDSE and naming contexts.",
+                why_it_matters="LDAP RootDSE exposes forest naming contexts, domain functional level, and domain controller hostname.",
+                recommended_next_action="Query naming contexts and extract Active Directory domain architecture details.",
+                next_action="Query naming contexts and extract Active Directory domain architecture details.",
             )
         )
 
@@ -70,13 +86,21 @@ def enumerate_services(ws, runner, target: str):
         findings.append(
             Finding(
                 id="kerberos-exposed",
-                title="Kerberos exposed",
+                title="Kerberos KDC exposed",
                 category="active-directory",
                 severity=Severity.info,
-                confidence=.99,
+                confidence=0.99,
+                status=FindingStatus.verified,
+                validation_state=ValidationState.confirmed,
                 target=target,
+                affected_asset=f"{target}:88",
+                protocol="tcp",
+                port=88,
+                source_tool="network",
                 evidence=["TCP/88 detected."],
-                next_action="Enumerate the domain and SPN surface.",
+                why_it_matters="Indicates a Kerberos Key Distribution Center (Active Directory Domain Controller or realm).",
+                recommended_next_action="Enumerate user accounts with Kerbrute and check for AS-REP Roastable accounts.",
+                next_action="Enumerate user accounts with Kerbrute and check for AS-REP Roastable accounts.",
             )
         )
 

@@ -40,16 +40,19 @@ def root(
 @app.command()
 def scan(
     target: str = typer.Argument(..., help="Target IP, hostname, or CIDR range"),
+    profile: str = typer.Option("standard", "--profile", "-p", help="Scan profile: quick, standard, deep, network, web, service, intel, local"),
     deep: bool = typer.Option(False, "--deep", help="Run deep port scanning and enumeration"),
     verify: bool = typer.Option(False, "--verify", help="Execute non-destructive verification checks"),
 ):
     """Run full automated attack surface reconnaissance against a target."""
     console = Console()
     banner(console, __version__, duration=0.5)
+    selected_profile = "deep" if deep else profile
     Orchestrator(
         target,
         Workspace(target),
         console,
+        profile=selected_profile,
     ).scan(deep=deep, verify=verify)
 
 

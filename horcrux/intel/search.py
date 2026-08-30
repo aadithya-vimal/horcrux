@@ -6,6 +6,26 @@ import re
 from horcrux.models import ExploitCandidate
 
 
+def is_reliable_software_evidence(software) -> bool:
+    """Only correlate CVEs / SearchSploit when high-quality product + version / CPE evidence exists."""
+    if not software.product or len(software.product.strip()) < 3:
+        return False
+    product = software.product.strip().lower()
+    # Reject generic words or weak guesses
+    blacklisted_products = {
+        "unknown", "tcpwrapped", "ppp", "http", "https", "ssl", "generic",
+        "linux", "windows", "unix", "embedded", "upnp", "router",
+    }
+    if product in blacklisted_products:
+        return False
+    # Confidence must be at least 0.70 and either version or CPE must be present
+    if software.confidence < 0.70:
+        return False
+    if not software.version and not software.cpe:
+        return False
+    return True
+
+
 def searchsploit_workspace(ws, runner):
     state = ws.load()
     candidates = []
@@ -16,12 +36,16 @@ def searchsploit_workspace(ws, runner):
 
     seen = set()
     for index, software in enumerate(state.software):
-        if not software.product:
+        if not is_reliable_software_evidence(software):
             continue
 
-        query = " ".join(
-            item for item in [software.product, software.version] if item
-        ).strip()
+        # Build specific query using product and version
+        parts = [software.product]
+        if software.version:
+            # Clean version string of extra build noise for query
+            v_clean = software.version.split()[0].strip()
+            parts.append(v_clean)
+        query = " ".join(parts).strip()
 
         result = runner.run(
             ["searchsploit", "--json", query],
@@ -51,6 +75,13 @@ def searchsploit_workspace(ws, runner):
                 continue
             seen.add(key)
 
+            # Separate Exploitability, Confidence, Relevance
+            exact_version = bool(software.version and software.version.lower() in title.lower())
+            is_remote = "remote" in title.lower()
+            exploitability = "HIGH (REMOTE)" if is_remote else ("MODERATE (LOCAL)" if "local" in title.lower() else "MANUAL REVIEW")
+            relevance = "CONFIRMED VERSION MATCH" if exact_version else "HIGH-CONFIDENCE CANDIDATE"
+            confidence = 0.90 if exact_version else (0.75 if software.version else 0.55)
+
             candidates.append(
                 ExploitCandidate(
                     title=title,
@@ -58,8 +89,10 @@ def searchsploit_workspace(ws, runner):
                     version=software.version,
                     cve=cve,
                     source=path,
-                    confidence=.75 if software.version else .5,
-                    notes=f"SearchSploit candidate for {query}; verify applicability.",
+                    confidence=confidence,
+                    notes=f"SearchSploit candidate for {query}; evidence source: {software.source}.",
+                    exploitability=exploitability,
+                    relevance=relevance,
                 )
             )
 
