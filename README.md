@@ -1,1513 +1,494 @@
-# HORCRUX
+<div align="center">
 
-> **The fragments reveal the whole.**
+# ⚡ H O R C R U X ⚡
 
-**HORCRUX** is an operator-oriented offensive-security reconnaissance platform designed to turn the chaotic first stages of an assessment into a structured workflow.
+### *The fragments reveal the whole.*
 
-It does not try to replace the tools security operators already know.
+[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&duration=3000&pause=1000&color=DA70D6&center=true&vCenter=true&width=650&lines=THE+FRAGMENTS+REVEAL+THE+WHOLE;AUTONOMOUS+ATTACK+SURFACE+ORCHESTRATION;EVIDENCE-FIRST+OPERATOR+INTELLIGENCE;NEXT+BEST+ACTION+RECOMMENDATION+ENGINE;7+HORCRUX+RELICS+AND+DEATHLY+HALLOWS)](https://git.io/typing-svg)
 
-It **orchestrates them**.
-
-HORCRUX discovers the attack surface, fingerprints services, launches the appropriate enumeration tooling, records evidence, correlates software versions with vulnerability and exploit intelligence, ranks what deserves attention next, and keeps the complete raw evidence available when the operator wants it.
+<p align="center">
+  <img src="https://img.shields.io/badge/HORCRUX-v1.0.0-9932CC?style=for-the-badge&logo=target&logoColor=white" alt="Version" />
+  <img src="https://img.shields.io/badge/Python-3.11+-8A2BE2?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/Platform-Kali%20%7C%20Linux%20%7C%20Windows-00FFFF?style=for-the-badge&logo=linux&logoColor=black" alt="Platform" />
+  <img src="https://img.shields.io/badge/License-MIT-FF00FF?style=for-the-badge" alt="License" />
+  <img src="https://img.shields.io/badge/Terminal-Rich%20%26%20ANSI%20Gradients-00FA9A?style=for-the-badge&logo=gnometerminal&logoColor=black" alt="Terminal UI" />
+</p>
 
 ```text
-                    HORCRUX
-
-        DISCOVER
-            │
-            ▼
-       FINGERPRINT
-            │
-            ▼
-       ENUMERATE
-            │
-            ▼
-        CORRELATE
-            │
-            ▼
-          VERIFY
-            │
-            ▼
-      EXPLOIT REVIEW
-            │
-            ▼
-      OPERATOR ACTION
+  ██╗  ██╗ ██████╗ ██████╗  ██████╗██████╗ ██╗   ██╗██╗  ██╗
+  ██║  ██║██╔═══██╗██╔══██╗██╔════╝██╔══██╗╚██╗ ██╔╝╚██╗██╔╝
+  ███████║██║   ██║██████╔╝██║     ██████╔╝ ╚████╔╝  ╚███╔╝ 
+  ██╔══██║██║   ██║██╔══██╗██║     ██╔══██╗  ╚██╔╝   ██╔██╗ 
+  ██║  ██║╚██████╔╝██║  ██║╚██████╗██║  ██║   ██║   ██╔╝ ██╗
+  ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝
+                        HORCRUX
 ```
 
-It is designed for people who would otherwise spend the first 20–40 minutes of a lab manually typing the same commands into Nmap, Gobuster, FFUF, Nikto, SearchSploit, SMB tools, LDAP tools, Nuclei, and a dozen other utilities.
+**An intelligent, operator-centric offensive-security orchestration platform.**  
+*Transforming the fragmented first stages of security assessments into an evidence-driven, structured workflow.*
 
-HORCRUX is meant to make that process **fast, repeatable, and evidence-driven**.
+[Features](#-key-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture--pipeline) • [Terminal UI](#-terminal-ui--animations) • [Artifacts Gallery](#-horcrux-artifacts-gallery) • [Doctor](#-doctor--prerequisites)
 
----
-
-## Why HORCRUX?
-
-Security tooling is fragmented.
-
-A typical assessment might look like:
-
-```text
-nmap
-    ↓
-"Port 8080 is open"
-    ↓
-curl
-    ↓
-"Looks like a web application"
-    ↓
-whatweb
-    ↓
-"Framework/version identified"
-    ↓
-gobuster
-    ↓
-"Interesting endpoint found"
-    ↓
-manual inspection
-    ↓
-searchsploit
-    ↓
-"Possible exploit"
-    ↓
-manual verification
-```
-
-The knowledge exists.
-
-The tools exist.
-
-The problem is the **workflow between them**.
-
-HORCRUX creates that workflow.
-
-Instead of treating each tool as an isolated command, it builds a persistent picture of the target.
-
-For example:
-
-```text
-TARGET
-│
-├── 22/tcp
-│   └── OpenSSH 9.x
-│
-├── 80/tcp
-│   ├── nginx
-│   ├── login surface
-│   ├── technology fingerprint
-│   └── content discovery
-│
-├── 445/tcp
-│   ├── SMB
-│   ├── domain information
-│   └── share enumeration
-│
-└── SOFTWARE
-    └── nginx 1.x
-         └── SearchSploit / CVE candidates
-```
-
-The result is not merely command output.
-
-It is an **attack-surface model**.
+</div>
 
 ---
 
-# Core Philosophy
-
-HORCRUX follows five principles.
-
-### 1. Orchestrate, don't reinvent
-
-HORCRUX is intentionally built around the tools operators already trust.
-
-It invokes things such as:
-
-* Nmap
-* RustScan
-* Masscan
-* Gobuster
-* FFUF
-* Feroxbuster
-* Nikto
-* WhatWeb
-* WAFW00F
-* Nuclei
-* SMBClient
-* RPCClient
-* Enum4linux-ng
-* NetExec
-* LDAPSearch
-* SNMP tools
-* Hydra
-* SQLMap
-* John
-* Hashcat
-* SearchSploit
-* Metasploit
-* Impacket tooling
-* BloodHound tooling
-* and more
-
-HORCRUX coordinates the workflow around those tools instead of pretending there is one magic scanner that can replace them.
+> [!NOTE]
+> **HORCRUX** does not replace the security tools you trust. It **orchestrates** them. It executes network reconnaissance, service fingerprinting, content discovery, and vulnerability intelligence, recording every byte of raw evidence while presenting a prioritized **Next Best Action** roadmap.
 
 ---
 
-### 2. Evidence first
+## ✦ Orchestration Pipeline
 
-A finding is useful only when it can be traced back to evidence.
+```mermaid
+flowchart TD
+    classDef target fill:#4B0082,stroke:#00FFFF,stroke-width:2px,color:#FFFFFF
+    classDef recon fill:#003366,stroke:#00FFFF,stroke-width:1px,color:#FFFFFF
+    classDef intel fill:#4A0072,stroke:#FF00FF,stroke-width:1px,color:#FFFFFF
+    classDef storage fill:#1A365D,stroke:#00FA9A,stroke-width:2px,color:#FFFFFF
+    classDef action fill:#7A0000,stroke:#FFFF00,stroke-width:2px,color:#FFFFFF
 
-HORCRUX therefore preserves:
+    T([🎯 TARGET]):::target --> N[Nmap TCP & UDP Discovery]:::recon
+    N --> S{Service Fingerprinting}:::recon
 
-* command lines
-* stdout
-* stderr
-* Nmap XML
-* HTTP responses
-* HTTP headers
-* technology fingerprints
-* enumeration output
-* vulnerability output
-* SearchSploit results
-* generated reports
+    S -->|HTTP / HTTPS| W[Web Engine: WhatWeb / FFUF / Nuclei]:::recon
+    S -->|SMB 139 / 445| SMB[SMB Enumeration & Share Auditing]:::recon
+    S -->|LDAP 389 / 636| LDAP[LDAP Domain Dump]:::recon
+    S -->|SSH 22| SSH[SSH Ciphers & Banner Intel]:::recon
+    S -->|Databases / Cache| DB[SQL & Redis Inspection]:::recon
 
-The operator sees the important information by default.
+    W --> E[(📁 WORKSPACE RAW EVIDENCE)]:::storage
+    SMB --> E
+    LDAP --> E
+    SSH --> E
+    DB --> E
 
-The complete raw material remains available underneath.
+    E --> C[SearchSploit & CVE Correlation]:::intel
+    E --> CR[Credential Secret Harvester]:::intel
+    E --> G[Attack Surface Tree Graph]:::intel
 
----
+    C --> A{⚡ NEXT-ACTION ENGINE}:::action
+    CR --> A
+    G --> A
 
-### 3. Don't bury the operator in output
-
-A security tool can easily become unusable by printing 50,000 lines of HTML, Gobuster output, Nmap scripts, and HTTP responses into the terminal.
-
-HORCRUX deliberately separates:
-
-```text
-WHAT MATTERS
-```
-
-from:
-
-```text
-EVERYTHING THE TOOLS RETURNED
-```
-
-The console shows concise findings and actions.
-
-Raw evidence is saved to the workspace and can be requested intentionally.
-
----
-
-### 4. Confidence matters
-
-A software/version match is not automatically proof of vulnerability.
-
-A SearchSploit result is not automatically proof that an exploit works.
-
-A scanner finding is not automatically a compromise.
-
-HORCRUX therefore treats findings and exploit candidates as evidence-backed candidates with confidence and applicability context.
-
-The operator remains responsible for verification.
-
----
-
-### 5. Exploitation is explicit
-
-Reconnaissance should not unexpectedly become destructive execution.
-
-HORCRUX can take the operator through the exploitation decision point, but the final transition into exploit execution remains deliberate.
-
-That makes the tool appropriate for:
-
-* TryHackMe
-* Hack The Box
-* CTFs
-* penetration-testing labs
-* home labs
-* authorized assessments
-
----
-
-# What HORCRUX Actually Does
-
-## Network Discovery
-
-HORCRUX starts with the network.
-
-Depending on mode, it can orchestrate:
-
-```text
-Nmap TCP discovery
-        │
-        ├── service detection
-        ├── version detection
-        ├── default scripts
-        ├── OS hints
-        └── XML evidence
-```
-
-Normal scanning focuses on the common attack surface.
-
-Deep scanning can expand into full TCP discovery.
-
-UDP discovery is also part of the workflow.
-
-The result becomes a normalized service inventory instead of raw Nmap text.
-
-Example:
-
-```text
-PORT      SERVICE       PRODUCT          VERSION
-22/tcp    ssh           OpenSSH          9.x
-80/tcp    http          nginx            1.x
-445/tcp   microsoft-ds
+    A --> O([👑 RANKED OPERATOR ACTIONS]):::action
 ```
 
 ---
 
-# Service-Aware Enumeration
+## ⚡ Key Features
 
-HORCRUX does not treat every open port identically.
-
-The detected service determines the next actions.
-
-## HTTP / HTTPS
-
-When a web service is detected, HORCRUX can perform:
-
-* HTTP probing
-* status detection
-* title extraction
-* redirect inspection
-* header capture
-* technology fingerprinting
-* common sensitive-path checks
-* login-surface detection
-* Git metadata checks
-* environment-file checks
-* content discovery
-* Nuclei integration
-
-Example workflow:
-
-```text
-80/tcp detected
-     │
-     ├── HTTP fingerprint
-     ├── technology detection
-     ├── /login
-     ├── /admin
-     ├── /.git/HEAD
-     ├── /.env
-     ├── robots.txt
-     ├── sitemap.xml
-     └── content discovery
-```
-
-HORCRUX stores the complete responses while keeping normal console output clean.
+* **Real Tool Orchestration**: Transparently delegates work to native Kali/Linux binaries—`nmap`, `ffuf`, `gobuster`, `whatweb`, `nuclei`, `smbclient`, `searchsploit`, and more.
+* **Persistent Workspaces**: Every assessment gets an isolated workspace tracking structured state (`state.json`), raw command logs, headers, and HTTP responses.
+* **Attack Surface Tree Graph**: Interactive Rich visual hierarchy linking targets, open ports, fingerprinted services, vulnerabilities, and leaked credentials.
+* **Prioritized Next Actions**: Algorithmic ranking engine calculating the highest ROI next step based on evidence confidence and attack prerequisites.
+* **Exploit Intelligence**: Correlates software versions with SearchSploit and CVE databases while strictly maintaining operator control over execution.
+* **Horcrux Artifact Gallery**: Built-in showcase of thematic ASCII relics representing the 7 Horcruxes and Deathly Hallows.
+* **Luminous Terminal Aesthetics**: Dynamic color waves, TrueColor gradients, animated sparkle trails, and runic progress spinners.
 
 ---
 
-## SMB / Windows
+## 🚀 Quick Start
 
-When SMB is detected, HORCRUX can orchestrate the surrounding enumeration stack:
+### 1. Installation
 
-```text
-SMB
-│
-├── NetExec
-├── CrackMapExec
-├── SMBClient
-├── RPCClient
-└── Enum4linux-ng
-```
-
-This allows the operator to move naturally from:
-
-```text
-"SMB exists"
-```
-
-towards:
-
-```text
-shares
-domain information
-users
-access conditions
-enumeration evidence
-```
-
----
-
-## LDAP
-
-LDAP exposure can trigger:
-
-* LDAP root discovery
-* RootDSE inspection
-* naming-context discovery
-* directory-service evidence collection
-
----
-
-## Kerberos
-
-Kerberos exposure becomes an explicit attack-surface signal and a candidate for domain/SPN-focused enumeration.
-
----
-
-## FTP
-
-FTP detection can trigger:
-
-* service inspection
-* anonymous-access checks
-* system information enumeration
-
----
-
-## SNMP
-
-SNMP exposure can trigger community-based inspection and system-information enumeration when the appropriate tooling is available.
-
----
-
-## Redis
-
-Redis detection can trigger service inspection and information collection where the client is installed.
-
----
-
-## Other Services
-
-HORCRUX is designed around a service-dispatch architecture, so additional service modules can be added without rewriting the core operator workflow.
-
----
-
-# Web Attack Surface
-
-Web applications are treated as one part of the overall attack surface rather than the entire product.
-
-HORCRUX can invoke multiple discovery engines depending on what's installed:
-
-```text
-FFUF
-Gobuster
-Feroxbuster
-Dirsearch
-```
-
-The operator should not need to manually remember:
-
-```text
-"Which tool should I use?"
-
-```
-
-after identifying an HTTP service.
-
-HORCRUX can select from the available toolchain and preserve the result as workspace evidence.
-
----
-
-# Technology Fingerprinting
-
-HORCRUX extracts technology signals from HTTP responses and headers.
-
-Examples include:
-
-```text
-nginx
-Apache
-IIS
-Gunicorn
-Flask
-Django
-Express
-PHP
-Tomcat
-Spring
-Rails
-WordPress
-Drupal
-GraphQL
-```
-
-Those signals become part of the target's normalized technology inventory.
-
-That information can then contribute to the next-action queue and vulnerability research.
-
----
-
-# Vulnerability Intelligence
-
-One of the most important parts of HORCRUX is the transition from:
-
-```text
-"this service exists"
-```
-
-to:
-
-```text
-"this is the software/version"
-```
-
-and finally:
-
-```text
-"these vulnerability/exploit candidates are worth investigating"
-```
-
-HORCRUX therefore records software discovered from service fingerprinting.
-
-Example:
-
-```text
-Software Inventory
-
-OpenSSH
-Version: 9.x
-Source: Nmap
-Confidence: 97%
-```
-
-That can feed the exploit-intelligence layer.
-
----
-
-# CVE & SearchSploit Intelligence
-
-HORCRUX integrates with **SearchSploit** when it is available.
-
-The workflow becomes:
-
-```text
-Nmap
- │
- └── Software / Version
-          │
-          ▼
-      SearchSploit
-          │
-          ▼
-   Exploit Candidates
-          │
-          ▼
-      Applicability
-          │
-          ▼
-     Operator Review
-```
-
-HORCRUX does **not** treat every SearchSploit hit as automatically exploitable.
-
-Instead, results contain context such as:
-
-* product
-* version
-* CVE when extractable
-* exploit title
-* SearchSploit path
-* confidence
-* applicability notes
-
-Example:
-
-```text
-CVE / SEARCHSPLOIT CANDIDATES
-
-CONFIDENCE   CVE             PRODUCT       VERSION
-----------------------------------------------------------
-75%          CVE-XXXX-YYYY   ExampleApp    1.2.3
-63%          CVE-XXXX-ZZZZ   ExampleApp    1.2.3
-```
-
-The operator decides what gets verified and what gets ignored.
-
----
-
-# Nuclei Integration
-
-HORCRUX can invoke Nuclei against discovered HTTP targets.
-
-That gives the workflow another layer:
-
-```text
-HTTP discovery
-      │
-      ▼
-Technology fingerprint
-      │
-      ▼
-Nuclei templates
-      │
-      ▼
-Potential vulnerabilities
-      │
-      ▼
-Evidence / verification
-```
-
-Nuclei output is stored as an artifact rather than flooding the normal operator interface.
-
----
-
-# Findings Engine
-
-HORCRUX turns observations into structured findings.
-
-Each finding can include:
-
-```text
-ID
-Title
-Category
-Severity
-Confidence
-Status
-Target
-Evidence
-Artifacts
-Reproduction
-Next Action
-```
-
-For example:
-
-```text
-HIGH
-Exposed environment file
-
-Confidence: 99%
-
-Evidence:
-    /.env returned HTTP 200
-
-Artifact:
-    responses/_env.body
-
-Next action:
-    Inspect the response for secrets.
-```
-
-This is significantly more useful than a line saying:
-
-```text
-[200] /.env
-```
-
----
-
-# Prioritized Next Actions
-
-After reconnaissance, HORCRUX builds a queue of suggested actions.
-
-Example:
-
-```text
-NEXT BEST ACTIONS
-
-98  Resolve CVE / SearchSploit candidates
-94  Review web attack surface
-90  Review SMB shares/domain data
-88  Review LDAP/domain data
-87  Review Kerberos enumeration
-82  Review FTP access
-72  Review SSH exposure
-```
-
-This is one of the core ideas behind HORCRUX:
-
-> **Don't just tell the operator what exists. Tell them what deserves attention next.**
-
----
-
-# Local Enumeration
-
-Once an operator has a shell in an authorized environment, HORCRUX can also act as a local-enumeration coordinator.
-
-The local workflow can collect:
-
-```text
-identity
-OS/kernel
-sudo configuration
-SUID binaries
-SGID binaries
-Linux capabilities
-cron
-systemd services
-processes
-network sockets
-mounts
-Docker information
-environment
-```
-
-The goal is not to hide the commands from the operator.
-
-The goal is to make the enumeration:
-
-```text
-repeatable
-persistent
-organized
-searchable
-```
-
----
-
-# Persistent Workspaces
-
-Every target gets its own workspace.
-
-Example:
-
-```text
-workspaces/
-└── 10.10.10.10/
-    ├── state.json
-    ├── raw/
-    ├── responses/
-    ├── headers/
-    └── reports/
-```
-
-This means reconnaissance doesn't disappear when the terminal closes.
-
-The operator can come back later and inspect:
-
-```text
-status
-services
-software
-findings
-next
-creds
-graph
-source
-report
-```
-
----
-
-# Raw Evidence
-
-HORCRUX deliberately keeps raw data available.
-
-For example:
-
-```text
-raw/
-├── nmap-tcp.stdout
-├── nmap-tcp.stderr
-├── nmap-tcp.command
-├── nmap.xml
-├── nmap-udp.stdout
-├── ffuf-80.stdout
-└── nuclei.stdout
-```
-
-HTTP evidence is kept separately:
-
-```text
-responses/
-├── root.body
-├── login.body
-├── admin.body
-├── _env.body
-└── _git_HEAD.body
-```
-
-and:
-
-```text
-headers/
-├── root.txt
-├── login.txt
-└── admin.txt
-```
-
-The normal UI remains clean.
-
----
-
-# Operator Console
-
-Running:
-
+#### Linux / Kali Linux
 ```bash
-horcrux
-```
-
-opens the interactive console.
-
-The intent is closer to an operator environment than a conventional one-shot scanner.
-
-Example:
-
-```text
-horcrux
-```
-
-```text
-horcrux > scan 10.10.10.10
-horcrux > services
-horcrux > findings
-horcrux > next
-horcrux > cve
-horcrux > searchsploit
-horcrux > exploit
-horcrux > report
-```
-
-Useful commands include:
-
-```text
-scan <target>
-scan <target> --deep
-scan <target> --verify
-
-status
-services
-software
-findings
-next
-creds
-graph
-web
-
-cve
-searchsploit
-nuclei
-exploit
-
-local
-
-doctor
-tools
-
-source <artifact>
-report
-
-help
-exit
-```
-
----
-
-# One-Shot Mode
-
-HORCRUX can also be invoked directly.
-
-```bash
-horcrux 10.10.10.10
-```
-
-Deep scan:
-
-```bash
-horcrux 10.10.10.10 --deep
-```
-
-Conservative verification mode:
-
-```bash
-horcrux 10.10.10.10 --verify
-```
-
----
-
-# Doctor
-
-HORCRUX includes a dedicated environment checker.
-
-```bash
-horcrux doctor
-```
-
-It checks the external security-tool ecosystem that HORCRUX can orchestrate.
-
-Examples include:
-
-```text
-nmap
-rustscan
-masscan
-naabu
-
-gobuster
-ffuf
-feroxbuster
-dirsearch
-nikto
-whatweb
-wafw00f
-nuclei
-
-smbclient
-rpcclient
-enum4linux-ng
-netexec
-
-ldapsearch
-ldapdomaindump
-
-snmpwalk
-onesixtyone
-
-hydra
-medusa
-john
-hashcat
-sqlmap
-
-searchsploit
-msfconsole
-msfvenom
-
-impacket tooling
-bloodhound-python
-kerbrute
-evil-winrm
-
-linpeas
-pspy
-lse
-winpeas
-
-chisel
-proxychains4
-
-docker
-kubectl
-helm
-```
-
-The Doctor also checks common offensive-security wordlists.
-
----
-
-# Wordlists
-
-HORCRUX expects a serious operator workstation to have access to useful wordlists.
-
-The Doctor therefore checks for resources from locations such as:
-
-```text
-/usr/share/wordlists
-/usr/share/seclists
-/usr/share/SecLists
-/opt/SecLists
-~/SecLists
-```
-
-The inventory includes common lists for:
-
-### Web content
-
-```text
-common.txt
-big.txt
-raft-small-words.txt
-raft-medium-words.txt
-raft-large-words.txt
-raft-small-directories.txt
-raft-medium-directories.txt
-raft-large-directories.txt
-directory-list-2.3-small.txt
-directory-list-2.3-medium.txt
-directory-list-2.3-big.txt
-quickhits.txt
-```
-
-### DNS
-
-```text
-subdomains-top1million-5000.txt
-subdomains-top1million-20000.txt
-namelist.txt
-```
-
-### Fuzzing
-
-```text
-Generic-SQLi.txt
-XSS-Jhaddix.txt
-```
-
-### Credentials
-
-```text
-rockyou.txt
-10-million-password-list-top-1000.txt
-10-million-password-list-top-10000.txt
-10-million-password-list-top-100000.txt
-```
-
-### Users
-
-```text
-top-usernames-shortlist.txt
-```
-
-The goal is that:
-
-```bash
-horcrux doctor
-```
-
-becomes the first command run on a new operator workstation.
-
----
-
-# Installation
-
-## Windows
-
-HORCRUX can be installed without requiring a global Python installation.
-
-From the repository:
-
-```powershell
-.\install.ps1
-```
-
-Or manually:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -e .
-```
-
-Then:
-
-```powershell
-horcrux --version
-```
-
----
-
-## Linux / macOS
-
-```bash
+git clone https://github.com/aadithya-vimal/horcrux.git
+cd horcrux
 chmod +x install.sh
 ./install.sh
 ```
 
-Or manually:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -e .
+#### Windows (PowerShell)
+```powershell
+git clone https://github.com/aadithya-vimal/horcrux.git
+cd horcrux
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
 ```
 
-Then:
-
+#### Manual Python Setup
 ```bash
-horcrux --version
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ---
 
-# Kali Linux
-
-HORCRUX is particularly suited to a Kali workstation because the external toolchain already exists there.
-
-The repository includes:
-
-```text
-scripts/install_kali.sh
-```
-
-Run:
+### 2. Basic Usage
 
 ```bash
-chmod +x scripts/install_kali.sh
-./scripts/install_kali.sh
+# Launch interactive operator console
+horcrux
+
+# One-shot reconnaissance against a target
+horcrux 10.10.10.10
+
+# Deep port scanning and aggressive enumeration
+horcrux 10.10.10.10 --deep
+
+# Check installed security tools and SecLists wordlists
+horcrux doctor
+
+# View the Horcrux ASCII art relics gallery
+horcrux gallery
 ```
 
-Then:
+---
+
+## 🖥 Terminal UI & Animations
+
+HORCRUX delivers a terminal experience with animated feedback, shimmering headers, and visual data structures.
+
+### Animated Color Banners & Spinners
+
+```text
+  ✦ ᚛ ᚠ ⟦  ▰▰▰▱▱▱▱▱▱▱  ⟧ Mapping TCP/UDP surface... ✦
+  ✔ Mapping TCP/UDP surface
+  ✦ ᚛ ᚢ ⟦  ▰▰▰▰▰▱▱▱▱▱  ⟧ Fingerprinting HTTP :80... ✦
+  ✔ Fingerprinting HTTP :80
+  ✦ ᚛ ᚦ ⟦  ▰▰▰▰▰▰▰▱▱▱  ⟧ Correlating SearchSploit intelligence... ✦
+  ✔ Correlating SearchSploit intelligence
+```
+
+### Live Status Dashboard (`status`)
+
+```text
+╭─────────────────────────────────────────────────────────────────────────────╮
+│ ❖ TARGET WORKSPACE: 10.10.10.10  |  STORAGE: workspaces/10.10.10.10         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+╭ 🌐 SERVICES ╮  ╭ 📦 SOFTWARE ╮  ╭ ⚡ FINDINGS ╮  ╭ 🔑 CREDS ╮  ╭ 🎯 EXPLOITS ╮
+│      3      │  │      2      │  │      3      │  │    2     │  │      1      │
+│    Open     │  │ Identified  │  │   Recorded  │  │ Captured │  │ Correlated  │
+╰─────────────╯  ╰─────────────╯  ╰─────────────╯  ╰──────────╯  ╰─────────────╯
+
+╭──────────────────────── ⬡ DETECTED WEB TECHNOLOGIES ────────────────────────╮
+│  nginx  •  PHP 8.1  •  WordPress 6.2                                        │
+╰─────────────────────────────────────────────────────────────────────────────╯
+
+╔═══════════════════════════ ★ NEXT BEST ACTION ★ ════════════════════════════╗
+║  ⚡ Enumerate readable SMB shares                                           ║
+║  Reason: Anonymous SMB connection verified  • Score: 96                     ║
+╚═════════════════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+### Interactive Attack Surface Graph (`graph`)
+
+```text
+╭────────────────── ✦ ATTACK SURFACE GRAPH — 10.10.10.10 ✦ ───────────────────╮
+│                                                                             │
+│  ❖ TARGET 10.10.10.10                                                       │
+│  ├── 🌐 OPEN SERVICES (3)                                                   │
+│  │   ├── ● 22/TCP ssh (OpenSSH 8.9p1)                                       │
+│  │   │   └──  ● LOW  SSH Server Supports Weak Ciphers                       │
+│  │   ├── ● 80/TCP http (nginx 1.18.0)                                       │
+│  │   │   └──  ◈ MEDIUM  WordPress xmlrpc.php Exposed                        │
+│  │   └── ● 445/TCP microsoft-ds (Samba 4.15.5)                              │
+│  │       └──  ▲ HIGH  Anonymous SMB Share Access                            │
+│  ├── ⚡ DETECTED FINDINGS (3)                                               │
+│  │   ├──  ▲ HIGH  Anonymous SMB Share Access (verified)                     │
+│  │   ├──  ◈ MEDIUM  WordPress xmlrpc.php Exposed (suspected)                │
+│  │   └──  ● LOW  SSH Server Supports Weak Ciphers (suspected)               │
+│  ├── 🔑 CREDENTIALS (2)                                                     │
+│  │   ├── anonymous (smb) from smbclient                                     │
+│  │   └── admin (web) from wp-config.php.bak                                 │
+│  └── ⬡ WEB TECHNOLOGIES (3)                                                 │
+│      ├── nginx                                                              │
+│      ├── PHP 8.1                                                            │
+│      └── WordPress 6.2                                                      │
+│                                                                             │
+╰─────────────────────────────────────────────────────────────────────────────╯
+```
+
+---
+
+### Findings with Confidence Meters (`findings`)
+
+```text
+                      ✦ SECURITY FINDINGS — 10.10.10.10 ✦                      
+┌────────────┬──────────────┬──────────────────────────────────┬──────────────┐
+│  Severity  │  Confidence  │ Title                            │    Status    │
+├────────────┼──────────────┼──────────────────────────────────┼──────────────┤
+│   ▲ HIGH   │ ████████ 95% │ Anonymous SMB Share Access       │  ✔ VERIFIED  │
+│  ◈ MEDIUM  │ ███████░ 85% │ WordPress xmlrpc.php Exposed     │ ❓ SUSPECTED │
+│    ● LOW   │ █████░░░ 60% │ SSH Server Supports Weak Ciphers │ ❓ SUSPECTED │
+└────────────┴──────────────┴──────────────────────────────────┴──────────────┘
+```
+
+---
+
+### Prioritized Next Actions (`next`)
+
+```text
+                  ✦ PRIORITIZED NEXT ACTIONS — 10.10.10.10 ✦                   
+┌──────┬───────┬──────────────────────────────┬───────────────────────────────┐
+│ Rank │ Score │ Action                       │ Reason / Prerequisite         │
+├──────┼───────┼──────────────────────────────┼───────────────────────────────┤
+│  ①   │  96   │ Enumerate readable SMB       │ Anonymous SMB connection      │
+│      │       │ shares                       │ verified                      │
+│  ②   │  92   │ Test WordPress admin         │ Recovered admin password from │
+│      │       │ credentials                  │ backup                        │
+└──────┴───────┴──────────────────────────────┴───────────────────────────────┘
+```
+
+---
+
+## 🏛 Horcrux Artifacts Gallery
+
+HORCRUX weaves the lore of ancient artifacts into its terminal identity. View the full gallery at any time with `horcrux gallery`.
+
+<details>
+<summary><b>View Artifacts (The 7 Horcruxes & Relics)</b></summary>
+
+### 1. The Elder Wand · *Deathly Hallow*
+```text
+           · ✦ ·
+             │
+            ░█░
+             │
+           ▓███▓
+          ░█████░
+           ▓███▓
+             │
+            ╲█╱
+           ░▓█▓░
+             │
+           ▓███▓
+             ▾
+```
+> *The Deathstick. Wand of Destiny. Unyielding conduit of raw power.*
+
+---
+
+### 2. Tom Riddle's Diary · *Horcrux I*
+```text
+         ._____________________.
+        /  _________________  /|
+       /  /  T.M. RIDDLE   / / |
+      /  /                / /  |
+     /  /     ╭──────╮   / /   |
+    |  |      │ ✦ ✦  │  | |    |
+    |  |      │  ▼   │  | |    |
+    |  |      ╰──────╯  | |   /
+    |  |   ink bleeds   | |  /
+    |  |________________|/  /
+    |______________________/
+```
+> *Blank parchment drenched in memory and dark enchantments.*
+
+---
+
+### 3. Marvolo Gaunt's Ring · *Horcrux II*
+```text
+             .─────────.
+           .'    ___    '.
+          /    .'   '.    \
+         |    /   ▲   \    |
+         |   |  / ┃ \  |   |
+         |    \ ━━┻━━ /    |
+          \    '.___.'    /
+           '.           .'
+             '─────────'
+              │ ✦ ✦ ✦ │
+               \_____/
+```
+> *Ancient gold band holding the Resurrection Stone signet.*
+
+---
+
+### 4. Salazar Slytherin's Locket · *Horcrux III*
+```text
+              ╱╲_____╱╲
+             │  \___/  │
+              ╲   │   ╱
+             .─┴──────┴─.
+            /  ╭─────╮   \
+           |   │  S  │    |
+           |   │ ╭─╯ │    |
+           |   │ ╰─╮ │    |
+            \  ╰─────╯   /
+             '.   ✦   .'
+               '─────'
+```
+> *Heavy golden medallion emblazoned with the serpentine crest.*
+
+---
+
+### 5. Helga Hufflepuff's Cup · *Horcrux IV*
+```text
+           \╲  ✦ ✦ ✦  ╱/
+            \╲_______╱/
+             |       |
+            (| ╭───╮ |)
+             | │ ✦ │ |
+             | ╰───╯ |
+              \     /
+               )   (
+              /     \
+             /_______\
+```
+> *Two-handled golden chalice engraved with the steadfast badger.*
+
+---
+
+### 6. Rowena Ravenclaw's Diadem · *Horcrux V*
+```text
+              .─.     .─.
+             /   \ ✦ /   \
+            /  /\ \ / /\  \
+           /  /  \_V_/  \  \
+          /  /           \  \
+         (__(    ╭───╮    )__)
+              \  │ ♦ │  /
+               \ ╰───╯ /
+                '─────'
+```
+> *Wit beyond measure is man's greatest treasure.*
+
+---
+
+### 7. Nagini the Serpent · *Horcrux VI*
+```text
+             .-==-._
+            /  ✦ ✦  \
+           |   (oo)  |
+            \   ==  /
+             '._  _.'
+                ||
+            _.-'  '-._
+          .'  _...._  '.
+         /  .'      '.  \
+        |  /          \  |
+         \ '.________.' /
+          '._        _.'
+             `''''''`
+```
+> *The great venomous serpent woven into Voldemort's soul.*
+
+---
+
+### 8. The Seventh Fragment · *The Scar*
+```text
+              \     /
+               \   /
+                \ /
+                 V
+                / \
+               /   \
+                 \
+             .---.   .---.
+            /     \ /     \
+           |   O   X   O   |
+            \     / \     /
+             '---'   '---'
+```
+> *The curse that rebounded, leaving a lightning bolt etched in fate.*
+
+---
+
+### 9. The Deathly Hallows · *Master of Death*
+```text
+                 ▲
+                /│\
+               / │ \
+              /  │  \
+             /  ╭●╮  \
+            /  │ │ │  \
+           /   │ │ │   \
+          /     ╰●╯     \
+         /_______│_______\
+```
+> *The Wand, the Stone, and the Cloak. Together, conquerors of mortality.*
+
+</details>
+
+---
+
+## 🩺 Doctor & Prerequisites
+
+HORCRUX includes an automated environment auditor to check for external binaries and wordlists:
 
 ```bash
 horcrux doctor
 ```
 
----
-
-# Example Operator Workflow
-
-Suppose you receive:
-
 ```text
-10.10.10.42
+                         ✦ HORCRUX TOOL ECOSYSTEM AUDIT ✦                         
+┌────────────────────────┬────────────┬───────────────────────────────────────┐
+│ Tool                   │   Status   │ Purpose                               │
+├────────────────────────┼────────────┼───────────────────────────────────────┤
+│ nmap                   │    ✔ OK    │ Network discovery                     │
+│ rustscan               │ ✖ MISSING  │ Fast TCP discovery                    │
+│ ffuf                   │    ✔ OK    │ Web fuzzing                           │
+│ gobuster               │    ✔ OK    │ Web/content/DNS discovery             │
+│ nuclei                 │    ✔ OK    │ Template-based vulnerability checks   │
+│ whatweb                │    ✔ OK    │ Web fingerprinting                    │
+│ smbclient              │    ✔ OK    │ SMB enumeration                       │
+│ searchsploit           │    ✔ OK    │ Exploit/CVE lookup                    │
+│ netexec                │ ✖ MISSING  │ SMB/LDAP/Kerberos/WinRM               │
+└────────────────────────┴────────────┴───────────────────────────────────────┘
+
+                         ✦ WORDLIST DISCOVERY AUDIT ✦                          
+┌───────────────────────────────────────────────┬───────────┬─────────────────┐
+│ Wordlist                                      │  Status   │ Location / Path │
+├───────────────────────────────────────────────┼───────────┼─────────────────┤
+│ rockyou.txt                                   │  ✔ FOUND  │ /usr/share/w... │
+│ seclists/Discovery/Web-Content/common.txt     │  ✔ FOUND  │ /usr/share/s... │
+│ seclists/Discovery/Web-Content/raft-medium... │  ✔ FOUND  │ /usr/share/s... │
+└───────────────────────────────────────────────┴───────────┴─────────────────┘
 ```
 
-Start:
+> [!TIP]
+> Missing tools do **not** break HORCRUX. The orchestrator automatically skips unavailable tools or falls back to alternate discovery mechanisms.
 
+---
+
+## 📂 Workspace Structure
+
+Every assessment is cleanly quarantined under its target identifier:
+
+```text
+workspaces/
+└── 10.10.10.10/
+    ├── state.json           # Machine-readable attack state
+    ├── commands.log         # Complete log of executed commands
+    ├── raw/                 # Raw tool outputs (nmap.xml, stdout, stderr)
+    │   ├── nmap-tcp.stdout
+    │   ├── nmap.xml
+    │   └── ffuf-80.stdout
+    ├── responses/           # Full HTTP response bodies
+    │   ├── root.body
+    │   └── wp-login.body
+    ├── headers/             # Raw HTTP response headers
+    └── reports/             # Generated Markdown engagement reports
+```
+
+To retrieve raw artifacts directly from the terminal without polluting your console:
 ```bash
-horcrux
-```
-
-Then:
-
-```text
-horcrux > scan 10.10.10.42
-```
-
-HORCRUX performs the initial discovery.
-
-You then inspect:
-
-```text
-horcrux > services
-```
-
-You might discover:
-
-```text
-22/tcp   ssh
-80/tcp   http
-445/tcp  microsoft-ds
-```
-
-Next:
-
-```text
-horcrux > findings
-```
-
-Then:
-
-```text
-horcrux > next
-```
-
-HORCRUX may now suggest:
-
-```text
-Review web attack surface
-Review SMB shares/domain data
-Resolve CVE / SearchSploit candidates
-Review SSH exposure
-```
-
-Then:
-
-```text
-horcrux > cve
-```
-
-The version inventory is passed through SearchSploit.
-
-Then:
-
-```text
-horcrux > exploit
-```
-
-The operator gets the candidate exploit intelligence in one place.
-
-Finally:
-
-```text
-horcrux > report
-```
-
-produces the assessment report.
-
----
-
-# Designed Around Real Tools
-
-HORCRUX is deliberately not a closed ecosystem.
-
-If a tool is already installed and useful, HORCRUX should be able to invoke it.
-
-The architecture is designed around a simple pattern:
-
-```text
-                 HORCRUX
-                    │
-        ┌───────────┼───────────┐
-        │           │           │
-      NMAP        HTTP        SMB
-        │           │           │
-     Scanner      FFUF      NetExec
-     Scripts     Gobuster    RPCClient
-     Version      Nuclei    Enum4linux
-        │           │           │
-        └───────────┼───────────┘
-                    │
-              NORMALIZED DATA
-                    │
-          ┌─────────┼─────────┐
-          │         │         │
-       FINDINGS    CVEs    ACTIONS
-          │         │         │
-          └─────────┼─────────┘
-                    │
-             OPERATOR REVIEW
+horcrux source raw/nmap.xml
+horcrux source responses/root.body
 ```
 
 ---
 
-# Architecture
+## 🛡 Responsible Use
 
-The current codebase is intentionally small.
-
-```text
-horcrux/
-│
-├── horcrux/
-│   ├── cli.py
-│   │
-│   ├── models.py
-│   │
-│   ├── core/
-│   │   ├── doctor.py
-│   │   ├── intel.py
-│   │   ├── orchestrator.py
-│   │   ├── parsers.py
-│   │   ├── runner.py
-│   │   └── storage.py
-│   │
-│   ├── intel/
-│   │   └── search.py
-│   │
-│   ├── modules/
-│   │   ├── local.py
-│   │   ├── network.py
-│   │   ├── services.py
-│   │   └── web/
-│   │       ├── discovery.py
-│   │       └── scanner.py
-│   │
-│   ├── reporting/
-│   │   └── reports.py
-│   │
-│   └── ui/
-│       ├── ascii.py
-│       └── console.py
-│
-├── ascii_assets/
-├── scripts/
-├── tests/
-├── install.ps1
-├── install.sh
-├── pyproject.toml
-└── requirements.txt
-```
-
-The separation is intentional:
-
-```text
-CLI
- ↓
-ORCHESTRATOR
- ↓
-MODULES
- ↓
-RUNNER
- ↓
-REAL EXTERNAL TOOLS
- ↓
-PARSERS
- ↓
-NORMALIZED STATE
- ↓
-FINDINGS / INTEL / REPORTING
-```
+> [!CAUTION]
+> **HORCRUX** is designed exclusively for authorized penetration testing, security assessments, CTFs, and educational training in controlled lab environments (Hack The Box, TryHackMe, Proving Grounds, home labs). Operators must obtain explicit authorization before testing any network or system.
 
 ---
 
-# UI
+## 📜 License
 
-HORCRUX keeps the interface intentionally terminal-native.
+Distributed under the **MIT License**. See [LICENSE](LICENSE) for more information.
 
-Running:
+<div align="center">
 
-```bash
-horcrux
-```
+**⚡ The fragments reveal the whole. ⚡**
 
-shows the large animated:
-
-```text
-HORCRUX
-```
-
-title.
-
-The Elder Wand is displayed as the single additional graphic.
-
-The title animation is cosmetic; it does not interfere with the operator console.
-
-`--version` uses the same presentation:
-
-```bash
-horcrux --version
-```
-
-The UI is designed to feel like an operator tool rather than a generic Python CLI.
-
----
-
-# Output Philosophy
-
-HORCRUX separates three things:
-
-### Operator output
-
-The important information.
-
-```text
-[HIGH] Exposed environment file
-[INFO] SMB exposed
-[INFO] Login surface identified
-```
-
-### Evidence
-
-The actual tool responses and HTTP artifacts.
-
-```text
-workspaces/<target>/raw/
-workspaces/<target>/responses/
-workspaces/<target>/headers/
-```
-
-### Intelligence
-
-The interpreted data:
-
-```text
-services
-software
-findings
-credentials
-CVE candidates
-exploit candidates
-next actions
-```
-
-This separation keeps the tool usable when the underlying scanners become noisy.
-
----
-
-# Reporting
-
-Run:
-
-```text
-report
-```
-
-to generate a Markdown report.
-
-The report includes:
-
-* target
-* service inventory
-* software inventory
-* findings
-* confidence
-* evidence
-* CVE/SearchSploit candidates
-
-The workspace remains the authoritative evidence store.
-
----
-
-# Who Is HORCRUX For?
-
-HORCRUX is built for:
-
-### CTF players
-
-Reduce repetitive recon and get to the interesting parts faster.
-
-### TryHackMe / Hack The Box operators
-
-Run a standardized discovery workflow across rooms instead of reinventing the first 10 commands every time.
-
-### Penetration testers
-
-Create a repeatable starting workflow and preserve evidence automatically.
-
-### Security students
-
-Learn how different tools fit together instead of learning them as isolated commands.
-
-### Security researchers
-
-Build a structured workspace around reconnaissance and vulnerability research.
-
----
-
-# What HORCRUX Is Not
-
-HORCRUX is not intended to be:
-
-* an invisible autonomous attacker
-* a replacement for Nmap
-* a replacement for Metasploit
-* a vulnerability database
-* an exploit repository
-* a magic "press one button and own the machine" framework
-
-The value is the **operator workflow connecting those capabilities**.
-
----
-
-# Current Capability
-
-The current release provides the foundation for:
-
-```text
-REAL NETWORK DISCOVERY
-        ↓
-SERVICE FINGERPRINTING
-        ↓
-SERVICE-SPECIFIC ENUMERATION
-        ↓
-WEB DISCOVERY
-        ↓
-TECHNOLOGY IDENTIFICATION
-        ↓
-VULNERABILITY INTELLIGENCE
-        ↓
-SEARCHSPLOIT
-        ↓
-NUCLEI
-        ↓
-FINDINGS
-        ↓
-NEXT ACTIONS
-        ↓
-EXPLOIT REVIEW
-        ↓
-REPORT
-```
-
-It is deliberately designed so additional enumeration and exploitation modules can be added without changing the operator interface.
-
----
-
-# Responsible Use
-
-HORCRUX is an offensive-security tool.
-
-Use it only against:
-
-* systems you own
-* systems you are explicitly authorized to test
-* penetration-testing engagements where you have permission
-* CTFs
-* TryHackMe
-* Hack The Box
-* authorized training environments
-
-Do not use HORCRUX to scan or exploit systems without authorization.
-
----
-
-# Contributing
-
-HORCRUX is designed around small, composable modules.
-
-A useful contribution might be:
-
-```text
-new service module
-new parser
-new detection signature
-new reporting format
-new tool integration
-new doctor check
-new wordlist detection
-new finding type
-```
-
-The important rule is:
-
-> **Add intelligence to the workflow, not just another command wrapper.**
-
----
-
-# License
-
-See the repository license.
-
----
-
-# The Goal
-
-HORCRUX is ultimately trying to answer one question:
-
-> **"I have a target. What should I do next?"**
-
-Not:
-
-> "Which 37 commands do I remember?"
-
-Not:
-
-> "Where did I save that Nmap output?"
-
-Not:
-
-> "Was that SearchSploit result actually relevant?"
-
-Not:
-
-> "Which wordlist did I use last time?"
-
-The operator should be able to start with:
-
-```bash
-horcrux
-```
-
-and progressively move from:
-
-```text
-UNKNOWN TARGET
-```
-
-to:
-
-```text
-KNOWN ATTACK SURFACE
-```
-
-to:
-
-```text
-EVIDENCE-BACKED FINDINGS
-```
-
-to:
-
-```text
-CVE / EXPLOIT INTELLIGENCE
-```
-
-to:
-
-```text
-OPERATOR DECISION
-```
-
-That is HORCRUX.
-
-**The fragments reveal the whole.**
+</div>
