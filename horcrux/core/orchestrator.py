@@ -9,7 +9,7 @@ from horcrux.modules.network import run_network
 from horcrux.modules.services import enumerate_services
 from horcrux.modules.web.discovery import run as web_discovery
 from horcrux.modules.web.scanner import WEB_PORTS, scan_http
-from horcrux.ui.ascii import loading
+from horcrux.ui.ascii import loading, fanfare
 
 
 class Orchestrator:
@@ -81,7 +81,7 @@ class Orchestrator:
             )
 
         self.derive_actions()
-        self.console.print("[bold green]✓ Scan complete.[/bold green]")
+        fanfare(self.console, f"SCAN COMPLETE: {self.target}")
 
     def derive_actions(self):
         state = self.workspace.load()
