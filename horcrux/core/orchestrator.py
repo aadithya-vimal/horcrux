@@ -116,7 +116,17 @@ class Orchestrator:
             progress.start_stage("intel")
             if profile.cve_correlation:
                 from horcrux.intel.search import searchsploit_workspace
-                searchsploit_workspace(self.workspace, runner)
+                candidates = searchsploit_workspace(self.workspace, runner)
+                # If AI is configured, triage top candidates
+                try:
+                    from horcrux.intel.ai.manager import AIManager
+                    ai_mgr = AIManager()
+                    if ai_mgr.is_enabled and ai_mgr.get_provider() and candidates:
+                        state = self.workspace.load()
+                        triaged = ai_mgr.triage_exploits(state, candidates)
+                        self.workspace.set_exploits(triaged)
+                except Exception:
+                    pass
             else:
                 progress.skip_stage("intel", "Gated: requires explicit operator intel profile")
             progress.complete_stage("intel")
@@ -136,7 +146,7 @@ class Orchestrator:
                 Action(
                     id="cve",
                     title="Resolve CVE / SearchSploit candidates",
-                    reason="Versioned software was identified",
+                    reason="Versioned software was identified on target",
                     score=98,
                 )
             )
@@ -145,8 +155,8 @@ class Orchestrator:
             actions.append(
                 Action(
                     id="web",
-                    title="Review web attack surface",
-                    reason="HTTP service detected",
+                    title="Review web attack surface & endpoints",
+                    reason="HTTP/HTTPS services detected",
                     score=94,
                 )
             )
@@ -155,8 +165,8 @@ class Orchestrator:
             actions.append(
                 Action(
                     id="smb",
-                    title="Review SMB shares/domain data",
-                    reason="SMB exposed",
+                    title="Inspect SMB shares & null sessions",
+                    reason="SMB listener exposed on port 445/139",
                     score=90,
                 )
             )
@@ -165,8 +175,8 @@ class Orchestrator:
             actions.append(
                 Action(
                     id="ldap",
-                    title="Review LDAP/domain data",
-                    reason="LDAP exposed",
+                    title="Query LDAP naming contexts & domain level",
+                    reason="Active Directory LDAP service reachable",
                     score=88,
                 )
             )
@@ -175,8 +185,8 @@ class Orchestrator:
             actions.append(
                 Action(
                     id="kerberos",
-                    title="Review Kerberos enumeration",
-                    reason="Kerberos exposed",
+                    title="Enumerate Kerberos accounts & AS-REP roasting",
+                    reason="Kerberos KDC port 88 identified",
                     score=87,
                 )
             )
@@ -185,10 +195,25 @@ class Orchestrator:
             actions.append(
                 Action(
                     id="credentials",
-                    title="Review credential reuse",
-                    reason="Credentials were recovered",
-                    score=97,
+                    title="Test credential reuse across exposed services",
+                    reason=f"{len(state.credentials)} credential-like token(s) recovered",
+                    score=99,
                 )
             )
 
+        # AI contextual synthesis if enabled
+        try:
+            from horcrux.intel.ai.manager import AIManager
+            ai_mgr = AIManager()
+            if ai_mgr.is_enabled and ai_mgr.get_provider():
+                actions = ai_mgr.rank_actions(state, actions)
+                paths = ai_mgr.synthesize_attack_paths(state)
+                if paths:
+                    st = self.workspace.load()
+                    st.attack_paths = paths
+                    self.workspace.save(st)
+        except Exception:
+            pass
+
         self.workspace.set_actions(actions)
+
