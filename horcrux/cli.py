@@ -74,6 +74,37 @@ def console():
     ConsoleApp().run()
 
 
+@app.command()
+def settings(
+    ctx: typer.Context,
+):
+    """View and configure AI providers, keys, and default models."""
+    args = ["settings"] + list(ctx.args)
+    ConsoleApp().settings_cmd(args)
+
+
+@app.command()
+def report(
+    target: str = typer.Argument(..., help="Target workspace name to generate report for"),
+):
+    """Generate Markdown engagement report for target workspace."""
+    from horcrux.reporting.reports import markdown
+    ws = Workspace(target)
+    out = markdown(ws)
+    Console().print(f"[bold green]✔ Report written to:[/bold green] {out}")
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Question to ask AI security analyst"),
+    target: str = typer.Option("ready", "--target", "-t", help="Target workspace context"),
+):
+    """Query the HORCRUX AI security analyst with target context."""
+    app_inst = ConsoleApp()
+    app_inst.workspace = Workspace(target)
+    app_inst.ask_cmd(["ask", question])
+
+
 @app.command(name="gallery")
 def gallery_cmd():
     """Display the Horcrux ASCII art gallery and relics."""
@@ -88,6 +119,7 @@ def artifacts_cmd():
 
 KNOWN_COMMANDS = {
     "scan", "doctor", "tools", "console", "gallery", "artifacts",
+    "settings", "report", "ask",
     "--help", "-h", "--version", "-v",
 }
 
@@ -107,3 +139,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

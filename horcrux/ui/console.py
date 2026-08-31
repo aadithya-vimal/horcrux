@@ -14,11 +14,14 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from horcrux.core.doctor import check_tools
+from horcrux.core.doctor import check_tools, CATEGORIES
 from horcrux.core.intel import run_nuclei
 from horcrux.core.runner import CommandRunner
+from horcrux.core.settings import AVAILABLE_MODELS, DEFAULT_MODELS, SettingsManager, mask_key
 from horcrux.core.storage import Workspace
+from horcrux.intel.ai.manager import AIManager
 from horcrux.intel.search import searchsploit_workspace
+from horcrux.models import AuditStatus, ValidationState
 from horcrux.modules.local import enumerate_linux
 from horcrux.reporting.reports import markdown
 from horcrux.core.orchestrator import Orchestrator
@@ -36,7 +39,7 @@ if sys.platform == "win32":
 
 
 def get_severity_badge(severity_val: str) -> str:
-    sev = severity_val.lower()
+    sev = str(severity_val).lower()
     if sev == "critical":
         return "[bold white on red] ✖ CRITICAL [/]"
     elif sev == "high":
@@ -60,7 +63,7 @@ def get_confidence_meter(confidence: float) -> str:
 
 
 def get_status_badge(status_val: str) -> str:
-    st = status_val.lower()
+    st = str(status_val).lower()
     if st == "verified":
         return "[bold green]✔ VERIFIED[/bold green]"
     elif st == "exploited":
@@ -72,10 +75,48 @@ def get_status_badge(status_val: str) -> str:
     return f"[dim]{status_val}[/dim]"
 
 
+def get_audit_badge(status_val: str) -> str:
+    st = str(status_val).upper()
+    if st == "HARDENED":
+        return "[bold green]🛡 HARDENED[/bold green]"
+    elif st == "AUDITED":
+        return "[bold cyan]✔ AUDITED[/bold cyan]"
+    elif st == "SUSPICIOUS":
+        return "[bold yellow]▲ SUSPICIOUS[/bold yellow]"
+    elif st == "DISMISSED":
+        return "[dim]✖ DISMISSED[/dim]"
+    return f"[dim]{status_val}[/dim]"
+
+
+def get_validation_badge(val_state: str) -> str:
+    vs = str(val_state).upper()
+    if vs == "CONFIRMED":
+        return "[bold green]CONFIRMED[/bold green]"
+    elif vs == "LIKELY":
+        return "[bold yellow]LIKELY[/bold yellow]"
+    elif vs == "POTENTIAL":
+        return "[dim yellow]POTENTIAL[/dim yellow]"
+    elif vs == "FALSE_POSITIVE":
+        return "[dim red]FALSE_POSITIVE[/dim red]"
+    return f"[dim cyan]{val_state}[/dim cyan]"
+
+
+def get_exploit_decision_badge(relevance: str, decision: str = "") -> str:
+    tag = (decision or relevance).upper()
+    if "CONFIRMED" in tag or "HIGHLY" in tag:
+        return "[bold green]★ HIGHLY RELEVANT[/bold green]"
+    elif "CANDIDATE" in tag or "POTENTIAL" in tag:
+        return "[bold yellow]◈ POTENTIAL[/bold yellow]"
+    elif "REJECTED" in tag or "MISMATCH" in tag:
+        return "[dim red]✖ REJECTED[/dim red]"
+    return f"[dim cyan]{tag}[/dim cyan]"
+
+
 class ConsoleApp:
     def __init__(self):
         self.console = Console()
         self.workspace: Workspace | None = None
+        self.ai_manager = AIManager()
 
     def print_help(self):
         grid = Table.grid(padding=(0, 2))
@@ -84,10 +125,11 @@ class ConsoleApp:
 
         categories = [
             (
-                "⚡ RECONNAISSANCE",
+                "⚡ RECONNAISSANCE & ATTACK SURFACE",
                 [
-                    ("scan <target> [--deep] [--verify]", "Full automated attack surface discovery"),
+                    ("scan <target> [--profile <name>] [--deep] [--verify]", "Full automated attack surface discovery"),
                     ("status", "Display current workspace metrics & indicators"),
+                    ("surface", "Network attack surface (open ports & protocols)"),
                     ("services", "Service inventory with protocols and versions"),
                     ("software", "Software & framework detection breakdown"),
                     ("web", "Web attack surface and technology fingerprinting"),
@@ -96,28 +138,40 @@ class ConsoleApp:
             (
                 "🎯 INTELLIGENCE & CORRELATION",
                 [
-                    ("findings", "Security findings with evidence & confidence meters"),
+                    ("findings", "Security findings with severity & confidence meters"),
+                    ("inspect <id>", "Deep-dive inspection of finding evidence & reproduction"),
+                    ("audit", "Audited and verified hardened security controls"),
                     ("next", "Ranked Next Best Actions prioritized by confidence"),
                     ("creds", "Recovered credentials with masked secrets"),
                     ("graph", "Interactive attack surface graph visualization"),
                     ("cve / searchsploit", "Correlate software with known exploit candidates"),
+                    ("exploit", "Review actionable exploit candidates & AI decisions"),
+                    ("intel", "Execute exploit correlation & AI triage pipeline"),
                     ("nuclei", "Execute targeted Nuclei templates against web targets"),
+                ]
+            ),
+            (
+                "🤖 AI ASSISTANT & SETTINGS",
+                [
+                    ("ask <question>", "Query AI security analyst with workspace context"),
+                    ("ai [status|enable|disable|usage|clear-cache]", "Manage AI engine, model, and cache"),
+                    ("settings", "Interactive settings & provider configuration"),
                 ]
             ),
             (
                 "🛡 EXPLOIT & POST-EXPLOITATION",
                 [
-                    ("exploit", "Review actionable exploit candidates"),
                     ("local", "Perform Linux local privilege escalation checks"),
                 ]
             ),
             (
-                "🛠 UTILITIES & VISUALS",
+                "🛠 UTILITIES & ARTIFACTS",
                 [
-                    ("doctor", "Audit installed tools and Kali SecLists wordlists"),
+                    ("doctor", "Audit installed tools, categories, wordlists, and AI"),
                     ("tools", "Fast check of external binary availability"),
                     ("artifacts / gallery", "View the Horcrux ASCII art gallery"),
                     ("source <artifact>", "Inspect raw tool output or response body"),
+                    ("raw <module>", "Inspect raw output file for specific module"),
                     ("report", "Generate structured Markdown engagement report"),
                     ("clear", "Clear terminal screen"),
                     ("exit / quit", "Leave the Horcrux console"),
@@ -197,6 +251,14 @@ class ConsoleApp:
             show_gallery(self.console)
             return
 
+        if command == "settings":
+            self.settings_cmd(args)
+            return
+
+        if command == "ai":
+            self.ai_cmd(args)
+            return
+
         if command == "scan":
             if len(args) < 2:
                 raise ValueError("usage: scan <target> [--profile <name>] [--deep] [--verify]")
@@ -242,14 +304,26 @@ class ConsoleApp:
         if command == "status":
             self.status()
 
+        elif command == "surface":
+            self.surface()
+
         elif command == "services":
             self.services()
 
         elif command == "software":
             self.software()
 
+        elif command == "audit":
+            self.audit()
+
         elif command == "findings":
             self.findings()
+
+        elif command == "inspect":
+            self.inspect_finding(args)
+
+        elif command == "ask":
+            self.ask_cmd(args)
 
         elif command == "next":
             self.next_actions()
@@ -271,6 +345,9 @@ class ConsoleApp:
                     CommandRunner(self.workspace),
                 )
             )
+
+        elif command == "intel":
+            self.intel()
 
         elif command == "nuclei":
             self.nuclei()
@@ -297,6 +374,9 @@ class ConsoleApp:
                 )
             )
 
+        elif command == "raw":
+            self.raw_cmd(args)
+
         elif command == "report":
             report_path = markdown(self.workspace)
             self.console.print(
@@ -310,6 +390,7 @@ class ConsoleApp:
 
         else:
             raise ValueError(f"unknown command: '{command}' — type 'help' for command reference")
+
 
     def require_workspace(self):
         if not self.workspace:
@@ -328,10 +409,10 @@ class ConsoleApp:
                 padding=(0, 1),
             ),
             Panel(
-                f"[bold cyan]{len(state.software)}[/bold cyan]\n[dim]Identified[/dim]",
-                title="[bold cyan]📦 SOFTWARE[/bold cyan]",
+                f"[bold blue]{len(state.audit)}[/bold blue]\n[dim]Audited[/dim]",
+                title="[bold blue]🛡 AUDITED[/bold blue]",
                 box=box.ROUNDED,
-                border_style="cyan",
+                border_style="blue",
                 padding=(0, 1),
             ),
             Panel(
@@ -339,6 +420,13 @@ class ConsoleApp:
                 title="[bold red]⚡ FINDINGS[/bold red]",
                 box=box.ROUNDED,
                 border_style="red",
+                padding=(0, 1),
+            ),
+            Panel(
+                f"[bold cyan]{len(state.software)}[/bold cyan]\n[dim]Identified[/dim]",
+                title="[bold cyan]📦 SOFTWARE[/bold cyan]",
+                box=box.ROUNDED,
+                border_style="cyan",
                 padding=(0, 1),
             ),
             Panel(
@@ -401,6 +489,49 @@ class ConsoleApp:
             )
         self.console.print()
 
+    def surface(self):
+        state = self.workspace.load()
+        if not state.services:
+            self.console.print("\n[dim yellow]No network services discovered yet.[/dim yellow]\n")
+            return
+
+        table = Table(
+            title=f"[bold bright_cyan]✦ NETWORK ATTACK SURFACE — {state.target} ✦[/bold bright_cyan]",
+            box=box.ROUNDED,
+            border_style="cyan",
+            header_style="bold bright_white",
+            expand=True,
+        )
+        table.add_column("Port", style="bold bright_white")
+        table.add_column("Proto", style="dim cyan")
+        table.add_column("Service", style="bold bright_yellow")
+        table.add_column("Product", style="bright_cyan")
+        table.add_column("Version", style="bold bright_green")
+        table.add_column("Exposure Role", style="dim italic white")
+
+        for service in sorted(
+            state.services,
+            key=lambda item: (item.port, item.protocol),
+        ):
+            port_color = "bright_green" if service.port in {80, 443, 8080, 8443} else "cyan"
+            role = "Web Application" if service.port in {80, 443, 8080, 8443, 3000, 5000} else (
+                "Domain / Auth" if service.port in {22, 445, 139, 88, 389, 636} else (
+                    "Database" if service.port in {3306, 5432, 6379, 27017, 1433} else "Network Service"
+                )
+            )
+            table.add_row(
+                f"[{port_color}]{service.port}[/{port_color}]",
+                service.protocol.upper(),
+                service.service or "[dim]unknown[/dim]",
+                service.product or "-",
+                service.version or "-",
+                role,
+            )
+
+        self.console.print()
+        self.console.print(table)
+        self.console.print()
+
     def services(self):
         state = self.workspace.load()
         table = Table(
@@ -459,6 +590,36 @@ class ConsoleApp:
         self.console.print(table)
         self.console.print()
 
+    def audit(self):
+        state = self.workspace.load()
+        if not state.audit:
+            self.console.print("\n[dim yellow]No audited security controls recorded yet.[/dim yellow]\n")
+            return
+
+        table = Table(
+            title=f"[bold bright_blue]✦ AUDITED & HARDENED CONTROLS — {state.target} ✦[/bold bright_blue]",
+            box=box.ROUNDED,
+            border_style="blue",
+            header_style="bold bright_cyan",
+            expand=True,
+        )
+        table.add_column("Status", justify="center", no_wrap=True)
+        table.add_column("Asset / Scope", style="bold bright_white")
+        table.add_column("Check / Rule", style="bright_cyan")
+        table.add_column("Reason / Observation", style="dim white")
+
+        for item in sorted(state.audit, key=lambda a: a.status.value):
+            table.add_row(
+                get_audit_badge(item.status.value),
+                item.asset,
+                item.check_name,
+                item.reason,
+            )
+
+        self.console.print()
+        self.console.print(table)
+        self.console.print()
+
     def findings(self):
         state = self.workspace.load()
         if not state.findings:
@@ -475,7 +636,9 @@ class ConsoleApp:
         table.add_column("Severity", justify="center", no_wrap=True)
         table.add_column("Confidence", justify="left", no_wrap=True)
         table.add_column("Title", style="bold bright_white")
-        table.add_column("Status", justify="center", no_wrap=True)
+        table.add_column("Validation State", justify="center", no_wrap=True)
+        table.add_column("Asset", style="dim cyan")
+        table.add_column("Finding ID", style="italic white")
 
         for finding in sorted(
             state.findings,
@@ -485,12 +648,103 @@ class ConsoleApp:
                 get_severity_badge(finding.severity.value),
                 get_confidence_meter(finding.confidence),
                 finding.title,
-                get_status_badge(finding.status.value),
+                get_validation_badge(finding.validation_state.value),
+                finding.affected_asset or finding.target,
+                finding.id,
             )
 
         self.console.print()
         self.console.print(table)
+        self.console.print(
+            "[dim cyan]💡 Tip: Use [bold magenta]'inspect <id>'[/bold magenta] to view reproduction commands and detailed evidence snippets.[/dim cyan]\n"
+        )
+
+    def inspect_finding(self, args: list[str]):
+        if len(args) < 2:
+            raise ValueError("usage: inspect <finding-id>")
+
+        query = args[1].lower()
+        state = self.workspace.load()
+        match = None
+        for f in state.findings:
+            if f.id.lower() == query or query in f.id.lower() or query in f.title.lower():
+                match = f
+                break
+
+        if not match:
+            raise ValueError(f"No finding matching '{query}' found. Type 'findings' to see list of IDs.")
+
+        header_text = Text.assemble(
+            ("FINDING: ", "bold bright_magenta"),
+            (match.title, "bold bright_white"),
+            ("\nAsset: ", "dim white"),
+            (match.affected_asset or match.target, "bold bright_cyan"),
+            ("  |  Port: ", "dim white"),
+            (str(match.port or "any"), "bright_yellow"),
+            ("  |  Protocol: ", "dim white"),
+            (match.protocol.upper(), "dim cyan"),
+            ("  |  Confidence: ", "dim white"),
+            (f"{match.confidence:.0%}", "bold green" if match.confidence >= 0.8 else "bold yellow"),
+            ("  |  State: ", "dim white"),
+            (match.validation_state.value, "bold bright_magenta"),
+        )
+
+        cards = [
+            Panel(
+                header_text,
+                title=f"[bold bright_red]✦ {get_severity_badge(match.severity.value)} ✦[/bold bright_red]",
+                box=box.ROUNDED,
+                border_style="red",
+            ),
+        ]
+
+        if match.why_it_matters:
+            cards.append(
+                Panel(
+                    match.why_it_matters,
+                    title="[bold bright_yellow]⚡ WHY IT MATTERS (IMPACT)[/bold bright_yellow]",
+                    box=box.ROUNDED,
+                    border_style="yellow",
+                )
+            )
+
+        if match.evidence:
+            ev_text = "\n".join(f"• {ev}" for ev in match.evidence)
+            cards.append(
+                Panel(
+                    ev_text,
+                    title="[bold bright_cyan]🔍 VERIFIED EVIDENCE[/bold bright_cyan]",
+                    box=box.ROUNDED,
+                    border_style="cyan",
+                )
+            )
+
+        if match.reproduction:
+            repro_text = "\n".join(match.reproduction)
+            cards.append(
+                Panel(
+                    f"[bold bright_green]{repro_text}[/bold bright_green]",
+                    title="[bold bright_green]🚀 REPRODUCTION COMMAND[/bold bright_green]",
+                    box=box.ROUNDED,
+                    border_style="green",
+                )
+            )
+
+        if match.recommended_next_action:
+            cards.append(
+                Panel(
+                    match.recommended_next_action,
+                    title="[bold bright_magenta]🎯 RECOMMENDED OPERATOR ACTION[/bold bright_magenta]",
+                    box=box.ROUNDED,
+                    border_style="bright_magenta",
+                )
+            )
+
         self.console.print()
+        for card in cards:
+            self.console.print(card)
+        self.console.print()
+
 
     def next_actions(self):
         state = self.workspace.load()
@@ -680,22 +934,37 @@ class ConsoleApp:
         table.add_column("CVE", style="bold bright_red", no_wrap=True)
         table.add_column("Product", style="bright_white")
         table.add_column("Version", style="bold bright_green")
+        table.add_column("Relevance / Decision", justify="center", no_wrap=True)
+        table.add_column("Exploitability", style="dim cyan")
         table.add_column("Title", style="italic white")
-        table.add_column("Source", style="dim cyan")
 
         for candidate in candidates:
+            dec_badge = get_exploit_decision_badge(candidate.relevance, candidate.ai_decision)
             table.add_row(
                 get_confidence_meter(candidate.confidence),
                 candidate.cve or "[dim]-[/dim]",
                 candidate.product,
                 candidate.version or "[dim]any[/dim]",
+                dec_badge,
+                candidate.exploitability,
                 candidate.title,
-                candidate.source,
             )
 
         self.console.print()
         self.console.print(table)
         self.console.print()
+
+    def intel(self):
+        loading(self.console, "Correlating with SearchSploit intelligence", 0.5)
+        candidates = searchsploit_workspace(self.workspace, CommandRunner(self.workspace))
+        state = self.workspace.load()
+
+        if self.ai_manager.is_enabled and self.ai_manager.get_provider() and candidates:
+            loading(self.console, f"AI Triaging {len(candidates[:10])} exploit candidate(s)", 0.6)
+            candidates = self.ai_manager.triage_exploits(state, candidates)
+            self.workspace.set_exploits(candidates)
+
+        self.exploits(candidates)
 
     def nuclei(self):
         state = self.workspace.load()
@@ -730,27 +999,221 @@ class ConsoleApp:
                 f"[bold green]✔ Nuclei completed successfully (code {result.returncode}).[/bold green]"
             )
 
+    def ask_cmd(self, args: list[str]):
+        if len(args) < 2:
+            raise ValueError("usage: ask <question in quotes>")
+        question = " ".join(args[1:])
+        state = self.workspace.load()
+
+        loading(self.console, "Consulting HORCRUX AI reasoning engine", 0.6)
+        answer = self.ai_manager.ask(state, question)
+
+        self.console.print()
+        self.console.print(
+            Panel(
+                answer,
+                title=f"[bold bright_magenta]⚡ HORCRUX AI ADVISOR — '{question[:45]}'[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="bright_magenta",
+                padding=(1, 2),
+            )
+        )
+        self.console.print()
+
+    def settings_cmd(self, args: list[str]):
+        mgr = SettingsManager()
+
+        if len(args) == 1:
+            st = mgr.settings
+            default_p = st.default_provider
+            default_m = st.providers.get(default_p, None)
+            model_name = default_m.model if default_m else "-"
+            ai_status = "[bold green]ENABLED[/bold green]" if st.enabled else "[bold red]DISABLED[/bold red]"
+
+            providers_lines = []
+            symbols = ["①", "②", "③", "④"]
+            prov_names = [
+                ("groq", "Groq"),
+                ("openai", "OpenAI"),
+                ("anthropic", "Anthropic / Claude"),
+                ("google", "Google AI Studio / Gemini"),
+            ]
+
+            for idx, (p_id, p_label) in enumerate(prov_names):
+                sym = symbols[idx]
+                has_key, masked = mgr.get_provider_status(p_id)
+                status_icon = "[bold green]● CONFIGURED[/bold green]" if has_key else "[dim]○ NOT CONFIGURED[/dim]"
+                model = st.providers.get(p_id, None)
+                m_str = f"[dim cyan]Model: {model.model}[/dim cyan]" if (model and model.model) else ""
+                key_str = f"[dim white]({masked})[/dim white]" if has_key else ""
+                providers_lines.append(f"  {sym} [bold bright_white]{p_label:<24}[/bold bright_white] {status_icon} {key_str}")
+                if m_str:
+                    providers_lines.append(f"     {m_str}")
+                providers_lines.append("")
+
+            body = (
+                "[bold bright_magenta]AI PROVIDERS[/bold bright_magenta]\n\n"
+                + "\n".join(providers_lines)
+                + f"[bold bright_yellow]Default Provider:[/bold bright_yellow] [bold bright_cyan]{default_p.upper()}[/bold bright_cyan]\n"
+                + f"[bold bright_yellow]Default Model:   [/bold bright_yellow] [bold bright_cyan]{model_name}[/bold bright_cyan]\n"
+                + f"[bold bright_yellow]AI Engine Status:[/bold bright_yellow] {ai_status}\n\n"
+                + "[dim white]Commands:\n"
+                + "  settings provider <groq|openai|anthropic|google> [api_key]\n"
+                + "  settings model <provider> <model_name>\n"
+                + "  settings default <provider>\n"
+                + "  settings test [provider]\n"
+                + "  settings remove <provider>[/dim white]"
+            )
+
+            self.console.print()
+            self.console.print(
+                Panel(
+                    body,
+                    title="[bold bright_magenta]✦ HORCRUX SETTINGS ✦[/bold bright_magenta]",
+                    box=box.ROUNDED,
+                    border_style="bright_magenta",
+                    padding=(1, 2),
+                )
+            )
+            self.console.print()
+            return
+
+        sub = args[1].lower()
+        if sub == "provider":
+            if len(args) < 3:
+                raise ValueError("usage: settings provider <groq|openai|anthropic|google> [api_key]")
+            p_name = args[2].lower()
+            if len(args) >= 4:
+                key_val = args[3].strip()
+            else:
+                key_val = Prompt.ask(f"[bold bright_cyan]Enter API key for {p_name.upper()}[/bold bright_cyan]", password=True).strip()
+            if key_val:
+                mgr.set_api_key(p_name, key_val)
+                self.ai_manager = AIManager()
+                self.console.print(f"[bold green]✔ API key stored securely for provider '{p_name}'.[/bold green]")
+            else:
+                self.console.print("[yellow]No key provided.[/yellow]")
+
+        elif sub == "model":
+            if len(args) < 4:
+                raise ValueError("usage: settings model <provider> <model_name>")
+            p_name, m_name = args[2].lower(), args[3].strip()
+            mgr.set_model(p_name, m_name)
+            self.ai_manager = AIManager()
+            self.console.print(f"[bold green]✔ Default model for '{p_name}' set to '{m_name}'.[/bold green]")
+
+        elif sub == "default":
+            if len(args) < 3:
+                raise ValueError("usage: settings default <groq|openai|anthropic|google>")
+            p_name = args[2].lower()
+            mgr.set_default_provider(p_name)
+            self.ai_manager = AIManager()
+            self.console.print(f"[bold green]✔ Default provider set to '{p_name}'.[/bold green]")
+
+        elif sub == "remove":
+            if len(args) < 3:
+                raise ValueError("usage: settings remove <provider>")
+            p_name = args[2].lower()
+            mgr.remove_api_key(p_name)
+            self.ai_manager = AIManager()
+            self.console.print(f"[bold yellow]✔ Removed stored API key for '{p_name}'.[/bold yellow]")
+
+        elif sub == "test":
+            p_name = args[2].lower() if len(args) >= 3 else mgr.settings.default_provider
+            loading(self.console, f"Testing API connection to {p_name.upper()}", 0.5)
+            provider = self.ai_manager.providers.get(p_name)
+            if not provider:
+                self.console.print(f"[bold red]✖ Unknown provider '{p_name}'.[/bold red]")
+                return
+            ok, msg = provider.validate_key()
+            if ok:
+                self.console.print(f"[bold green]✔ {msg}[/bold green]")
+            else:
+                self.console.print(f"[bold red]✖ {msg}[/bold red]")
+
+    def ai_cmd(self, args: list[str]):
+        if len(args) == 1 or args[1].lower() == "status":
+            st = self.ai_manager.status()
+            status_badge = "[bold green]READY[/bold green]" if st["status"] == "READY" else f"[dim yellow]{st['status']}[/dim yellow]"
+            body = (
+                f"[bold bright_yellow]Status:          [/bold bright_yellow] {status_badge}\n"
+                f"[bold bright_yellow]Active Provider: [/bold bright_yellow] [bold bright_cyan]{st['provider'].upper()}[/bold bright_cyan]\n"
+                f"[bold bright_yellow]Active Model:    [/bold bright_yellow] [bold bright_white]{st['model']}[/bold bright_white]\n"
+                f"[bold bright_yellow]Calls Made:      [/bold bright_yellow] {st['calls']}\n"
+                f"[bold bright_yellow]Cached Responses:[/bold bright_yellow] {st['cached_calls']}\n"
+                f"[bold bright_yellow]Total Tokens:    [/bold bright_yellow] {st['total_tokens']}\n"
+            )
+            self.console.print()
+            self.console.print(
+                Panel(
+                    body,
+                    title="[bold bright_magenta]✦ AI ENGINE STATUS ✦[/bold bright_magenta]",
+                    box=box.ROUNDED,
+                    border_style="magenta",
+                )
+            )
+            self.console.print()
+            return
+
+        sub = args[1].lower()
+        if sub == "enable":
+            self.ai_manager.settings.set_enabled(True)
+            self.console.print("[bold green]✔ AI engine enabled.[/bold green]")
+        elif sub == "disable":
+            self.ai_manager.settings.set_enabled(False)
+            self.console.print("[bold yellow]✔ AI engine disabled. Falling back to local deterministic intelligence.[/bold yellow]")
+        elif sub in {"clear-cache", "clearcache"}:
+            self.ai_manager.clear_cache()
+            self.console.print("[bold green]✔ AI response cache cleared.[/bold green]")
+        elif sub == "usage":
+            self.ai_cmd(["ai", "status"])
+        else:
+            raise ValueError("usage: ai [status|enable|disable|usage|clear-cache]")
+
+    def raw_cmd(self, args: list[str]):
+        if len(args) < 2:
+            raise ValueError("usage: raw <module_name> (e.g. raw nmap-tcp, raw nuclei, raw smbclient)")
+        target_name = args[1].lower()
+        matching = list(self.workspace.raw.glob(f"*{target_name}*"))
+        if not matching:
+            raise ValueError(f"No raw artifacts matching '{target_name}' found in {self.workspace.raw}")
+        content = matching[0].read_text(encoding="utf-8", errors="replace")
+        self.console.print(
+            Panel(
+                content[:4000] + ("\n... [truncated]" if len(content) > 4000 else ""),
+                title=f"[bold bright_cyan]{matching[0].name}[/bold bright_cyan]",
+                box=box.ROUNDED,
+                border_style="cyan",
+            )
+        )
+
     def doctor(self, only_tools=False):
         tools, wordlists = check_tools()
 
+        # Group tools by CATEGORIES
         table = Table(
-            title="[bold bright_cyan]✦ HORCRUX TOOL ECOSYSTEM AUDIT ✦[/bold bright_cyan]",
+            title="[bold bright_cyan]✦ HORCRUX PLATFORM & TOOL ECOSYSTEM AUDIT ✦[/bold bright_cyan]",
             box=box.ROUNDED,
             border_style="cyan",
             header_style="bold bright_magenta",
             expand=True,
         )
+        table.add_column("Category", style="bold bright_yellow", no_wrap=True)
         table.add_column("Tool", style="bold bright_white")
         table.add_column("Status", justify="center", no_wrap=True)
         table.add_column("Purpose", style="dim white")
         table.add_column("Install Guidance", style="italic yellow")
 
-        for item in tools:
-            name, path, purpose = item[0], item[1], item[2]
-            install_guide = item[3] if len(item) > 3 else ""
-            status_text = "[bold green]✔ OK[/bold green]" if path else "[bold red]✖ MISSING[/bold red]"
-            guide_text = "" if path else install_guide
-            table.add_row(name, status_text, purpose, guide_text)
+        tool_map = {item[0]: item for item in tools}
+
+        for cat_name, cat_tools in CATEGORIES.items():
+            for tool_name, desc in cat_tools.items():
+                item = tool_map.get(tool_name)
+                path = item[1] if item else None
+                install_guide = item[3] if item and len(item) > 3 else ""
+                status_text = "[bold green]✔ OK[/bold green]" if path else "[dim red]✖ MISSING[/dim red]"
+                guide_text = "" if path else install_guide
+                table.add_row(cat_name, tool_name, status_text, desc, guide_text)
 
         self.console.print()
         self.console.print(table)
@@ -758,6 +1221,30 @@ class ConsoleApp:
         if only_tools:
             self.console.print()
             return
+
+        # AI Configuration Audit
+        ai_table = Table(
+            title="[bold bright_magenta]✦ AI ENGINE & KEYCHAIN AUDIT ✦[/bold bright_magenta]",
+            box=box.ROUNDED,
+            border_style="magenta",
+            header_style="bold bright_cyan",
+            expand=True,
+        )
+        ai_table.add_column("Provider", style="bold bright_white")
+        ai_table.add_column("Status", justify="center", no_wrap=True)
+        ai_table.add_column("Default Model", style="bold bright_green")
+        ai_table.add_column("Key Availability", style="dim white")
+
+        mgr = SettingsManager()
+        for p_name in ("groq", "openai", "anthropic", "google"):
+            has_key, masked = mgr.get_provider_status(p_name)
+            model = mgr.settings.providers.get(p_name, None)
+            m_str = model.model if model else "-"
+            st_text = "[bold green]✔ CONFIGURED[/bold green]" if has_key else "[dim]○ NOT CONFIGURED[/dim]"
+            ai_table.add_row(p_name.upper(), st_text, m_str, masked)
+
+        self.console.print()
+        self.console.print(ai_table)
 
         words = Table(
             title="[bold bright_yellow]✦ WORDLIST DISCOVERY AUDIT ✦[/bold bright_yellow]",
@@ -777,3 +1264,4 @@ class ConsoleApp:
         self.console.print()
         self.console.print(words)
         self.console.print()
+

@@ -77,13 +77,23 @@ flowchart TD
 
 ## ⚡ Key Features
 
-* **Real Tool Orchestration**: Transparently delegates work to native Kali/Linux binaries—`nmap`, `ffuf`, `gobuster`, `whatweb`, `nuclei`, `smbclient`, `searchsploit`, and more.
+* **Deterministic-First Authority**: Real tools remain authoritative. Real deterministic parsers and validators produce facts. AI operates as a contextual reasoning layer on top of verified evidence, never hallucinating services, versions, credentials, or vulnerabilities.
+* **Separation of Surface vs. Audit vs. Findings**:
+  * `surface`: Network attack surface (open ports & protocols). *Open ports are not vulnerabilities.*
+  * `audit`: Audited & hardened controls (e.g. protected `.env`, rejected SMB null sessions, HTTP 403 admin panels, soft-404 pages).
+  * `findings`: Verified vulnerabilities with reproducible proof (e.g. leaked credentials, unauthenticated Redis, confirmed CVEs).
+* **Multi-Provider AI Intelligence Core**:
+  * Native support for **Groq** (`llama-3.3-70b-versatile`), **OpenAI** (`gpt-4o`), **Anthropic** (`claude-3-5-sonnet`), and **Google AI Studio / Gemini** (`gemini-2.5-flash`).
+  * Intelligent exploit candidate triage, contextual Next-Best-Action ranking, attack-path synthesis, and operator Q&A (`ask <question>`).
+  * Deterministic offline fallback if AI is disabled or unconfigured.
+  * Strict token efficiency with SHA-256 request caching.
+* **Pluggable Web Validation Engine**: Baseline response fingerprinting, Soft-404/SPA catch-all detection, and content-length drift heuristics (<15%).
+* **Persistent Settings & Key Management**: Cross-platform configuration persistence with OS keychain (`keyring`) storage and secure credential masking (`gsk_••••••••9F31`).
+* **Deep Finding Inspector**: Instant reproduction commands (`curl ...`), evidence snippets, and tactical rationale for every finding (`inspect <id>`).
+* **Platform-Aware Doctor**: Comprehensive 12-category dependency audit across Core, Network, Web, SMB/AD, Databases, Credentials, Exploit Intel, Local, Tunneling, Containers, and AI Engine.
 * **Persistent Workspaces**: Every assessment gets an isolated workspace tracking structured state (`state.json`), raw command logs, headers, and HTTP responses.
 * **Attack Surface Tree Graph**: Interactive Rich visual hierarchy linking targets, open ports, fingerprinted services, vulnerabilities, and leaked credentials.
-* **Prioritized Next Actions**: Algorithmic ranking engine calculating the highest ROI next step based on evidence confidence and attack prerequisites.
-* **Exploit Intelligence**: Correlates software versions with SearchSploit and CVE databases while strictly maintaining operator control over execution.
 * **Horcrux Artifact Gallery**: Built-in showcase of thematic ASCII relics representing the 7 Horcruxes and Deathly Hallows.
-* **Luminous Terminal Aesthetics**: Dynamic color waves, TrueColor gradients, animated sparkle trails, and runic progress spinners.
 
 ---
 
@@ -129,29 +139,61 @@ horcrux 10.10.10.10
 # Deep port scanning and aggressive enumeration
 horcrux 10.10.10.10 --deep
 
-# Check installed security tools and SecLists wordlists
+# Check installed tools, wordlists, and AI configuration
 horcrux doctor
 
-# View the Horcrux ASCII art relics gallery
-horcrux gallery
+# Configure AI provider key securely
+horcrux settings provider groq <your-api-key>
+
+# Ask AI security analyst with target context
+horcrux ask "What is the primary attack vector?" --target 10.10.10.10
+
+# Generate Markdown engagement report
+horcrux report 10.10.10.10
 ```
 
 ---
 
-## 🖥 Terminal UI & Animations
+## ⚙️ AI Configuration & Settings
 
-HORCRUX delivers a terminal experience with animated feedback, shimmering headers, and visual data structures.
-
-### Animated Color Banners & Spinners
+HORCRUX stores configuration persistently in platform-appropriate locations (`~/.config/horcrux/` on Linux, `%APPDATA%\Horcrux\` on Windows, `~/Library/Application Support/horcrux/` on macOS). API keys are stored in the OS keychain via `keyring` and displayed masked:
 
 ```text
-  ✦ ᚛ ᚠ ⟦  ▰▰▰▱▱▱▱▱▱▱  ⟧ Mapping TCP/UDP surface... ✦
-  ✔ Mapping TCP/UDP surface
-  ✦ ᚛ ᚢ ⟦  ▰▰▰▰▰▱▱▱▱▱  ⟧ Fingerprinting HTTP :80... ✦
-  ✔ Fingerprinting HTTP :80
-  ✦ ᚛ ᚦ ⟦  ▰▰▰▰▰▰▰▱▱▱  ⟧ Correlating SearchSploit intelligence... ✦
-  ✔ Correlating SearchSploit intelligence
+┌─────────────────────────── ✦ HORCRUX SETTINGS ✦ ────────────────────────────┐
+│                                                                             │
+│  AI PROVIDERS                                                               │
+│                                                                             │
+│    ① Groq                     ● CONFIGURED (gsk_••••••••9F31)               │
+│       Model: llama-3.3-70b-versatile                                        │
+│                                                                             │
+│    ② OpenAI                   ○ NOT CONFIGURED                              │
+│       Model: gpt-4o                                                         │
+│                                                                             │
+│    ③ Anthropic / Claude       ○ NOT CONFIGURED                              │
+│       Model: claude-3-5-sonnet-latest                                       │
+│                                                                             │
+│    ④ Google AI Studio / Gemini ○ NOT CONFIGURED                             │
+│       Model: gemini-2.5-flash                                               │
+│                                                                             │
+│  Default Provider: GROQ                                                     │
+│  Default Model:    llama-3.3-70b-versatile                                  │
+│  AI Engine Status: ENABLED                                                  │
+│                                                                             │
+│  Commands:                                                                  │
+│    settings provider <groq|openai|anthropic|google> [key]                   │
+│    settings model <provider> <model_name>                                   │
+│    settings default <provider>                                              │
+│    settings test [provider]                                                 │
+│    settings remove <provider>                                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🖥 Terminal UI & Operator Workflow
+
+HORCRUX delivers a terminal experience with animated feedback, shimmering headers, and visual data structures.
 
 ### Live Status Dashboard (`status`)
 
@@ -159,81 +201,124 @@ HORCRUX delivers a terminal experience with animated feedback, shimmering header
 ╭─────────────────────────────────────────────────────────────────────────────╮
 │ ❖ TARGET WORKSPACE: 10.10.10.10  |  STORAGE: workspaces/10.10.10.10         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-╭ 🌐 SERVICES ╮  ╭ 📦 SOFTWARE ╮  ╭ ⚡ FINDINGS ╮  ╭ 🔑 CREDS ╮  ╭ 🎯 EXPLOITS ╮
-│      3      │  │      2      │  │      3      │  │    2     │  │      1      │
-│    Open     │  │ Identified  │  │   Recorded  │  │ Captured │  │ Correlated  │
-╰─────────────╯  ╰─────────────╯  ╰─────────────╯  ╰──────────╯  ╰─────────────╯
+╭ 🌐 SERVICES ╮ ╭ 🛡 AUDITED ╮ ╭ ⚡ FINDINGS ╮ ╭ 📦 SOFTWARE ╮ ╭ 🔑 CREDS ╮ ╭ 🎯 EXPLOITS ╮
+│      3      │ │     4      │ │      1      │ │      2      │ │    1     │ │      2      │
+│    Open     │ │  Audited   │ │   Recorded  │ │ Identified  │ │ Captured │ │ Correlated  │
+╰─────────────╯ ╰────────────╯ ╰─────────────╯ ╰─────────────╯ ╰──────────╯ ╰─────────────╯
 
 ╭──────────────────────── ⬡ DETECTED WEB TECHNOLOGIES ────────────────────────╮
 │  nginx  •  PHP 8.1  •  WordPress 6.2                                        │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 
 ╔═══════════════════════════ ★ NEXT BEST ACTION ★ ════════════════════════════╗
-║  ⚡ Enumerate readable SMB shares                                           ║
-║  Reason: Anonymous SMB connection verified  • Score: 96                     ║
+│  ⚡ Test database credentials from exposed backup                           ║
+│  Reason: DB_PASSWORD recovered from /backup.sql  • Score: 99                ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-### Interactive Attack Surface Graph (`graph`)
+### Separation of Attack Surface vs. Audited Controls vs. Findings
 
+#### 1. Attack Surface (`surface`)
+*Open ports are not vulnerabilities. They represent the active perimeter.*
 ```text
-╭────────────────── ✦ ATTACK SURFACE GRAPH — 10.10.10.10 ✦ ───────────────────╮
-│                                                                             │
-│  ❖ TARGET 10.10.10.10                                                       │
-│  ├── 🌐 OPEN SERVICES (3)                                                   │
-│  │   ├── ● 22/TCP ssh (OpenSSH 8.9p1)                                       │
-│  │   │   └──  ● LOW  SSH Server Supports Weak Ciphers                       │
-│  │   ├── ● 80/TCP http (nginx 1.18.0)                                       │
-│  │   │   └──  ◈ MEDIUM  WordPress xmlrpc.php Exposed                        │
-│  │   └── ● 445/TCP microsoft-ds (Samba 4.15.5)                              │
-│  │       └──  ▲ HIGH  Anonymous SMB Share Access                            │
-│  ├── ⚡ DETECTED FINDINGS (3)                                               │
-│  │   ├──  ▲ HIGH  Anonymous SMB Share Access (verified)                     │
-│  │   ├──  ◈ MEDIUM  WordPress xmlrpc.php Exposed (suspected)                │
-│  │   └──  ● LOW  SSH Server Supports Weak Ciphers (suspected)               │
-│  ├── 🔑 CREDENTIALS (2)                                                     │
-│  │   ├── anonymous (smb) from smbclient                                     │
-│  │   └── admin (web) from wp-config.php.bak                                 │
-│  └── ⬡ WEB TECHNOLOGIES (3)                                                 │
-│      ├── nginx                                                              │
-│      ├── PHP 8.1                                                            │
-│      └── WordPress 6.2                                                      │
-│                                                                             │
-╰─────────────────────────────────────────────────────────────────────────────╯
+                      ✦ NETWORK ATTACK SURFACE — 10.10.10.10 ✦                     
+┌──────┬───────┬──────────────┬─────────┬─────────┬───────────────────────────────┐
+│ Port │ Proto │ Service      │ Product │ Version │ Exposure Role                 │
+├──────┼───────┼──────────────┼─────────┼─────────┼───────────────────────────────┤
+│ 22   │ TCP   │ ssh          │ OpenSSH │ 8.9p1   │ Domain / Auth                 │
+│ 80   │ TCP   │ http         │ nginx   │ 1.18.0  │ Web Application               │
+│ 445  │ TCP   │ microsoft-ds │ Samba   │ 4.15.5  │ Domain / Auth                 │
+└──────┴───────┴──────────────┴─────────┴─────────┴───────────────────────────────┘
 ```
 
----
+#### 2. Audited & Hardened Controls (`audit`)
+*Records defensive checks that were tested and verified secure.*
+```text
+                  ✦ AUDITED & HARDENED CONTROLS — 10.10.10.10 ✦                   
+┌──────────────┬──────────────────────────────┬───────────────────────────────┬───────────────────────────────────────────┐
+│ Status       │ Asset / Scope                │ Check / Rule                  │ Reason / Observation                      │
+├──────────────┼──────────────────────────────┼───────────────────────────────┼───────────────────────────────────────────┤
+│  🛡 HARDENED │ http://10.10.10.10/.env       │ Environment File Disclosure   │ Returned HTTP 404; protected against leak │
+│  🛡 HARDENED │ 10.10.10.10:445              │ SMB Anonymous Authentication  │ Anonymous/null session rejected           │
+│   ✔ AUDITED  │ http://10.10.10.10/admin     │ Administrative Interface Surface│ HTTP 403 Forbidden; access restricted     │
+│   ✔ AUDITED  │ http://10.10.10.10/robots.txt│ Robots Endpoint Discovery     │ Clean directives; no sensitive paths      │
+└──────────────┴──────────────────────────────┴───────────────────────────────┴───────────────────────────────────────────┘
+```
 
-### Findings with Confidence Meters (`findings`)
-
+#### 3. Real Security Findings (`findings`) & Inspector (`inspect <id>`)
+*Confirmed exposures with actionable evidence and reproduction commands.*
 ```text
                       ✦ SECURITY FINDINGS — 10.10.10.10 ✦                      
-┌────────────┬──────────────┬──────────────────────────────────┬──────────────┐
-│  Severity  │  Confidence  │ Title                            │    Status    │
-├────────────┼──────────────┼──────────────────────────────────┼──────────────┤
-│   ▲ HIGH   │ ████████ 95% │ Anonymous SMB Share Access       │  ✔ VERIFIED  │
-│  ◈ MEDIUM  │ ███████░ 85% │ WordPress xmlrpc.php Exposed     │ ❓ SUSPECTED │
-│    ● LOW   │ █████░░░ 60% │ SSH Server Supports Weak Ciphers │ ❓ SUSPECTED │
-└────────────┴──────────────┴──────────────────────────────────┴──────────────┘
+┌────────────┬──────────────┬──────────────────────────────────┬──────────────────┬─────────────────────────────┬─────────────┐
+│  Severity  │  Confidence  │ Title                            │ Validation State │ Asset                       │ Finding ID  │
+├────────────┼──────────────┼──────────────────────────────────┼──────────────────┼─────────────────────────────┼─────────────┤
+│ ✖ CRITICAL │ ████████ 95% │ Exposed Database Credentials in  │    CONFIRMED     │ http://10.10.10.10/backup.sql│ web-backup-1│
+│            │              │ Backup Archive                   │                  │                             │             │
+└────────────┴──────────────┴──────────────────────────────────┴──────────────────┴─────────────────────────────┴─────────────┘
+```
+
+Inspecting a finding (`inspect web-backup-1`):
+```text
+┌───────────────────────────────── ✦ ✖ CRITICAL ✦ ────────────────────────────────┐
+│ FINDING: Exposed Database Credentials in Backup Archive                         │
+│ Asset: http://10.10.10.10/backup.sql  |  Port: 80  |  Protocol: TCP             │
+│ Confidence: 95%  |  State: confirmed                                            │
+└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── ⚡ WHY IT MATTERS (IMPACT) ──────────────────────────────┐
+│ Direct unauthorized database takeover; leaked administrative credentials.       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────── 🔍 VERIFIED EVIDENCE ─────────────────────────────┐
+│ • DB_PASSWORD=SuperSecretAdminPassword123!                                      │
+│ • DB_USER=root                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────── 🚀 REPRODUCTION COMMAND ─────────────────────────────┐
+│ curl -s http://10.10.10.10/backup.sql | grep -E "(DB_USER|DB_PASSWORD)"        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── 🎯 RECOMMENDED OPERATOR ACTION ─────────────────────────┐
+│ Connect to exposed database listener or test administrative credential reuse.   │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### Prioritized Next Actions (`next`)
+### Exploit Intelligence & AI Triage (`cve`, `exploit`, `intel`)
 
 ```text
-                  ✦ PRIORITIZED NEXT ACTIONS — 10.10.10.10 ✦                   
-┌──────┬───────┬──────────────────────────────┬───────────────────────────────┐
-│ Rank │ Score │ Action                       │ Reason / Prerequisite         │
-├──────┼───────┼──────────────────────────────┼───────────────────────────────┤
-│  ①   │  96   │ Enumerate readable SMB       │ Anonymous SMB connection      │
-│      │       │ shares                       │ verified                      │
-│  ②   │  92   │ Test WordPress admin         │ Recovered admin password from │
-│      │       │ credentials                  │ backup                        │
-└──────┴───────┴──────────────────────────────┴───────────────────────────────┘
+                  ✦ CVE / SEARCHSPLOIT CANDIDATES ✦                   
+┌──────────────┬────────────────┬─────────┬─────────┬──────────────────────┬────────────────┬─────────────────────────────┐
+│ Confidence   │ CVE            │ Product │ Version │ Relevance / Decision │ Exploitability │ Title                       │
+├──────────────┼────────────────┼─────────┼─────────┼──────────────────────┼────────────────┼─────────────────────────────┤
+│ ████████ 92% │ CVE-2021-41773 │ Apache  │ 2.4.49  │  ★ HIGHLY RELEVANT   │ HIGH (REMOTE)  │ Path Traversal & RCE        │
+│ ████░░░░ 40% │ -              │ Apache  │ 2.4.49  │     ✖ REJECTED       │ LOW (DOS)      │ Denial of Service PoC       │
+└──────────────┴────────────────┴─────────┴─────────┴──────────────────────┴────────────────┴─────────────────────────────┘
 ```
+
+---
+
+### Operator AI Security Advisor (`ask <question>`)
+
+```text
+horcrux@10.10.10.10 ❯ ask "What is the quickest path to a shell?"
+
+┌───────────────── ⚡ HORCRUX AI ADVISOR — 'What is the quickest path to a shell?' ──────────────────┐
+│                                                                                                    │
+│ OBSERVATION:                                                                                       │
+│ Recovered database credentials ('root' / 'SuperSecretAdminPassword123!') from                      │
+│ http://10.10.10.10/backup.sql. Port 3306 (MySQL) and Port 22 (SSH) are open.                       │
+│                                                                                                    │
+│ REASONING:                                                                                         │
+│ Administrative credentials often share passwords with the local system account or can be used      │
+│ via MySQL SELECT INTO OUTFILE to drop a PHP web shell into /var/www/html/.                         │
+│                                                                                                    │
+│ RECOMMENDATION:                                                                                    │
+│ 1. Test SSH authentication: ssh root@10.10.10.10                                                   │
+│ 2. Test MySQL login: mysql -u root -p'SuperSecretAdminPassword123!' -h 10.10.10.10                 │
+│                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
 
 ---
 
@@ -408,29 +493,38 @@ HORCRUX weaves the lore of ancient artifacts into its terminal identity. View th
 
 ---
 
-## 🩺 Doctor & Prerequisites
+## 🩺 Doctor & Platform Dependency Audit
 
-HORCRUX includes an automated environment auditor to check for external binaries and wordlists:
+HORCRUX includes an automated environment auditor to check external binaries, Kali SecLists wordlists, and configured AI providers:
 
 ```bash
 horcrux doctor
 ```
 
 ```text
-                         ✦ HORCRUX TOOL ECOSYSTEM AUDIT ✦                         
-┌────────────────────────┬────────────┬───────────────────────────────────────┐
-│ Tool                   │   Status   │ Purpose                               │
-├────────────────────────┼────────────┼───────────────────────────────────────┤
-│ nmap                   │    ✔ OK    │ Network discovery                     │
-│ rustscan               │ ✖ MISSING  │ Fast TCP discovery                    │
-│ ffuf                   │    ✔ OK    │ Web fuzzing                           │
-│ gobuster               │    ✔ OK    │ Web/content/DNS discovery             │
-│ nuclei                 │    ✔ OK    │ Template-based vulnerability checks   │
-│ whatweb                │    ✔ OK    │ Web fingerprinting                    │
-│ smbclient              │    ✔ OK    │ SMB enumeration                       │
-│ searchsploit           │    ✔ OK    │ Exploit/CVE lookup                    │
-│ netexec                │ ✖ MISSING  │ SMB/LDAP/Kerberos/WinRM               │
-└────────────────────────┴────────────┴───────────────────────────────────────┘
+                     ✦ HORCRUX PLATFORM & TOOL ECOSYSTEM AUDIT ✦                      
+┌────────────────────────────┬───────────┬───────────┬────────────────────────────────┐
+│ Category                   │ Tool      │ Status    │ Purpose                        │
+├────────────────────────────┼───────────┼───────────┼────────────────────────────────┤
+│ CORE                       │ python    │   ✔ OK    │ Python runtime (3.10+)         │
+│ CORE                       │ pip       │   ✔ OK    │ Python package manager         │
+│ NETWORK                    │ nmap      │   ✔ OK    │ Primary port/service discovery │
+│ WEB                        │ httpx     │   ✔ OK    │ Fast HTTP probing              │
+│ WEB                        │ ffuf      │   ✔ OK    │ Web fuzzer & path discovery    │
+│ WEB                        │ nuclei    │   ✔ OK    │ Template vulnerability scanner │
+│ SMB / AD                   │ smbclient │   ✔ OK    │ SMB share navigation & auditing│
+│ EXPLOIT INTELLIGENCE       │ searchsp… │   ✔ OK    │ Exploit-DB offline lookup      │
+└────────────────────────────┴───────────┴───────────┴────────────────────────────────┘
+
+                        ✦ AI ENGINE & KEYCHAIN AUDIT ✦                         
+┌────────────┬──────────────────┬──────────────────────────┬──────────────────┐
+│ Provider   │      Status      │ Default Model            │ Key Availability │
+├────────────┼──────────────────┼──────────────────────────┼──────────────────┤
+│ GROQ       │   ✔ CONFIGURED   │ llama-3.3-70b-versatile  │ gsk_••••••••9F31 │
+│ OPENAI     │ ○ NOT CONFIGURED │ gpt-4o                   │ NOT CONFIGURED   │
+│ ANTHROPIC  │ ○ NOT CONFIGURED │ claude-3-5-sonnet-latest │ NOT CONFIGURED   │
+│ GOOGLE     │ ○ NOT CONFIGURED │ gemini-2.5-flash         │ NOT CONFIGURED   │
+└────────────┴──────────────────┴──────────────────────────┴──────────────────┘
 
                          ✦ WORDLIST DISCOVERY AUDIT ✦                          
 ┌───────────────────────────────────────────────┬───────────┬─────────────────┐
