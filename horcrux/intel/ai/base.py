@@ -3,10 +3,12 @@ from __future__ import annotations
 import abc
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Optional
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Generator, Optional
 
-from horcrux.core.settings import AVAILABLE_MODELS, DEFAULT_MODELS, ProviderConfig, SettingsManager
+from horcrux.core.settings import DEFAULT_MODELS, ProviderConfig, SettingsManager
 
 
 HORCRUX_EVIDENCE_POLICY = """You are HORCRUX AI, an expert senior offensive-security reasoning analyst.
@@ -23,14 +25,88 @@ STRICT EVIDENCE RULES:
 """
 
 
+class AIErrorType(str, Enum):
+    AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
+    MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    RATE_LIMITED = "RATE_LIMITED"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    BAD_REQUEST = "BAD_REQUEST"
+    INVALID_RESPONSE = "INVALID_RESPONSE"
+    TIMEOUT = "TIMEOUT"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    UNSUPPORTED_FEATURE = "UNSUPPORTED_FEATURE"
+
+
+class AIError(Exception):
+    def __init__(
+        self,
+        error_type: AIErrorType,
+        message: str,
+        suggested_action: str = "",
+        provider: str = "",
+        raw_status: int | None = None,
+    ):
+        super().__init__(message)
+        self.error_type = error_type
+        self.message = message
+        self.suggested_action = suggested_action
+        self.provider = provider
+        self.raw_status = raw_status
+
+    def __str__(self) -> str:
+        prov = f"[{self.provider.upper()}] " if self.provider else ""
+        return f"{prov}{self.error_type.value}: {self.message}"
+
+
+@dataclass
+class ModelInfo:
+    id: str
+    name: str = ""
+    context_window: int = 0
+    max_output_tokens: int = 0
+    supports_structured: bool = True
+    supports_streaming: bool = True
+    description: str = ""
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, str):
+            return self.id == other or self.name == other
+        if isinstance(other, ModelInfo):
+            return self.id == other.id
+        return False
+
+    def __str__(self) -> str:
+        return self.id
+
+
+
+@dataclass
+class AIResponse:
+    content: str
+    structured: Any = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+    provider: str = ""
+    latency: float = 0.0
+    request_id: str = ""
+    cached: bool = False
+    finish_reason: str = ""
+
+
 def extract_json_payload(text: str) -> Any:
     """Robustly extracts JSON object or array from LLM response text."""
-    text = text.strip()
     if not text:
         return {}
+    cleaned = text.strip()
 
     # Check for fenced code block ```json ... ```
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.I)
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.I)
     if match:
         candidate = match.group(1).strip()
         try:
@@ -39,9 +115,9 @@ def extract_json_payload(text: str) -> Any:
             pass
 
     # Find outermost { ... } or [ ... ]
-    first_brace = text.find("{")
-    first_bracket = text.find("[")
-    
+    first_brace = cleaned.find("{")
+    first_bracket = cleaned.find("[")
+
     start_pos = -1
     end_char = ""
     if first_brace != -1 and (first_bracket == -1 or first_brace < first_bracket):
@@ -52,38 +128,33 @@ def extract_json_payload(text: str) -> Any:
         end_char = "]"
 
     if start_pos != -1:
-        end_pos = text.rfind(end_char)
+        end_pos = cleaned.rfind(end_char)
         if end_pos > start_pos:
-            candidate = text[start_pos : end_pos + 1]
+            candidate = cleaned[start_pos : end_pos + 1]
             try:
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
 
     try:
-        return json.loads(text)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        return {"raw": text}
-
-
-@dataclass
-class AIResponse:
-    content: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    model: str = ""
-    provider: str = ""
+        return {"raw": cleaned}
 
 
 class AIProvider(abc.ABC):
+    """
+    Abstract base class defining the common provider interface for HORCRUX.
+    All provider implementations (Groq, OpenAI, Anthropic, Google) conform to this interface.
+    """
+
     def __init__(self, settings_manager: SettingsManager):
         self.settings = settings_manager
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """Provider name, e.g. 'groq', 'openai', 'anthropic', 'google'."""
+        """Provider identifier, e.g. 'groq', 'openai', 'anthropic', 'google'."""
         pass
 
     @property
@@ -99,12 +170,24 @@ class AIProvider(abc.ABC):
     def is_configured(self) -> bool:
         return bool(self.get_api_key())
 
-    def models(self) -> list[str]:
-        return AVAILABLE_MODELS.get(self.name, [self.config.model])
+    @abc.abstractmethod
+    def list_models(self) -> list[ModelInfo]:
+        """
+        Dynamically query provider for available text-generation models.
+        Returns normalized ModelInfo list.
+        """
+        pass
+
+    def get_model_info(self, model_id: str) -> ModelInfo | None:
+        """Retrieve metadata for a specific model ID."""
+        for m in self.list_models():
+            if m.id.lower() == model_id.lower() or m.id.lower().endswith(model_id.lower()):
+                return m
+        return None
 
     def fetch_models(self) -> list[str]:
-        """Fetch models dynamically from provider API if available, falling back to curated regional models."""
-        return self.models()
+        """Backward-compatible helper returning list of model ID strings."""
+        return [m.id for m in self.list_models()]
 
     @abc.abstractmethod
     def complete(
@@ -114,29 +197,161 @@ class AIProvider(abc.ABC):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AIResponse:
-        """Send completion request to provider."""
+        """Execute a text completion request."""
         pass
 
     def structured(
         self,
         prompt: str,
         system_prompt: str = "",
+        schema: Any | None = None,
         temperature: float = 0.1,
-        max_tokens: int = 2048,
-    ) -> Any:
-        """Helper to get and parse JSON response from LLM."""
-        sys = (system_prompt or HORCRUX_EVIDENCE_POLICY) + "\n\nRespond ONLY with valid JSON."
+        max_tokens: int | None = None,
+    ) -> AIResponse:
+        """
+        Execute structured JSON completion.
+        Uses provider-native JSON mode where available or structured prompt fallback.
+        """
+        sys = (system_prompt or HORCRUX_EVIDENCE_POLICY) + "\n\nRespond ONLY with valid JSON. Do not include introductory text or markdown formatting."
         resp = self.complete(prompt, system_prompt=sys, temperature=temperature, max_tokens=max_tokens)
-        return extract_json_payload(resp.content)
+        resp.structured = extract_json_payload(resp.content)
+        return resp
 
-    def validate_key(self) -> tuple[bool, str]:
-        """Test API key with a minimal completion request."""
+    def stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> Generator[str, None, None]:
+        """Streaming completion generator; default implementation yields full content."""
+        resp = self.complete(prompt, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+        yield resp.content
+
+    def validate_credentials(self) -> tuple[bool, str, AIErrorType | None, float]:
+        """
+        Test provider credentials and selected model with minimal low-cost request.
+        Returns: (success, message, error_type, latency_seconds)
+        """
         if not self.is_configured():
-            return False, "No API key configured"
+            return False, "API key is not configured.", AIErrorType.AUTHENTICATION_FAILED, 0.0
+
+        t0 = time.perf_counter()
         try:
-            resp = self.complete("Say ok in one word.", max_tokens=10)
+            resp = self.complete("Say ok in one word.", max_tokens=5, temperature=0.0)
+            latency = time.perf_counter() - t0
             if resp and resp.content:
-                return True, "API connection verified successfully"
-            return False, "Received empty response from provider"
+                # Update last validated timestamp in settings
+                self.settings.set_provider_validation(self.name, True, "READY")
+                return True, f"Connection verified successfully. Model: {resp.model}", None, round(latency, 2)
+            self.settings.set_provider_validation(self.name, False, "EMPTY_RESPONSE")
+            return False, "Received empty response from provider.", AIErrorType.INVALID_RESPONSE, round(latency, 2)
         except Exception as exc:
-            return False, f"API test failed: {exc}"
+            latency = time.perf_counter() - t0
+            if isinstance(exc, AIError):
+                err_type, msg, hint = exc.error_type, exc.message, exc.suggested_action
+            else:
+                err_type, msg, hint = self.normalize_error(exc)
+            self.settings.set_provider_validation(self.name, False, err_type.value)
+            detail = f"{msg} {hint}".strip()
+            return False, detail, err_type, round(latency, 2)
+
+    def estimate_capabilities(self) -> dict[str, Any]:
+        """Return provider capabilities (context size, streaming, json mode)."""
+        return {
+            "name": self.name,
+            "configured": self.is_configured(),
+            "selected_model": self.config.model,
+            "supports_streaming": True,
+            "supports_structured": True,
+        }
+
+    def normalize_error(self, exc: Exception) -> tuple[AIErrorType, str, str]:
+        """
+        Normalizes provider-specific exception into (AIErrorType, human_message, suggested_action).
+        Never exposes raw API keys in returned messages.
+        """
+        if isinstance(exc, AIError):
+            return exc.error_type, exc.message, exc.suggested_action
+
+        err_str = str(exc)
+
+        status = getattr(exc, "status_code", None)
+        if status is None and hasattr(exc, "response") and exc.response is not None:
+            status = getattr(exc.response, "status_code", None)
+
+        # 1. Authentication / Invalid Key (401)
+        if status == 401 or any(k in err_str.lower() for k in ["invalid api key", "invalid_api_key", "unauthorized", "api_key_invalid"]):
+            return (
+                AIErrorType.AUTHENTICATION_FAILED,
+                "API key rejected by provider.",
+                f"Verify your API key using 'settings provider {self.name}'.",
+            )
+
+        # 2. Model Not Found or Model Unavailable (404 or deprecated model message)
+        if status == 404 or any(k in err_str.lower() for k in ["model_not_found", "model not found", "not found for api version", "no longer available"]):
+            return (
+                AIErrorType.MODEL_UNAVAILABLE,
+                f"Model '{self.config.model}' is unavailable or not accessible to this account.",
+                "Run 'settings models' to view and select an available model for your account.",
+            )
+
+        # 3. Permission Denied / Project Access (403)
+        if status == 403 or "permission_denied" in err_str.lower() or "forbidden" in err_str.lower():
+            return (
+                AIErrorType.PERMISSION_DENIED,
+                "Access forbidden or insufficient project permissions.",
+                "Check account tier, project billing, and API enablement.",
+            )
+
+        # 4. Rate Limited (429)
+        if status == 429:
+            if "quota" in err_str.lower() or "insufficient_quota" in err_str.lower():
+                return (
+                    AIErrorType.QUOTA_EXCEEDED,
+                    "Provider quota or credits exhausted.",
+                    "Check billing or account balance at provider console.",
+                )
+            return (
+                AIErrorType.RATE_LIMITED,
+                "Provider rate limit reached.",
+                "Wait a moment before retrying or switch default provider.",
+            )
+
+        # 5. Timeout
+        if any(k in err_str.lower() for k in ["timeout", "timed out", "readtimeouterror"]):
+            return (
+                AIErrorType.TIMEOUT,
+                "Provider request timed out.",
+                "Check network connection or increase timeout in settings.",
+            )
+
+        # 6. Network Error / Connect failure
+        if any(k in err_str.lower() for k in ["connection refused", "nameresolutionerror", "connecterror"]):
+            return (
+                AIErrorType.NETWORK_ERROR,
+                "Unable to connect to provider endpoint.",
+                "Check internet connectivity and DNS resolution.",
+            )
+
+        # 7. Bad Request (400)
+        if status == 400:
+            return (
+                AIErrorType.BAD_REQUEST,
+                f"Invalid request parameters sent to {self.name}.",
+                "Check model configuration and custom endpoint.",
+            )
+
+        # 8. Server error (500, 502, 503)
+        if status and status >= 500:
+            return (
+                AIErrorType.PROVIDER_UNAVAILABLE,
+                f"Provider {self.name} is currently experiencing service disruption (HTTP {status}).",
+                "Try again later or switch to a fallback provider.",
+            )
+
+        return (
+            AIErrorType.INVALID_RESPONSE,
+            f"Unexpected error: {err_str[:120]}",
+            "Review error details and check provider status.",
+        )
