@@ -6,12 +6,15 @@ from pathlib import Path
 
 from horcrux.models import (
     Action,
+    ArtifactRecord,
     AuditEntry,
     Credential,
+    DiscoveredPath,
     ExploitCandidate,
     Finding,
     Service,
     Software,
+    SubsystemState,
     WorkspaceState,
 )
 
@@ -133,3 +136,27 @@ class Workspace:
         state = self.load()
         state.exploits = items
         self.save(state)
+
+    def set_subsystem_state(self, name: str, sub_state: SubsystemState | str) -> None:
+        state = self.load()
+        state.set_subsystem_state(name, sub_state)
+        self.save(state)
+
+    def upsert_discovered_paths(self, items: list[DiscoveredPath]) -> None:
+        if not items:
+            return
+        state = self.load()
+        lookup = {p.url: idx for idx, p in enumerate(state.discovered_paths)}
+        for p in items:
+            if p.url in lookup:
+                state.discovered_paths[lookup[p.url]] = p
+            else:
+                state.discovered_paths.append(p)
+                lookup[p.url] = len(state.discovered_paths) - 1
+        self.save(state)
+
+    def add_artifact(self, record: ArtifactRecord) -> None:
+        state = self.load()
+        state.artifacts.append(record)
+        self.save(state)
+

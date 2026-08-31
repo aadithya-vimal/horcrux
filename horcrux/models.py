@@ -34,12 +34,52 @@ class AuditStatus(str, Enum):
     dismissed = "DISMISSED"
 
 
+class SubsystemState(str, Enum):
+    NOT_RUN = "NOT_RUN"
+    RUNNING = "RUNNING"
+    COMPLETE = "COMPLETE"
+    COMPLETE_WITH_CANDIDATES = "COMPLETE_WITH_CANDIDATES"
+    COMPLETE_NO_CANDIDATES = "COMPLETE_NO_CANDIDATES"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class DiscoveredPath(BaseModel):
+    url: str
+    path: str
+    status: int
+    size: int = 0
+    redirect: str = ""
+    content_type: str = ""
+    source: str = "horcrux-fuzzer"
+    wordlist: str = ""
+    confidence: float = 0.90
+    validated: bool = False
+    validation_state: ValidationState = ValidationState.unverified
+    timestamp: datetime = Field(default_factory=utcnow)
+
+
+class ArtifactRecord(BaseModel):
+    module: str
+    tool: str
+    command: str
+    target: str
+    start_time: datetime = Field(default_factory=utcnow)
+    end_time: Optional[datetime] = None
+    duration_seconds: float = 0.0
+    returncode: int = 0
+    stdout_path: str = ""
+    stderr_path: str = ""
+    status: str = "completed"
+
+
 # Backward-compatible alias for existing tests and code
 class FindingStatus(str, Enum):
     suspected = "suspected"
     verified = "verified"
     exploited = "exploited"
     irrelevant = "irrelevant"
+
 
 
 class AuditEntry(BaseModel):
@@ -262,3 +302,18 @@ class WorkspaceState(BaseModel):
     exploits: list[ExploitCandidate] = Field(default_factory=list)
     attack_paths: list[dict] = Field(default_factory=list)
     executive_summary: str = ""
+    subsystem_states: dict[str, str] = Field(default_factory=dict)
+    discovered_paths: list[DiscoveredPath] = Field(default_factory=list)
+    artifacts: list[ArtifactRecord] = Field(default_factory=list)
+
+    def get_subsystem_state(self, name: str) -> SubsystemState:
+        val = self.subsystem_states.get(name, SubsystemState.NOT_RUN.value)
+        try:
+            return SubsystemState(val)
+        except ValueError:
+            return SubsystemState.NOT_RUN
+
+    def set_subsystem_state(self, name: str, state: SubsystemState | str) -> None:
+        val = state.value if isinstance(state, SubsystemState) else str(state)
+        self.subsystem_states[name] = val
+

@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from horcrux.core.actions import compute_next_actions
 from horcrux.core.doctor import check_tools, CATEGORIES
 from horcrux.core.intel import run_nuclei
 from horcrux.core.runner import CommandRunner
@@ -21,7 +22,8 @@ from horcrux.core.settings import AVAILABLE_MODELS, DEFAULT_MODELS, SettingsMana
 from horcrux.core.storage import Workspace
 from horcrux.intel.ai.manager import AIManager
 from horcrux.intel.search import searchsploit_workspace
-from horcrux.models import AuditStatus, ValidationState
+from horcrux.models import AuditStatus, SubsystemState, ValidationState
+
 from horcrux.modules.local import enumerate_linux
 from horcrux.reporting.reports import markdown
 from horcrux.core.orchestrator import Orchestrator
@@ -141,8 +143,10 @@ class ConsoleApp:
                     ("findings", "Security findings with severity & confidence meters"),
                     ("inspect <id>", "Deep-dive inspection of finding evidence & reproduction"),
                     ("audit", "Audited and verified hardened security controls"),
-                    ("next", "Ranked Next Best Actions prioritized by confidence"),
+                    ("next / actions", "State-aware Next Best Actions based on actual reconnaissance"),
+                    ("subsystems / states", "View status of all reconnaissance & enumeration subsystems"),
                     ("creds", "Recovered credentials with masked secrets"),
+
                     ("graph", "Interactive attack surface graph visualization"),
                     ("cve / searchsploit", "Correlate software with known exploit candidates"),
                     ("exploit", "Review actionable exploit candidates & AI decisions"),
@@ -307,7 +311,7 @@ class ConsoleApp:
         elif command == "surface":
             self.surface()
 
-        elif command == "services":
+        elif command in {"services", "service"}:
             self.services()
 
         elif command == "software":
@@ -316,7 +320,7 @@ class ConsoleApp:
         elif command == "audit":
             self.audit()
 
-        elif command == "findings":
+        elif command in {"findings", "finding"}:
             self.findings()
 
         elif command == "inspect":
@@ -325,10 +329,10 @@ class ConsoleApp:
         elif command == "ask":
             self.ask_cmd(args)
 
-        elif command == "next":
+        elif command in {"next", "actions", "action"}:
             self.next_actions()
 
-        elif command == "creds":
+        elif command in {"creds", "credentials"}:
             self.credentials()
 
         elif command == "graph":
@@ -336,6 +340,9 @@ class ConsoleApp:
 
         elif command == "web":
             self.web()
+
+        elif command in {"subsystems", "states"}:
+            self.subsystems()
 
         elif command in {"cve", "searchsploit"}:
             loading(self.console, "Correlating with SearchSploit intelligence", 0.5)
@@ -352,12 +359,13 @@ class ConsoleApp:
         elif command == "nuclei":
             self.nuclei()
 
-        elif command == "exploit":
+        elif command in {"exploit", "exploits"}:
             self.exploits(self.workspace.load().exploits)
             self.console.print(
                 "\n[bold yellow]⚡ OPERATOR NOTICE:[/bold yellow] [dim white]Review candidates before using external PoCs. "
                 "Horcrux preserves operator control and does not silently fire destructive code.[/dim white]\n"
             )
+
 
         elif command == "source":
             if len(args) < 2:
@@ -748,9 +756,13 @@ class ConsoleApp:
 
     def next_actions(self):
         state = self.workspace.load()
+        actions = compute_next_actions(state)
+        self.workspace.set_actions(actions)
+        state = self.workspace.load()
         if not state.actions:
             self.console.print("\n[dim yellow]No pending actions in queue.[/dim yellow]\n")
             return
+
 
         table = Table(
             title=f"[bold bright_yellow]✦ PRIORITIZED NEXT ACTIONS — {state.target} ✦[/bold bright_yellow]",
@@ -901,6 +913,10 @@ class ConsoleApp:
             ", ".join(state.technologies) if state.technologies else "[dim]none detected[/dim]",
         )
         table.add_row(
+            "Discovered Endpoints",
+            str(len(state.discovered_paths)) if state.discovered_paths else "[dim]none discovered (run scan --profile web)[/dim]",
+        )
+        table.add_row(
             "HTTP Response Artifacts",
             f"{self.workspace.root / 'responses'}",
         )
@@ -911,9 +927,86 @@ class ConsoleApp:
 
         self.console.print()
         self.console.print(table)
+
+        if state.discovered_paths:
+            path_table = Table(
+                title="[bold bright_cyan]✦ DISCOVERED WEB PATHS & VALIDATION ✦[/bold bright_cyan]",
+                box=box.ROUNDED,
+                border_style="cyan",
+                header_style="bold bright_white",
+                expand=True,
+            )
+            path_table.add_column("Path", style="bold bright_white")
+            path_table.add_column("Status", justify="center")
+            path_table.add_column("Size", justify="right", style="dim white")
+            path_table.add_column("Tool", style="dim cyan")
+            path_table.add_column("Validation State", justify="center")
+
+            for dp in state.discovered_paths[:40]:
+                st_color = "bright_green" if dp.status < 300 else "bright_yellow" if dp.status < 400 else "red"
+                val_badge = (
+                    "[bold green]✔ CONFIRMED[/]" if dp.validation_state == ValidationState.confirmed
+                    else "[bold yellow]⚠ LIKELY[/]" if dp.validation_state == ValidationState.likely
+                    else "[dim red]✖ SOFT-404[/]" if dp.validation_state == ValidationState.false_positive
+                    else "[dim]UNVERIFIED[/]"
+                )
+                path_table.add_row(
+                    dp.path,
+                    f"[{st_color}]{dp.status}[/{st_color}]",
+                    f"{dp.size}B",
+                    dp.source,
+                    val_badge,
+                )
+            self.console.print(path_table)
+
         self.console.print(
             "[dim cyan]💡 Tip: Use [bold magenta]'source <artifact>'[/bold magenta] to inspect raw HTTP response bodies and headers.[/dim cyan]\n"
         )
+
+    def subsystems(self):
+        state = self.workspace.load()
+        table = Table(
+            title=f"[bold bright_magenta]✦ SUBSYSTEM RECONNAISSANCE STATES — {state.target} ✦[/bold bright_magenta]",
+            box=box.ROUNDED,
+            border_style="magenta",
+            header_style="bold bright_cyan",
+            expand=True,
+        )
+        table.add_column("Subsystem", style="bold bright_white")
+        table.add_column("State", justify="center")
+        table.add_column("Notes", style="dim white")
+
+        subsystem_descriptions = {
+            "web_discovery": "HTTP endpoint fuzzing and path discovery (FFUF/Gobuster)",
+            "web_validation": "Baseline & soft-404 verification of discovered web endpoints",
+            "cve_intelligence": "SearchSploit and CVE vulnerability correlation",
+            "smb_enum": "SMB null session, share listing, and signing requirement audit",
+            "ldap_enum": "Active Directory LDAP RootDSE and user enumeration",
+            "kerberos_enum": "Kerberos KDC presence and authentication surface",
+            "ssh_enum": "SSH banner grab, OpenSSH version detection, and cipher audit",
+            "ftp_enum": "FTP welcome banner and anonymous access audit",
+            "smtp_enum": "SMTP banner grab, EHLO capabilities, and open relay test",
+            "dns_enum": "DNS record discovery and AXFR zone transfer test",
+            "snmp_enum": "SNMP public community string and MIB inspection",
+            "database_enum": "Database (Redis/MySQL/Postgres) authentication audit",
+        }
+
+        for sub, desc in subsystem_descriptions.items():
+            curr = state.get_subsystem_state(sub)
+            badge = (
+                "[bold green]✔ COMPLETE[/]" if curr == SubsystemState.COMPLETE
+                else "[bold green]✔ COMPLETE (CANDIDATES)[/]" if curr == SubsystemState.COMPLETE_WITH_CANDIDATES
+                else "[dim yellow]○ COMPLETE (0 MATCHES)[/]" if curr == SubsystemState.COMPLETE_NO_CANDIDATES
+                else "[bold yellow]▶ RUNNING[/]" if curr == SubsystemState.RUNNING
+                else "[dim red]✖ FAILED[/]" if curr == SubsystemState.FAILED
+                else "[dim]NOT RUN[/]"
+            )
+            table.add_row(sub, badge, desc)
+
+        self.console.print()
+        self.console.print(table)
+        self.console.print()
+
 
     def exploits(self, candidates):
         if not candidates:

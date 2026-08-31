@@ -199,10 +199,34 @@ def markdown(ws, output: Path | None = None) -> Path:
 
     lines += [
         "",
-        "## Limitations",
+        "## Enumeration Performed",
         "",
-        "- Assessments are non-destructive and limited to authorized target scope.",
-        "- Exploit intelligence correlates software version metadata; operator validation is required before reproduction.",
+    ]
+    if state.subsystem_states:
+        for sub, st in state.subsystem_states.items():
+            badge = "✓" if "COMPLETE" in st else "▶" if st == "RUNNING" else "✖"
+            lines.append(f"- {badge} **{sub.replace('_', ' ').title()}**: `{st}`")
+    else:
+        lines.append("- *Initial surface discovery performed.*")
+
+    lines += [
+        "",
+        "## Missing / Unavailable Tooling",
+        "",
+    ]
+    try:
+        from horcrux.core.doctor import check_tools
+        tool_rows, _ = check_tools()
+        missing = [row for row in tool_rows if not row[1]]
+        if missing:
+            for name, path, purpose, install_cmd in missing[:12]:
+                lines.append(f"- ✖ `{name}` — {purpose}. *Install: `{install_cmd}`*")
+        else:
+            lines.append("- *All core tooling installed and verified.*")
+    except Exception:
+        lines.append("- *Tooling audit unavailable.*")
+
+    lines += [
         "",
         "## Artifacts",
         "",
@@ -210,9 +234,15 @@ def markdown(ws, output: Path | None = None) -> Path:
         f"- HTTP responses stored under: `{ws.responses}`",
         f"- HTTP headers stored under: `{ws.headers}`",
         "",
+        "## Limitations",
+        "",
+        "- Assessments are non-destructive and limited to authorized target scope.",
+        "- Exploit intelligence correlates software version metadata; operator validation is required before reproduction.",
+        "",
     ]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
     return output
+
 

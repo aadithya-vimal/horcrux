@@ -53,9 +53,10 @@ def parse_nmap(xml: str, target: str):
         services.append(item)
 
         # Software normalization: Only establish software records when meaningful product or version exists
-        # Never establish generic 'ppp' software entries without evidence
-        if product and product.lower() not in {"tcpwrapped", "unknown", "ppp"}:
+        # Never establish generic 'ppp', 'http', 'unknown' software entries without evidence
+        if product and product.lower() not in {"tcpwrapped", "unknown", "ppp", "http", "https", "ssl", "generic"}:
             confidence = 0.95 if version else 0.70
+
             software.append(
                 Software(
                     product=product,

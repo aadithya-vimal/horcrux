@@ -82,6 +82,13 @@ flowchart TD
   * `surface`: Network attack surface (open ports & protocols). *Open ports are not vulnerabilities.*
   * `audit`: Audited & hardened controls (e.g. protected `.env`, rejected SMB null sessions, HTTP 403 admin panels, soft-404 pages).
   * `findings`: Verified vulnerabilities with reproducible proof (e.g. leaked credentials, unauthenticated Redis, confirmed CVEs).
+* **Centralized Service-to-Module Router**: Intelligently inspects protocols, ports, products, and versions to dispatch tailored enumeration modules (HTTP, SMB, LDAP, Kerberos, SSH, FTP, SMTP, DNS, SNMP, Databases, NFS, WinRM, RDP) without blind tool spam.
+* **Universal Web Enumeration & Response Validation Pipeline**:
+  * Automatically invokes best available fuzzing tools (**FFUF**, **Gobuster**, **Feroxbuster**, or built-in native prober) with smart wordlist resolution and fallback tracking.
+  * Every discovered candidate path passes through the baseline engine: Soft-404, SPA fallback, and generic error templates are suppressed as false positives; confirmed sensitive content (e.g. `.env`, Git metadata, SQL dumps, directory listings, credentials, debug traces) is promoted to verified findings.
+* **State-Aware Next Best Action Engine & Subsystem Tracking**:
+  * Tracks live subsystem states (`web_discovery`, `web_validation`, `cve_intelligence`, `smb_enum`, `ldap_enum`, etc.).
+  * Eliminates blind fixed scores and stale recommendations. If CVE correlation yielded 0 candidates, it never repeats the recommendation and suggests relevant service review instead (`subsystems` / `next`).
 * **Multi-Provider AI Intelligence Core**:
   * Native support for **Groq** (`llama-3.3-70b-versatile`), **OpenAI** (`gpt-4o`), **Anthropic** (`claude-3-5-sonnet`), and **Google AI Studio / Gemini** (`gemini-2.5-flash`).
   * Intelligent exploit candidate triage, contextual Next-Best-Action ranking, attack-path synthesis, and operator Q&A (`ask <question>`).
@@ -94,6 +101,7 @@ flowchart TD
 * **Persistent Workspaces**: Every assessment gets an isolated workspace tracking structured state (`state.json`), raw command logs, headers, and HTTP responses.
 * **Attack Surface Tree Graph**: Interactive Rich visual hierarchy linking targets, open ports, fingerprinted services, vulnerabilities, and leaked credentials.
 * **Horcrux Artifact Gallery**: Built-in showcase of thematic ASCII relics representing the 7 Horcruxes and Deathly Hallows.
+
 
 ---
 
