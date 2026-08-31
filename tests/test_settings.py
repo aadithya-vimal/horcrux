@@ -39,3 +39,44 @@ def test_settings_persistence():
         assert mgr2.settings.enabled is False
         assert mgr2.settings.default_provider == "openai"
         assert mgr2.settings.providers["groq"].model == "llama-3.1-8b-instant"
+
+
+def test_regional_model_selection():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        mgr = SettingsManager(config_dir=tmp_path)
+
+        # Region-specific model selection (e.g. EU / APAC / US regional endpoints)
+        mgr.set_model("google", "gemini-1.5-flash")
+        assert mgr.settings.providers["google"].model == "gemini-1.5-flash"
+
+        mgr.set_model("groq", "llama-3.1-70b-versatile")
+        assert mgr.settings.providers["groq"].model == "llama-3.1-70b-versatile"
+
+        mgr.set_model("anthropic", "claude-3-7-sonnet-latest")
+        assert mgr.settings.providers["anthropic"].model == "claude-3-7-sonnet-latest"
+
+        # Custom regional / private deployment model ID
+        mgr.set_model("openai", "us-east-1.gpt-4o-custom-deployment")
+        assert mgr.settings.providers["openai"].model == "us-east-1.gpt-4o-custom-deployment"
+
+        # Verify reload
+        mgr_reloaded = SettingsManager(config_dir=tmp_path)
+        assert mgr_reloaded.settings.providers["google"].model == "gemini-1.5-flash"
+        assert mgr_reloaded.settings.providers["openai"].model == "us-east-1.gpt-4o-custom-deployment"
+
+
+def test_ai_manager_available_models():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from horcrux.intel.ai.manager import AIManager
+        mgr = SettingsManager(config_dir=Path(tmpdir))
+        ai = AIManager(mgr)
+
+        groq_models = ai.get_available_models("groq")
+        assert "llama-3.3-70b-versatile" in groq_models
+        assert "llama-3.1-8b-instant" in groq_models
+
+        google_models = ai.get_available_models("google")
+        assert "gemini-1.5-flash" in google_models
+        assert "gemini-2.5-flash" in google_models
+

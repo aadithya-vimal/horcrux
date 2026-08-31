@@ -1057,9 +1057,11 @@ class ConsoleApp:
                 + f"[bold bright_yellow]Default Provider:[/bold bright_yellow] [bold bright_cyan]{default_p.upper()}[/bold bright_cyan]\n"
                 + f"[bold bright_yellow]Default Model:   [/bold bright_yellow] [bold bright_cyan]{model_name}[/bold bright_cyan]\n"
                 + f"[bold bright_yellow]AI Engine Status:[/bold bright_yellow] {ai_status}\n\n"
+                + "[dim cyan]💡 Tip: Model availability may vary by region or account. Use 'settings model' to select or switch.[/dim cyan]\n\n"
                 + "[dim white]Commands:\n"
                 + "  settings provider <groq|openai|anthropic|google> [api_key]\n"
-                + "  settings model <provider> <model_name>\n"
+                + "  settings model [provider] [model_name]  (select or change model)\n"
+                + "  settings models [provider]              (list available regional models)\n"
                 + "  settings default <provider>\n"
                 + "  settings test [provider]\n"
                 + "  settings remove <provider>[/dim white]"
@@ -1091,16 +1093,88 @@ class ConsoleApp:
                 mgr.set_api_key(p_name, key_val)
                 self.ai_manager = AIManager()
                 self.console.print(f"[bold green]✔ API key stored securely for provider '{p_name}'.[/bold green]")
+                try:
+                    choose_model = Prompt.ask(
+                        f"[dim cyan]Would you like to select a specific model for {p_name.upper()}? (may vary by region)[/dim cyan]",
+                        choices=["y", "n"],
+                        default="n",
+                    )
+                    if choose_model.lower() == "y":
+                        self.settings_cmd(["settings", "model", p_name])
+                except Exception:
+                    pass
             else:
                 self.console.print("[yellow]No key provided.[/yellow]")
 
-        elif sub == "model":
-            if len(args) < 4:
-                raise ValueError("usage: settings model <provider> <model_name>")
-            p_name, m_name = args[2].lower(), args[3].strip()
-            mgr.set_model(p_name, m_name)
+        elif sub in {"model", "models"}:
+            # Determine provider
+            if len(args) >= 3 and args[2].lower() in {"groq", "openai", "anthropic", "google"}:
+                p_name = args[2].lower()
+            else:
+                p_name = Prompt.ask(
+                    "[bold bright_cyan]Select AI Provider[/bold bright_cyan]",
+                    choices=["groq", "openai", "anthropic", "google"],
+                    default=mgr.settings.default_provider,
+                ).lower()
+
+            # Direct CLI or console set: `settings model <provider> <model_name>`
+            if len(args) >= 4 and sub == "model":
+                m_name = " ".join(args[3:]).strip()
+                mgr.set_model(p_name, m_name)
+                self.ai_manager = AIManager()
+                self.console.print(f"[bold green]✔ Active model for '{p_name}' set to '{m_name}'.[/bold green]")
+                return
+
+            # Interactive model selector with regional discovery
+            cur_model = mgr.settings.providers.get(p_name, ProviderConfig(name=p_name, model=DEFAULT_MODELS.get(p_name, ""))).model
+
+            loading(self.console, f"Discovering available models for {p_name.upper()} (regional/account)...", 0.4)
+            available = self.ai_manager.get_available_models(p_name)
+            if not available:
+                available = AVAILABLE_MODELS.get(p_name, [cur_model])
+
+            if cur_model and cur_model not in available:
+                available = [cur_model] + available
+
+            table = Table(
+                title=f"[bold bright_magenta]✦ {p_name.upper()} AVAILABLE MODELS (REGIONAL SELECTION) ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                header_style="bold bright_cyan",
+            )
+            table.add_column("#", justify="center", style="bold yellow", no_wrap=True)
+            table.add_column("Model Identifier", style="bold bright_white")
+            table.add_column("Status", justify="center", no_wrap=True)
+
+            for idx, m_id in enumerate(available, 1):
+                st_badge = "[bold green]★ CURRENT[/bold green]" if m_id == cur_model else "[dim cyan]available[/dim cyan]"
+                table.add_row(str(idx), m_id, st_badge)
+
+            self.console.print()
+            self.console.print(table)
+            self.console.print(
+                "[dim cyan]💡 Tip: Model availability varies by region, quota, or enterprise tenancy.\n"
+                "   Choose a number [1-N], enter a custom model name (e.g. gemini-1.5-flash), or press Enter to keep current.[/dim cyan]\n"
+            )
+
+            choice = Prompt.ask(
+                f"[bold bright_yellow]Select model for {p_name.upper()} [1-{len(available)} or custom][/bold bright_yellow]",
+                default=cur_model,
+            ).strip()
+
+            if not choice or choice == cur_model:
+                self.console.print(f"[dim]Retaining current model '{cur_model}'.[/dim]")
+                return
+
+            if choice.isdigit() and 1 <= int(choice) <= len(available):
+                chosen_model = available[int(choice) - 1]
+            else:
+                chosen_model = choice
+
+            mgr.set_model(p_name, chosen_model)
             self.ai_manager = AIManager()
-            self.console.print(f"[bold green]✔ Default model for '{p_name}' set to '{m_name}'.[/bold green]")
+            self.console.print(f"[bold green]✔ Active model for '{p_name}' successfully set to '{chosen_model}'.[/bold green]")
+
 
         elif sub == "default":
             if len(args) < 3:

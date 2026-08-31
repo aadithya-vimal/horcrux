@@ -71,3 +71,26 @@ class OpenAIProvider(AIProvider):
             model=model,
             provider="openai",
         )
+
+    def fetch_models(self) -> list[str]:
+        key = self.get_api_key()
+        if not key:
+            return self.models()
+        try:
+            headers = {"Authorization": f"Bearer {key}", "User-Agent": "Horcrux-AI/1.0"}
+            with httpx.Client(timeout=8) as client:
+                resp = client.get("https://api.openai.com/v1/models", headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_ids = [m["id"] for m in data.get("data", []) if "id" in m]
+                    chat_models = [m for m in raw_ids if m.startswith(("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")) and "realtime" not in m and "audio" not in m]
+                    if chat_models:
+                        cur = self.config.model
+                        res = [cur] if cur in chat_models else []
+                        for m_id in sorted(chat_models):
+                            if m_id not in res:
+                                res.append(m_id)
+                        return res
+        except Exception:
+            pass
+        return self.models()

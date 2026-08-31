@@ -64,24 +64,34 @@ AVAILABLE_MODELS: dict[str, list[str]] = {
     "groq": [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
+        "llama-3.1-70b-versatile",
         "mixtral-8x7b-32768",
         "gemma2-9b-it",
+        "deepseek-r1-distill-llama-70b",
+        "qwen-2.5-32b",
     ],
     "openai": [
         "gpt-4o",
         "gpt-4o-mini",
         "gpt-4-turbo",
         "o3-mini",
+        "o1-mini",
+        "chatgpt-4o-latest",
     ],
     "anthropic": [
         "claude-3-5-sonnet-latest",
         "claude-3-5-haiku-latest",
+        "claude-3-7-sonnet-latest",
         "claude-3-opus-latest",
+        "claude-3-haiku-20240307",
     ],
     "google": [
         "gemini-2.5-flash",
         "gemini-2.5-pro",
         "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash-8b",
     ],
 }
 

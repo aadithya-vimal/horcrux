@@ -71,3 +71,26 @@ class GroqProvider(AIProvider):
             model=model,
             provider="groq",
         )
+
+    def fetch_models(self) -> list[str]:
+        key = self.get_api_key()
+        if not key:
+            return self.models()
+        try:
+            headers = {"Authorization": f"Bearer {key}", "User-Agent": "Horcrux-AI/1.0"}
+            with httpx.Client(timeout=8) as client:
+                resp = client.get("https://api.groq.com/openai/v1/models", headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ids = [m["id"] for m in data.get("data", []) if "id" in m and not m.get("id", "").startswith("whisper")]
+                    if ids:
+                        # Put current model or default at the top, then others
+                        cur = self.config.model
+                        res = [cur] if cur in ids else []
+                        for m_id in sorted(ids):
+                            if m_id not in res:
+                                res.append(m_id)
+                        return res
+        except Exception:
+            pass
+        return self.models()

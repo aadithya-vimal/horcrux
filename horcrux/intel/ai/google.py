@@ -85,3 +85,30 @@ class GoogleProvider(AIProvider):
             model=model,
             provider="google",
         )
+
+    def fetch_models(self) -> list[str]:
+        key = self.get_api_key()
+        if not key:
+            return self.models()
+        try:
+            with httpx.Client(timeout=8) as client:
+                resp = client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={key}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = []
+                    for m in data.get("models", []):
+                        name = m.get("name", "")
+                        methods = m.get("supportedGenerationMethods", [])
+                        if "generateContent" in methods and "gemini" in name.lower():
+                            clean = name.replace("models/", "")
+                            models.append(clean)
+                    if models:
+                        cur = self.config.model
+                        res = [cur] if cur in models else []
+                        for m_id in sorted(models):
+                            if m_id not in res:
+                                res.append(m_id)
+                        return res
+        except Exception:
+            pass
+        return self.models()

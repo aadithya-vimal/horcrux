@@ -102,6 +102,10 @@ class AIProvider(abc.ABC):
     def models(self) -> list[str]:
         return AVAILABLE_MODELS.get(self.name, [self.config.model])
 
+    def fetch_models(self) -> list[str]:
+        """Fetch models dynamically from provider API if available, falling back to curated regional models."""
+        return self.models()
+
     @abc.abstractmethod
     def complete(
         self,

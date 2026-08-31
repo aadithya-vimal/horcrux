@@ -179,15 +179,23 @@ HORCRUX stores configuration persistently in platform-appropriate locations (`~/
 │  Default Model:    llama-3.3-70b-versatile                                  │
 │  AI Engine Status: ENABLED                                                  │
 │                                                                             │
+│  💡 Tip: Model availability may vary by region or account. Use 'settings    │
+│  model' to select or switch.                                                │
+│                                                                             │
 │  Commands:                                                                  │
 │    settings provider <groq|openai|anthropic|google> [key]                   │
-│    settings model <provider> <model_name>                                   │
+│    settings model [provider] [model_name]  (select or change model)         │
+│    settings models [provider]              (list available regional models) │
 │    settings default <provider>                                              │
 │    settings test [provider]                                                 │
 │    settings remove <provider>                                               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> [!TIP]
+> **Regional & Account Model Flexibility**: Model availability and API naming conventions often differ across geographical regions (e.g. EU vs. US) and enterprise tenants. Run `horcrux settings model <provider>` or `settings model` inside the console to dynamically discover available models for your account or enter a custom model name (e.g. `gemini-1.5-flash`, `llama-3.1-8b-instant`, `claude-3-7-sonnet-latest`, or private deployment IDs).
+
 
 ---
 

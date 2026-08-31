@@ -57,6 +57,12 @@ class AIManager:
         p = self.get_provider()
         return p.name if p else "none"
 
+    def get_available_models(self, provider_name: str) -> list[str]:
+        p = self.providers.get(provider_name.lower())
+        if p:
+            return p.fetch_models()
+        return AVAILABLE_MODELS.get(provider_name.lower(), [])
+
     def status(self) -> dict[str, Any]:
         p = self.get_provider()
         configured = p is not None

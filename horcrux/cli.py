@@ -74,11 +74,13 @@ def console():
     ConsoleApp().run()
 
 
-@app.command()
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 def settings(
     ctx: typer.Context,
 ):
-    """View and configure AI providers, keys, and default models."""
+    """View and configure AI providers, keys, and regional models."""
     args = ["settings"] + list(ctx.args)
     ConsoleApp().settings_cmd(args)
 

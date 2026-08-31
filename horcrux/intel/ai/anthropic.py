@@ -66,3 +66,29 @@ class AnthropicProvider(AIProvider):
             model=model,
             provider="anthropic",
         )
+
+    def fetch_models(self) -> list[str]:
+        key = self.get_api_key()
+        if not key:
+            return self.models()
+        try:
+            headers = {
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "User-Agent": "Horcrux-AI/1.0",
+            }
+            with httpx.Client(timeout=8) as client:
+                resp = client.get("https://api.anthropic.com/v1/models", headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ids = [m["id"] for m in data.get("data", []) if "id" in m]
+                    if ids:
+                        cur = self.config.model
+                        res = [cur] if cur in ids else []
+                        for m_id in sorted(ids):
+                            if m_id not in res:
+                                res.append(m_id)
+                        return res
+        except Exception:
+            pass
+        return self.models()
