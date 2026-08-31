@@ -1,21 +1,13 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
-
-import httpx
-
-from horcrux.core.parsers import detect_technologies
-from horcrux.models import Credential, Finding, Severity
-
-
 import secrets
 from urllib.parse import urljoin
 
 import httpx
 
 from horcrux.core.parsers import detect_technologies
-from horcrux.models import Credential, Finding, FindingStatus, Severity, ValidationState
+from horcrux.models import AuditEntry, AuditStatus, Credential, Finding, FindingStatus, Severity, ValidationState
 from horcrux.modules.web.validator import BaselineFingerprint, ValidatorRegistry
 
 
@@ -143,6 +135,8 @@ def scan_http(ws, target: str, port: int, registry: ValidatorRegistry | None = N
                     )
                 )
 
+    audits: list[AuditEntry] = []
+
     # 3. Pluggable Endpoint Validators Execution
     for validator in registry.all_validators():
         key = validator.path.strip("/").replace("/", "_") or "root"
@@ -152,6 +146,17 @@ def scan_http(ws, target: str, port: int, registry: ValidatorRegistry | None = N
             resp = client.get(url)
         except Exception as exc:
             ws.write(f"responses/{key}.error", str(exc))
+            audits.append(
+                AuditEntry(
+                    id=f"audit-web-{key}-{port}",
+                    category=validator.category,
+                    asset=url,
+                    check_name=validator.title or f"Endpoint audit: {validator.path}",
+                    status=AuditStatus.audited,
+                    evidence=[f"Connection failed: {exc}"],
+                    reason=f"Tested {validator.path}: endpoint unreachable or timed out.",
+                )
+            )
             continue
 
         headers = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
@@ -181,8 +186,24 @@ def scan_http(ws, target: str, port: int, registry: ValidatorRegistry | None = N
                     why_it_matters=result.why_it_matters,
                     recommended_next_action=result.recommended_next_action,
                     next_action=result.recommended_next_action,
+                    reproduction=[f"curl -k -s -i '{url}'"],
                 )
             )
+        else:
+            audits.append(
+                AuditEntry(
+                    id=f"audit-web-{key}-{port}",
+                    category=validator.category,
+                    asset=url,
+                    check_name=validator.title or f"Endpoint audit: {validator.path}",
+                    status=result.audit_status,
+                    evidence=result.evidence,
+                    reason=f"Tested {validator.path} (HTTP {resp.status_code}): {result.evidence[0] if result.evidence else 'Non-vulnerable response structure verified.'}",
+                )
+            )
+
+    if audits:
+        ws.upsert_audits(audits)
 
     ws.write_json(
         f"web-{port}.json",

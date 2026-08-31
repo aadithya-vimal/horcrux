@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from horcrux.core.parsers import parse_nmap
-from horcrux.models import Finding, FindingStatus, ScanProfile, Severity, ValidationState
+from horcrux.models import AuditEntry, AuditStatus, Finding, FindingStatus, ScanProfile, Severity, ValidationState
 
 
 def run_network(ws, runner, target: str, profile: ScanProfile | None = None, deep: bool = False):
@@ -61,50 +61,35 @@ def run_network(ws, runner, target: str, profile: ScanProfile | None = None, dee
         )
 
     findings = []
+    audits = []
     for service in services:
         if service.port == 23:
-            findings.append(
-                Finding(
-                    id="telnet-exposed",
-                    title="Telnet exposed",
-                    category="network",
-                    severity=Severity.medium,
-                    confidence=0.99,
-                    status=FindingStatus.verified,
-                    validation_state=ValidationState.confirmed,
-                    target=target,
-                    affected_asset=f"{target}:23",
-                    protocol=service.protocol,
-                    port=23,
-                    source_tool="nmap",
-                    evidence=["TCP/23 is open; cleartext Telnet protocol in use."],
-                    artifacts=["raw/nmap-tcp.xml"],
-                    why_it_matters="Cleartext telnet protocol transmits credentials unencrypted over the network.",
-                    recommended_next_action="Assess cleartext authentication and upgrade to SSH.",
-                    next_action="Assess cleartext authentication and upgrade to SSH.",
+            audits.append(
+                AuditEntry(
+                    id=f"audit-telnet-{target}",
+                    category="network-protocol",
+                    asset=f"{target}:23",
+                    check_name="Telnet Cleartext Protocol Audit",
+                    status=AuditStatus.suspicious,
+                    evidence=["TCP/23 Telnet is active; cleartext protocol transmits credentials unencrypted."],
+                    reason="Legacy cleartext protocol detected on network perimeter.",
                 )
             )
         elif service.port == 21:
-            findings.append(
-                Finding(
-                    id="ftp-exposed",
-                    title="FTP exposed",
-                    category="network",
-                    severity=Severity.info,
-                    confidence=0.99,
-                    status=FindingStatus.verified,
-                    validation_state=ValidationState.confirmed,
-                    target=target,
-                    affected_asset=f"{target}:21",
-                    protocol=service.protocol,
-                    port=21,
-                    source_tool="nmap",
-                    evidence=["TCP/21 is open."],
-                    artifacts=["raw/nmap-tcp.xml"],
-                    why_it_matters="FTP can allow anonymous access or cleartext password transmission.",
-                    recommended_next_action="Check anonymous access and server capabilities.",
-                    next_action="Check anonymous access and server capabilities.",
+            audits.append(
+                AuditEntry(
+                    id=f"audit-ftp-{target}",
+                    category="network-protocol",
+                    asset=f"{target}:21",
+                    check_name="FTP Service Audit",
+                    status=AuditStatus.audited,
+                    evidence=["TCP/21 FTP service active."],
+                    reason="FTP service exposed for enumeration.",
                 )
             )
 
+    if audits:
+        ws.upsert_audits(audits)
+
     return result, findings
+

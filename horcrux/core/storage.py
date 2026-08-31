@@ -6,6 +6,7 @@ from pathlib import Path
 
 from horcrux.models import (
     Action,
+    AuditEntry,
     Credential,
     ExploitCandidate,
     Finding,
@@ -98,6 +99,29 @@ class Workspace:
                 break
         else:
             state.findings.append(finding)
+        self.save(state)
+
+    def upsert_audit(self, entry: AuditEntry) -> None:
+        state = self.load()
+        for idx, old in enumerate(state.audit):
+            if old.id == entry.id:
+                state.audit[idx] = entry
+                break
+        else:
+            state.audit.append(entry)
+        self.save(state)
+
+    def upsert_audits(self, items: list[AuditEntry]) -> None:
+        if not items:
+            return
+        state = self.load()
+        lookup = {a.id: idx for idx, a in enumerate(state.audit)}
+        for entry in items:
+            if entry.id in lookup:
+                state.audit[lookup[entry.id]] = entry
+            else:
+                state.audit.append(entry)
+                lookup[entry.id] = len(state.audit) - 1
         self.save(state)
 
     def set_actions(self, items: list[Action]) -> None:

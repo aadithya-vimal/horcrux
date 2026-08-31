@@ -27,12 +27,30 @@ class ValidationState(str, Enum):
     false_positive = "FALSE_POSITIVE"
 
 
+class AuditStatus(str, Enum):
+    hardened = "HARDENED"
+    audited = "AUDITED"
+    suspicious = "SUSPICIOUS"
+    dismissed = "DISMISSED"
+
+
 # Backward-compatible alias for existing tests and code
 class FindingStatus(str, Enum):
     suspected = "suspected"
     verified = "verified"
     exploited = "exploited"
     irrelevant = "irrelevant"
+
+
+class AuditEntry(BaseModel):
+    id: str
+    category: str
+    asset: str
+    check_name: str
+    status: AuditStatus = AuditStatus.audited
+    evidence: list[str] = Field(default_factory=list)
+    reason: str = ""
+    timestamp: datetime = Field(default_factory=utcnow)
 
 
 class Service(BaseModel):
@@ -84,6 +102,7 @@ class Finding(BaseModel):
     why_it_matters: str = ""
     recommended_next_action: str = ""
     next_action: str = ""
+    timestamp: datetime = Field(default_factory=utcnow)
 
 
 class Action(BaseModel):
@@ -105,6 +124,12 @@ class ExploitCandidate(BaseModel):
     notes: str = ""
     exploitability: str = "MANUAL REVIEW"
     relevance: str = "CANDIDATE"
+    query: str = ""
+    relevance_reasoning: str = ""
+    attack_type: str = "remote"
+    missing_prerequisites: list[str] = Field(default_factory=list)
+    ai_triaged: bool = False
+    ai_decision: str = ""
 
 
 class ScanProfile(BaseModel):
@@ -232,5 +257,8 @@ class WorkspaceState(BaseModel):
     technologies: list[str] = Field(default_factory=list)
     credentials: list[Credential] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    audit: list[AuditEntry] = Field(default_factory=list)
     actions: list[Action] = Field(default_factory=list)
     exploits: list[ExploitCandidate] = Field(default_factory=list)
+    attack_paths: list[dict] = Field(default_factory=list)
+    executive_summary: str = ""

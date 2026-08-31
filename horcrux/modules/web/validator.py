@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from horcrux.models import Finding, Severity, ValidationState
+from horcrux.models import AuditStatus, Finding, Severity, ValidationState
 
 
 @dataclass
@@ -68,7 +68,7 @@ class BaselineFingerprint:
         if resp_hash == self.body_hash:
             return True
 
-        # Check for matching title and length similarity within 10%
+        # Check for matching title and length similarity within 15%
         title_match = re.search(r"<title[^>]*>(.*?)</title>", resp_text, re.I | re.S)
         resp_title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
         if self.title and resp_title and self.title.lower() == resp_title.lower():
@@ -93,6 +93,8 @@ class ValidationResult:
     evidence: list[str]
     why_it_matters: str = ""
     recommended_next_action: str = ""
+    audit_status: AuditStatus = AuditStatus.audited
+    reproduction: list[str] = field(default_factory=list)
 
 
 # Pluggable content validator callback signature
@@ -121,6 +123,7 @@ def validate_env_content(response: httpx.Response, baseline: BaselineFingerprint
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
             evidence=["Filtered out by baseline similarity or non-200."],
         )
 
@@ -132,6 +135,7 @@ def validate_env_content(response: httpx.Response, baseline: BaselineFingerprint
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
             evidence=["Path returned HTML document instead of key-value configuration."],
         )
 
@@ -151,6 +155,7 @@ def validate_env_content(response: httpx.Response, baseline: BaselineFingerprint
             is_valid=True,
             confidence=0.99,
             validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
             evidence=[
                 "Valid environment configuration file syntax confirmed.",
                 f"Discovered configuration keys: {', '.join(env_lines[:5])}",
@@ -163,6 +168,7 @@ def validate_env_content(response: httpx.Response, baseline: BaselineFingerprint
             is_valid=True,
             confidence=0.75,
             validation_state=ValidationState.likely,
+            audit_status=AuditStatus.suspicious,
             evidence=[f"Potential single key-value environment line found: {env_lines[0]}"],
             why_it_matters="May expose application configuration or credential definitions.",
             recommended_next_action="Review endpoint manually to verify syntax.",
@@ -172,6 +178,7 @@ def validate_env_content(response: httpx.Response, baseline: BaselineFingerprint
         is_valid=False,
         confidence=0.1,
         validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
         evidence=["HTTP 200 returned but content does not match environment file structure."],
     )
 
@@ -183,6 +190,7 @@ def validate_git_head(response: httpx.Response, baseline: BaselineFingerprint) -
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
             evidence=["Filtered out by baseline similarity or non-200."],
         )
 
@@ -192,6 +200,7 @@ def validate_git_head(response: httpx.Response, baseline: BaselineFingerprint) -
             is_valid=True,
             confidence=0.99,
             validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
             evidence=[f"Valid Git repository HEAD structure verified: '{text[:40]}'"],
             why_it_matters="Exposes internal Git repository metadata, commit history, and source code.",
             recommended_next_action="Inspect Git tree objects and commit history for hardcoded secrets.",
@@ -201,6 +210,7 @@ def validate_git_head(response: httpx.Response, baseline: BaselineFingerprint) -
         is_valid=False,
         confidence=0.0,
         validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
         evidence=["HTTP 200 returned but content does not match Git HEAD record."],
     )
 
@@ -212,6 +222,7 @@ def validate_passwd_content(response: httpx.Response, baseline: BaselineFingerpr
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
             evidence=["Filtered out by baseline similarity or non-200."],
         )
 
@@ -223,6 +234,7 @@ def validate_passwd_content(response: httpx.Response, baseline: BaselineFingerpr
             is_valid=True,
             confidence=0.99,
             validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
             evidence=[
                 f"Discovered {len(passwd_matches)} valid Unix passwd format user account records.",
                 f"First entry: {passwd_matches[0]}",
@@ -235,6 +247,7 @@ def validate_passwd_content(response: httpx.Response, baseline: BaselineFingerpr
         is_valid=False,
         confidence=0.0,
         validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
         evidence=["HTTP 200 returned but content does not match /etc/passwd record format."],
     )
 
@@ -246,6 +259,7 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
             evidence=["Endpoint returned baseline catch-all error/SPA response."],
         )
 
@@ -254,9 +268,10 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
 
     if status in {401, 403}:
         return ValidationResult(
-            is_valid=True,
+            is_valid=False,
             confidence=0.85,
-            validation_state=ValidationState.likely,
+            validation_state=ValidationState.potential,
+            audit_status=AuditStatus.audited,
             evidence=[f"Administrative path restricted with HTTP {status}."],
             why_it_matters="Identifies privileged administrative boundary requiring authentication.",
             recommended_next_action="Inspect authentication mechanism and check for authorization bypasses.",
@@ -278,6 +293,7 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
                 is_valid=True,
                 confidence=0.90,
                 validation_state=ValidationState.confirmed,
+                audit_status=AuditStatus.suspicious,
                 evidence=[
                     "Administrative interface content verified.",
                     f"Matched administrative indicators: {', '.join(matches)}",
@@ -290,6 +306,7 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
                 is_valid=True,
                 confidence=0.65,
                 validation_state=ValidationState.potential,
+                audit_status=AuditStatus.suspicious,
                 evidence=[f"Weak administrative keyword match: {matches[0]}"],
                 why_it_matters="Potential administrative surface; requires manual verification.",
                 recommended_next_action="Manual operator review of administrative interface.",
@@ -299,6 +316,7 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
         is_valid=False,
         confidence=0.1,
         validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
         evidence=[f"HTTP {status} returned without administrative markers."],
     )
 
@@ -310,7 +328,8 @@ def validate_robots_content(response: httpx.Response, baseline: BaselineFingerpr
             is_valid=False,
             confidence=0.0,
             validation_state=ValidationState.false_positive,
-            evidence=["Filtered out by baseline similarity."],
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
         )
 
     text = response.text
@@ -320,6 +339,7 @@ def validate_robots_content(response: httpx.Response, baseline: BaselineFingerpr
             is_valid=True,
             confidence=0.99,
             validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.audited,
             evidence=[
                 "Valid robots.txt discovered.",
                 f"Disallowed entries ({len(disallows)}): {', '.join(disallows[:5])}",
@@ -332,7 +352,108 @@ def validate_robots_content(response: httpx.Response, baseline: BaselineFingerpr
         is_valid=False,
         confidence=0.0,
         validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
         evidence=["HTTP 200 returned but file does not contain robots directives."],
+    )
+
+
+def validate_sitemap_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates sitemap.xml structure."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text
+    if ("<urlset" in text or "<sitemapindex" in text) and "<loc>" in text:
+        locs = re.findall(r"<loc>(.*?)</loc>", text, re.I)
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.95,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.audited,
+            evidence=[f"Discovered sitemap XML with {len(locs)} declared URL endpoints."],
+            why_it_matters="Exposes full list of indexable site routes and application endpoints.",
+            recommended_next_action="Add extracted sitemap endpoints to discovery queue.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not match XML sitemap schema."],
+    )
+
+
+def validate_backup_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates database dump / backup file indicators; rejects HTML catchall."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text
+    if "<html" in text.lower():
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Path returned HTML error page."],
+        )
+    # Check for SQL statements
+    if re.search(r"(?i)\b(?:CREATE\s+TABLE|INSERT\s+INTO|DROP\s+TABLE)\b", text):
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.98,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["Valid SQL dump syntax detected with table/insert statements."],
+            why_it_matters="Database backup file exposed publicly; leaks database schema and table contents.",
+            recommended_next_action="Remove public exposure immediately and audit disclosed data.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not contain backup or SQL structure."],
+    )
+
+
+def validate_phpinfo_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates phpinfo disclosure."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text
+    if "php version" in text.lower() and ("configuration file (php.ini)" in text.lower() or "zend extension build" in text.lower()):
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.99,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["PHP diagnostic phpinfo() output verified."],
+            why_it_matters="Discloses complete PHP runtime configuration, modules, and server environment variables.",
+            recommended_next_action="Disable or restrict phpinfo diagnostics.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not match phpinfo structure."],
     )
 
 
@@ -403,3 +524,34 @@ class ValidatorRegistry:
                 description="Information disclosure via crawler exclusions",
             )
         )
+        self.register(
+            EndpointValidator(
+                path="/sitemap.xml",
+                category="web-information-disclosure",
+                severity=Severity.info,
+                validator_fn=validate_sitemap_content,
+                title="XML Sitemap discovery",
+                description="Discloses application endpoint index",
+            )
+        )
+        self.register(
+            EndpointValidator(
+                path="/backup.sql",
+                category="web-file-exposure",
+                severity=Severity.high,
+                validator_fn=validate_backup_content,
+                title="Database backup file exposure",
+                description="Publicly exposed database backup file",
+            )
+        )
+        self.register(
+            EndpointValidator(
+                path="/phpinfo.php",
+                category="web-information-disclosure",
+                severity=Severity.medium,
+                validator_fn=validate_phpinfo_content,
+                title="PHP configuration info disclosure",
+                description="Diagnostic phpinfo script publicly accessible",
+            )
+        )
+
