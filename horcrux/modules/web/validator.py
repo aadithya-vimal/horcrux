@@ -457,6 +457,216 @@ def validate_phpinfo_content(response: httpx.Response, baseline: BaselineFingerp
     )
 
 
+def validate_directory_listing(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates automatic directory listing / index exposure."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text
+    if re.search(r"<title>\s*Index of\s+[^<]+</title>", text, re.I) or (
+        "index of /" in text.lower() and ("parent directory" in text.lower() or "last modified" in text.lower())
+    ):
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.98,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["Directory indexing header ('Index of /') detected on live endpoint."],
+            why_it_matters="Directory listing allows unauthenticated mapping of file trees, hidden scripts, and backup artifacts.",
+            recommended_next_action="Disable Options -Indexes on web server configuration.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response is not a directory listing."],
+    )
+
+
+def validate_swagger_openapi(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates interactive Swagger UI or raw OpenAPI schema."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text.lower()
+    if "swagger-ui" in text or '"openapi":' in text or '"swagger":' in text or "swaggerui" in text:
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.95,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["Interactive API documentation interface (Swagger/OpenAPI) verified."],
+            why_it_matters="Discloses complete internal API endpoint catalog, parameters, authentication schemes, and schemas.",
+            recommended_next_action="Review disclosed API routes for authorization controls and restrict public access.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not match Swagger/OpenAPI documentation."],
+    )
+
+
+def validate_actuator_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates Spring Boot Actuator endpoint exposure."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text.lower()
+    if "_links" in text and ("actuator" in text or "health" in text or "beans" in text or "env" in text):
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.98,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["Spring Boot Actuator discovery JSON navigation links confirmed."],
+            why_it_matters="Actuator endpoints frequently expose internal JVM state, heap dumps, environment secrets, and config properties.",
+            recommended_next_action="Restrict management.endpoints.web.exposure.include to authenticated admin perimeters.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not match Spring Boot Actuator format."],
+    )
+
+
+def validate_graphql_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates GraphQL endpoint exposure."""
+    if baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity."],
+        )
+    text = response.text.lower()
+    if response.status_code in {200, 400} and ("graphql" in text or "must provide query string" in text or "graphiql" in text):
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.92,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=["GraphQL service endpoint or interactive GraphiQL playground detected."],
+            why_it_matters="Allows querying internal object graphs; introspection queries may disclose full data models.",
+            recommended_next_action="Run introspection query check and ensure field authorization is strictly enforced.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Endpoint does not behave as GraphQL interface."],
+    )
+
+
+def validate_generic_candidate(path: str, response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """
+    Universal validator for arbitrary paths discovered by fuzzing/wordlist brute-forcing.
+    Detects soft-404s, directory listings, credentials, backups, debug dumps, and normal surface items.
+    """
+    # 1. Soft-404 / baseline check
+    if baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=[f"Suppressed: response for '{path}' is structurally identical to baseline non-existent path."],
+        )
+
+    # 2. Status code classification
+    if response.status_code in {401, 403}:
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=[f"HTTP {response.status_code} Access Denied on '{path}'; endpoint protected."],
+        )
+
+    if response.status_code >= 500:
+        # Check for stack trace disclosure
+        text = response.text
+        if any(err in text for err in ["Traceback (most recent call last):", "NullPointerException", "Fatal error:", "org.springframework."]):
+            return ValidationResult(
+                is_valid=True,
+                confidence=0.90,
+                validation_state=ValidationState.confirmed,
+                audit_status=AuditStatus.suspicious,
+                evidence=[f"Stack trace or debug exception revealed on HTTP {response.status_code} error page."],
+                why_it_matters="Application crash dumps disclose internal filenames, line numbers, frameworks, and backend configurations.",
+                recommended_next_action="Implement custom error pages and disable display_errors / debug modes.",
+            )
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=[f"HTTP {response.status_code} server error returned without diagnostic disclosure."],
+        )
+
+    # 3. Check for Directory Listing
+    dir_res = validate_directory_listing(response, baseline)
+    if dir_res.is_valid:
+        return dir_res
+
+    # 4. Check for SQL Dump or Database Backup
+    if path.endswith((".sql", ".sql.gz", ".sql.bak")):
+        return validate_backup_content(response, baseline)
+
+    # 5. Check for Environment or Version Control file
+    if path.endswith((".env", ".env.local", ".env.production", ".env.bak")):
+        return validate_env_content(response, baseline)
+    if ".git" in path:
+        return validate_git_head(response, baseline)
+
+    # 6. Check for Disclosed Secrets / Hardcoded Credentials in Response
+    text = response.text
+    cred_match = re.search(
+        r'(?i)\b(?:api[_-]?key|secret[_-]?key|aws[_-]?secret|jwt[_-]?token|db[_-]?password)\s*[:=]\s*["\']?([A-Za-z0-9_\-./+=]{8,})',
+        text,
+    )
+    if cred_match and "<html" not in text[:200].lower():
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.92,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.suspicious,
+            evidence=[f"Sensitive key or credential pattern disclosed in '{path}': {cred_match.group(0)[:60]}..."],
+            why_it_matters="Exposed secrets allow unauthorized privilege escalation, API access, or database hijacking.",
+            recommended_next_action="Rotate disclosed secret immediately and restrict access to asset.",
+        )
+
+    # 7. Otherwise, legitimate live attack surface observation
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.unverified,
+        audit_status=AuditStatus.audited,
+        evidence=[f"Live endpoint '{path}' (HTTP {response.status_code}, {len(response.text)} bytes) mapped to attack surface."],
+    )
+
+
 class ValidatorRegistry:
     """Universal, pluggable registry for endpoint validation."""
 
@@ -554,4 +764,35 @@ class ValidatorRegistry:
                 description="Diagnostic phpinfo script publicly accessible",
             )
         )
+        self.register(
+            EndpointValidator(
+                path="/swagger-ui.html",
+                category="web-information-disclosure",
+                severity=Severity.low,
+                validator_fn=validate_swagger_openapi,
+                title="Interactive Swagger UI documentation",
+                description="Public API schema interface exposed",
+            )
+        )
+        self.register(
+            EndpointValidator(
+                path="/actuator",
+                category="web-information-disclosure",
+                severity=Severity.medium,
+                validator_fn=validate_actuator_content,
+                title="Spring Boot Actuator endpoints",
+                description="Diagnostic framework endpoints exposed",
+            )
+        )
+        self.register(
+            EndpointValidator(
+                path="/graphql",
+                category="web-discovery",
+                severity=Severity.low,
+                validator_fn=validate_graphql_content,
+                title="GraphQL service endpoint",
+                description="GraphQL schema query interface discovered",
+            )
+        )
+
 
