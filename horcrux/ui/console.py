@@ -1287,16 +1287,21 @@ class ConsoleApp:
 
         elif sub == "test":
             p_name = args[2].lower() if len(args) >= 3 else mgr.settings.default_provider
-            loading(self.console, f"Testing API connection to {p_name.upper()}", 0.5)
+            loading(self.console, f"Testing connection to {p_name.upper()}...", 0.4)
             provider = self.ai_manager.providers.get(p_name)
             if not provider:
                 self.console.print(f"[bold red]✖ Unknown provider '{p_name}'.[/bold red]")
                 return
-            ok, msg = provider.validate_key()
+            ok, msg, err_type, latency = provider.validate_credentials()
             if ok:
-                self.console.print(f"[bold green]✔ {msg}[/bold green]")
+                self.console.print(f"\n[bold green]✔ Testing {p_name.upper()}[/bold green]")
+                self.console.print("[bold green]✔ API key accepted[/bold green]")
+                self.console.print(f"[bold green]✔ Model available[/bold green] ({provider.config.model})")
+                self.console.print(f"[bold green]✔ Generation successful[/bold green] (Latency: {latency}s)\n")
             else:
-                self.console.print(f"[bold red]✖ {msg}[/bold red]")
+                self.console.print(f"\n[bold red]✖ {p_name.upper()}[/bold red]")
+                self.console.print(f"[bold red]Reason: {err_type.value if err_type else 'ERROR'}[/bold red]")
+                self.console.print(f"[white]{msg}[/white]\n")
 
     def ai_cmd(self, args: list[str]):
         if len(args) == 1 or args[1].lower() == "status":
@@ -1308,7 +1313,10 @@ class ConsoleApp:
                 f"[bold bright_yellow]Active Model:    [/bold bright_yellow] [bold bright_white]{st['model']}[/bold bright_white]\n"
                 f"[bold bright_yellow]Calls Made:      [/bold bright_yellow] {st['calls']}\n"
                 f"[bold bright_yellow]Cached Responses:[/bold bright_yellow] {st['cached_calls']}\n"
-                f"[bold bright_yellow]Total Tokens:    [/bold bright_yellow] {st['total_tokens']}\n"
+                f"[bold bright_yellow]Input Tokens:    [/bold bright_yellow] {st['input_tokens']:,}\n"
+                f"[bold bright_yellow]Output Tokens:   [/bold bright_yellow] {st['output_tokens']:,}\n"
+                f"[bold bright_yellow]Reasoning Tokens:[/bold bright_yellow] {st['reasoning_tokens']:,}\n"
+                f"[bold bright_yellow]Total Tokens:    [/bold bright_yellow] {st['total_tokens']:,}\n"
             )
             self.console.print()
             self.console.print(
@@ -1333,9 +1341,47 @@ class ConsoleApp:
             self.ai_manager.clear_cache()
             self.console.print("[bold green]✔ AI response cache cleared.[/bold green]")
         elif sub == "usage":
-            self.ai_cmd(["ai", "status"])
+            usage = self.ai_manager.get_usage()
+            table = Table(
+                title="[bold bright_magenta]✦ AI ENGINE TOKEN & CALL USAGE ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                header_style="bold bright_cyan",
+            )
+            table.add_column("Provider:Model", style="bold white")
+            table.add_column("Calls", justify="center")
+            table.add_column("Cached", justify="center", style="dim green")
+            table.add_column("Input", justify="right", style="cyan")
+            table.add_column("Output", justify="right", style="cyan")
+            table.add_column("Reasoning", justify="right", style="yellow")
+            table.add_column("Total Tokens", justify="right", style="bold yellow")
+
+            for k, rec in usage.get("by_model", {}).items():
+                table.add_row(
+                    k,
+                    str(rec.get("calls", 0)),
+                    str(rec.get("cached_calls", 0)),
+                    f"{rec.get('input_tokens', 0):,}",
+                    f"{rec.get('output_tokens', 0):,}",
+                    f"{rec.get('reasoning_tokens', 0):,}",
+                    f"{rec.get('total_tokens', 0):,}",
+                )
+
+            self.console.print()
+            if usage.get("by_model"):
+                self.console.print(table)
+            else:
+                self.console.print("[dim yellow]No recorded AI usage yet.[/dim yellow]")
+            self.console.print(
+                f"[bold bright_yellow]Total Tokens:[/bold bright_yellow] {usage['total_tokens']:,} | "
+                f"[bold bright_yellow]Total Calls:[/bold bright_yellow] {usage['total_calls']} "
+                f"([green]{usage['total_cached_calls']} cached[/green])\n"
+            )
+        elif sub in {"models", "model"}:
+            self.settings_cmd(["settings", "models"] + args[2:])
         else:
-            raise ValueError("usage: ai [status|enable|disable|usage|clear-cache]")
+            raise ValueError("usage: ai [status|enable|disable|usage|clear-cache|models]")
+
 
     def raw_cmd(self, args: list[str]):
         if len(args) < 2:
@@ -1399,19 +1445,36 @@ class ConsoleApp:
         )
         ai_table.add_column("Provider", style="bold bright_white")
         ai_table.add_column("Status", justify="center", no_wrap=True)
-        ai_table.add_column("Default Model", style="bold bright_green")
+        ai_table.add_column("Configured Model", style="bold bright_green")
+        ai_table.add_column("Last Test", justify="center", style="dim white")
+        ai_table.add_column("Storage", justify="center", style="dim cyan")
         ai_table.add_column("Key Availability", style="dim white")
 
         mgr = SettingsManager()
         for p_name in ("groq", "openai", "anthropic", "google"):
             has_key, masked = mgr.get_provider_status(p_name)
-            model = mgr.settings.providers.get(p_name, None)
-            m_str = model.model if model else "-"
-            st_text = "[bold green]✔ CONFIGURED[/bold green]" if has_key else "[dim]○ NOT CONFIGURED[/dim]"
-            ai_table.add_row(p_name.upper(), st_text, m_str, masked)
+            p_cfg = mgr.settings.providers.get(p_name)
+            model_id = mgr.get_model(p_name)
+            storage_src = mgr.get_key_source(p_name)
+
+            if not has_key:
+                st_badge = "[dim]○ NOT CONFIGURED[/dim]"
+                test_str = "-"
+            elif p_cfg and p_cfg.last_status == "READY":
+                st_badge = "[bold green]READY[/bold green]"
+                test_str = "[bold green]PASSED[/bold green]"
+            elif p_cfg and p_cfg.last_status:
+                st_badge = f"[dim red]ERROR ({p_cfg.last_status})[/dim red]"
+                test_str = f"[red]{p_cfg.last_status}[/red]"
+            else:
+                st_badge = "[bold green]CONFIGURED[/bold green]"
+                test_str = "[dim]untested[/dim]"
+
+            ai_table.add_row(p_name.upper(), st_badge, model_id, test_str, storage_src, masked)
 
         self.console.print()
         self.console.print(ai_table)
+
 
         words = Table(
             title="[bold bright_yellow]✦ WORDLIST DISCOVERY AUDIT ✦[/bold bright_yellow]",

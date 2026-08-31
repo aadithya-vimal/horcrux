@@ -119,11 +119,22 @@ def artifacts_cmd():
     show_gallery(Console())
 
 
+@app.command(
+    name="ai",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def ai_cli(ctx: typer.Context):
+    """Manage AI engine status, usage metrics, cache, and enable/disable."""
+    args = ["ai"] + list(ctx.args)
+    ConsoleApp().ai_cmd(args)
+
+
 KNOWN_COMMANDS = {
     "scan", "doctor", "tools", "console", "gallery", "artifacts",
-    "settings", "report", "ask",
+    "settings", "report", "ask", "ai",
     "--help", "-h", "--version", "-v",
 }
+
 
 
 def main():

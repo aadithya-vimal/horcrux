@@ -162,47 +162,68 @@ horcrux report 10.10.10.10
 
 ---
 
-## ⚙️ AI Configuration & Settings
+## ⚙️ Multi-Provider AI Architecture & Settings
 
-HORCRUX stores configuration persistently in platform-appropriate locations (`~/.config/horcrux/` on Linux, `%APPDATA%\Horcrux\` on Windows, `~/Library/Application Support/horcrux/` on macOS). API keys are stored in the OS keychain via `keyring` and displayed masked:
+HORCRUX implements a provider-agnostic AI layer separating providers, models, adapters, and intelligence tasks. Real security tools acquire facts; the AI layer performs structured contextual reasoning over normalized evidence with strict evidence discipline:
 
-```text
-┌─────────────────────────── ✦ HORCRUX SETTINGS ✦ ────────────────────────────┐
-│                                                                             │
-│  AI PROVIDERS                                                               │
-│                                                                             │
-│    ① Groq                     ● CONFIGURED (gsk_••••••••9F31)               │
-│       Model: llama-3.3-70b-versatile                                        │
-│                                                                             │
-│    ② OpenAI                   ○ NOT CONFIGURED                              │
-│       Model: gpt-4o                                                         │
-│                                                                             │
-│    ③ Anthropic / Claude       ○ NOT CONFIGURED                              │
-│       Model: claude-3-5-sonnet-latest                                       │
-│                                                                             │
-│    ④ Google AI Studio / Gemini ○ NOT CONFIGURED                             │
-│       Model: gemini-2.5-flash                                               │
-│                                                                             │
-│  Default Provider: GROQ                                                     │
-│  Default Model:    llama-3.3-70b-versatile                                  │
-│  AI Engine Status: ENABLED                                                  │
-│                                                                             │
-│  💡 Tip: Model availability may vary by region or account. Use 'settings    │
-│  model' to select or switch.                                                │
-│                                                                             │
-│  Commands:                                                                  │
-│    settings provider <groq|openai|anthropic|google> [key]                   │
-│    settings model [provider] [model_name]  (select or change model)         │
-│    settings models [provider]              (list available regional models) │
-│    settings default <provider>                                              │
-│    settings test [provider]                                                 │
-│    settings remove <provider>                                               │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    P[AI Providers: Groq / OpenAI / Anthropic / Google] --> M[Dynamic Model Discovery: GET /models]
+    M --> A[Provider Adapter: AIProvider Interface]
+    A --> C[Common Response Model & SHA-256 Cache]
+    C --> T[Structured Security Tasks]
+    T --> T1[Exploit Relevance Triage]
+    T --> T2[Next-Best-Action Reasoning]
+    T --> T3[Attack-Path Synthesis]
+    T --> T4[Operator Ask Q&A]
+    T --> T5[Executive Summary]
 ```
 
-> [!TIP]
-> **Regional & Account Model Flexibility**: Model availability and API naming conventions often differ across geographical regions (e.g. EU vs. US) and enterprise tenants. Run `horcrux settings model <provider>` or `settings model` inside the console to dynamically discover available models for your account or enter a custom model name (e.g. `gemini-1.5-flash`, `llama-3.1-8b-instant`, `claude-3-7-sonnet-latest`, or private deployment IDs).
+### Supported Providers & Dynamic Model Discovery
+
+| Provider | Supported APIs / SDK Patterns | Dynamic Model Discovery | Environment Overrides |
+| :--- | :--- | :--- | :--- |
+| **Groq** | OpenAI-compatible chat completions (`/v1/chat/completions`) | `GET /openai/v1/models` | `GROQ_API_KEY`, `GROQ_MODEL` |
+| **OpenAI** | Responses & Chat completions with reasoning tokens (`o1`, `o3`, `gpt-4o`) | `GET /v1/models` | `OPENAI_API_KEY`, `OPENAI_MODEL` |
+| **Anthropic** | Native Messages API (`/v1/messages`) | `GET /v1/models` | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` |
+| **Google** | Gemini API (`/v1beta/{model}:generateContent`) | `GET /v1beta/models` | `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_MODEL` |
+
+### Key Security & Configuration Storage
+
+- **OS Keychain Storage**: Keys are stored via the OS keychain (`keyring`) by default with protected file fallback (`0600` permissions on Unix).
+- **Zero Key Leaks**: Keys are never printed in plaintext, written to workspace files, placed in reports, logged in exceptions, or passed into prompts. Keys are displayed masked (e.g. `gsk_••••••••9F31`).
+- **Platform Configuration Locations**:
+  - Linux: `~/.config/horcrux/`
+  - macOS: `~/Library/Application Support/horcrux/`
+  - Windows: `%APPDATA%\Horcrux\`
+
+### Operator Settings & AI Commands
+
+```text
+# Provider & Model Management
+settings                                           # View configured providers and models
+settings provider <groq|openai|anthropic|google>   # Securely input and save API key
+settings models [provider]                         # Dynamically query provider for active models
+settings model [provider] [model_id]               # Switch active model
+settings default <provider>                        # Set default AI provider
+settings test [provider]                           # Verify credentials, model, and latency
+settings remove <provider>                         # Securely delete key from keychain
+
+# AI Engine Controls & Usage Tracking
+ai / ai status                                     # Check AI status, active model, and token metrics
+ai enable / ai disable                             # Enable or disable AI (falls back to local mode)
+ai usage                                           # Detailed breakdown of prompt, completion, and reasoning tokens
+ai clear-cache                                     # Flush the SHA-256 prompt response cache
+
+# Operator Q&A
+ask "<question>"                                   # Query AI reasoning analyst with compact context
+```
+
+### Multi-Provider Fallback & Deterministic Offline Mode
+
+- **Transient Error Fallback**: If the primary provider experiences a rate limit (`429`), network timeout, or service outage (`503`), Horcrux automatically falls back to secondary configured providers (e.g. Groq → Google → OpenAI) while informing the operator.
+- **Deterministic Offline Guarantee**: AI is completely optional. If no keys are configured or AI is disabled (`ai disable`), Horcrux automatically uses deterministic vulnerability scoring, state-aware Next Best Actions, and heuristic attack path synthesis without crashing.
+
 
 
 ---
