@@ -8,7 +8,7 @@ from horcrux.intel.ai.base import HORCRUX_EVIDENCE_POLICY
 
 def build_compact_state(state: WorkspaceState) -> dict[str, Any]:
     """Builds a token-efficient structured summary of the workspace state."""
-    return {
+    compact: dict[str, Any] = {
         "target": state.target,
         "services": [
             {
@@ -43,6 +43,19 @@ def build_compact_state(state: WorkspaceState) -> dict[str, Any]:
             for a in state.audit[:8]
         ],
     }
+    if state.web_targets:
+        compact["web_targets"] = [
+            {
+                "port": wt.port,
+                "app_type": wt.application_type.value,
+                "baseline": wt.baseline_classification.value,
+                "total_endpoints": len(wt.endpoints),
+                "response_families": len(wt.response_families),
+                "parameters": [p.name for p in wt.parameters[:8]],
+            }
+            for wt in state.web_targets[:6]
+        ]
+    return compact
 
 
 def execute_exploit_triage(

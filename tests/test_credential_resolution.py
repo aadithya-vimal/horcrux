@@ -20,7 +20,8 @@ def test_normalize_provider_name():
 
 def test_credential_precedence_policy():
     with tempfile.TemporaryDirectory() as tmpdir:
-        mgr = SettingsManager(config_dir=Path(tmpdir))
+        mgr = SettingsManager(config_dir=Path(tmpdir), use_keyring=False)
+
 
         # 1. No key configured
         info_none = mgr.get_credential_info("google")

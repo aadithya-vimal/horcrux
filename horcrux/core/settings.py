@@ -157,13 +157,15 @@ class HorcruxSettings:
 class SettingsManager:
     SERVICE_NAME = "horcrux_ai_keys"
 
-    def __init__(self, config_dir: Path | None = None):
+    def __init__(self, config_dir: Path | None = None, use_keyring: bool = True):
         self.config_dir = config_dir or get_config_dir()
         self.settings_file = self.config_dir / "settings.json"
         self.cache_file = self.config_dir / "ai_cache.json"
         self.usage_file = self.config_dir / "ai_usage.json"
+        self.use_keyring = use_keyring
         self._runtime_overrides: dict[str, str] = {}
         self.settings = self.load()
+
 
     def load(self) -> HorcruxSettings:
         if not self.settings_file.exists():
@@ -266,7 +268,7 @@ class SettingsManager:
 
         # 2. Persisted credential
         # Check system keyring first
-        if keyring is not None:
+        if self.use_keyring and keyring is not None:
             try:
                 stored = keyring.get_password(self.SERVICE_NAME, prov)
                 if stored and stored.strip():
@@ -331,7 +333,7 @@ class SettingsManager:
 
         # Save to keyring or file fallback
         stored_in_keyring = False
-        if keyring is not None:
+        if self.use_keyring and keyring is not None:
             try:
                 keyring.set_password(self.SERVICE_NAME, prov, key)
                 stored_in_keyring = True
@@ -348,13 +350,14 @@ class SettingsManager:
     def remove_api_key(self, provider: str) -> None:
         """Remove stored API key and safely update default provider if needed."""
         prov = normalize_provider_name(provider)
-        if keyring is not None:
+        if self.use_keyring and keyring is not None:
             try:
                 keyring.delete_password(self.SERVICE_NAME, prov)
             except Exception:
                 pass
         self.settings._keys_file_fallback.pop(prov, None)
         self._runtime_overrides.pop(prov, None)
+
 
         # If removed provider was default, switch to another configured provider if one exists
         if self.settings.default_provider == prov:

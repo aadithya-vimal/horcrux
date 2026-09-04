@@ -160,3 +160,41 @@ class Workspace:
         state.artifacts.append(record)
         self.save(state)
 
+    def upsert_web_target(self, target: WebTarget) -> None:
+        state = self.load()
+        state.upsert_web_target(target)
+        self.save(state)
+
+    def add_raw_observations(self, items: list[RawObservation]) -> None:
+        if not items:
+            return
+        state = self.load()
+        state.raw_observations.extend(items)
+        self.save(state)
+
+    def add_parameters(self, items: list[Parameter]) -> None:
+        if not items:
+            return
+        state = self.load()
+        seen = {(p.name.lower(), p.endpoint) for p in state.parameters}
+        for item in items:
+            key = (item.name.lower(), item.endpoint)
+            if key not in seen:
+                state.parameters.append(item)
+                seen.add(key)
+        self.save(state)
+
+    def upsert_response_families(self, items: list[ResponseFamily]) -> None:
+        if not items:
+            return
+        state = self.load()
+        lookup = {f.family_id: idx for idx, f in enumerate(state.response_families)}
+        for item in items:
+            if item.family_id in lookup:
+                state.response_families[lookup[item.family_id]] = item
+            else:
+                state.response_families.append(item)
+                lookup[item.family_id] = len(state.response_families) - 1
+        self.save(state)
+
+

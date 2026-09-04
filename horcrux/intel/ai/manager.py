@@ -145,6 +145,7 @@ class AIManager:
         system_prompt: str = "",
         max_tokens: int | None = None,
         temperature: float = 0.1,
+        structured: bool = True,
     ) -> AIResponse | None:
         """
         Executes an AI task with caching, multi-provider fallback, and usage accounting.
@@ -177,12 +178,20 @@ class AIManager:
                 if idx > 0:
                     logger.info(f"[AI] Falling back to provider: {provider.name}")
 
-                resp = provider.structured(
-                    prompt,
-                    system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                if structured:
+                    resp = provider.structured(
+                        prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    resp = provider.complete(
+                        prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
                 if resp and (resp.content or resp.structured):
                     # Record in cache & usage
                     self.cache.put(provider.name, curr_model, task_name, payload or prompt, resp)

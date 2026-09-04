@@ -62,6 +62,16 @@ class Orchestrator:
                 if "web_probe" in profile.enabled_modules and (
                     service.port in WEB_PORTS or service.service.lower() in {"http", "https"}
                 ):
+                    scheme = scheme_for(service.port)
+                    base_url = f"{scheme}://{self.target}:{service.port}"
+                    web_target = state.get_web_target(service.port) or WebTarget(
+                        scheme=scheme,
+                        host=self.target,
+                        port=service.port,
+                        base_url=base_url,
+                        service_identifier=f"{scheme}-{service.port}",
+                    )
+
                     try:
                         # 1. Base HTTP probing & endpoint validation
                         findings, creds, tech = scan_http(
@@ -76,13 +86,29 @@ class Orchestrator:
                         state = self.workspace.load()
                         state.technologies = sorted(set(state.technologies) | set(tech))
                         self.workspace.save(state)
+                        web_target.module_decisions.append(
+                            ModuleDecision(
+                                module="base_http_probe",
+                                status="EXECUTED",
+                                reason=f"Initial HTTP banner & head probe completed for port {service.port}.",
+                            )
+                        )
 
                         # 2. Technology & WAF Fingerprinting (WhatWeb, httpx, wafw00f)
-                        run_fingerprinting(self.workspace, runner, self.target, service.port)
+                        clean_techs, _ = run_fingerprinting(self.workspace, runner, self.target, service.port)
+                        state = self.workspace.load()
+                        web_target.technologies = state.normalized_technologies
+                        web_target.module_decisions.append(
+                            ModuleDecision(
+                                module="technology_fingerprinting",
+                                status="EXECUTED",
+                                reason=f"Identified {len(clean_techs)} normalized technologies without raw scanner noise.",
+                            )
+                        )
 
-                        # 3. Content Discovery & Response Validation (FFUF/Gobuster/Feroxbuster/Native)
+                        # 3. Content Discovery & Response Validation (FFUF/Gobuster/Feroxbuster/Native + JS Analyzer)
                         if "web_discovery" in profile.enabled_modules:
-                            disc_findings, _, _ = web_discovery(
+                            disc_findings, _, disc_paths = web_discovery(
                                 self.workspace,
                                 runner,
                                 self.target,
@@ -92,18 +118,56 @@ class Orchestrator:
                             for finding in disc_findings:
                                 self.workspace.upsert_finding(finding)
 
+                        # Reload updated web_target from workspace
+                        state = self.workspace.load()
+                        updated_target = state.get_web_target(service.port)
+                        if updated_target:
+                            web_target = updated_target
+
                         # 4. Targeted Nuclei (if enabled by profile & available)
                         if profile.expensive_checks and runner.which("nuclei"):
-                            base_url = f"{scheme_for(service.port)}://{self.target}:{service.port}"
                             nuclei_findings = run_nuclei(self.workspace, runner, base_url)
                             for nf in nuclei_findings:
                                 self.workspace.upsert_finding(nf)
+                            web_target.module_decisions.append(
+                                ModuleDecision(
+                                    module="nuclei",
+                                    status="EXECUTED",
+                                    reason="Executed targeted template scan against confirmed web service.",
+                                )
+                            )
+                        elif profile.expensive_checks:
+                            web_target.module_decisions.append(
+                                ModuleDecision(
+                                    module="nuclei",
+                                    status="SKIPPED",
+                                    reason="Nuclei binary not installed on operator machine.",
+                                )
+                            )
 
-                        # 5. Nikto (if enabled by profile & available)
+                        # 5. Nikto (evidence-gated: skip for SPAs to avoid duplicate 404 noise)
                         if profile.expensive_checks and runner.which("nikto"):
-                            nikto_findings, _ = run_nikto(self.workspace, runner, self.target, service.port)
-                            for nf in nikto_findings:
-                                self.workspace.upsert_finding(nf)
+                            if web_target.application_type == WebApplicationType.SPA:
+                                web_target.module_decisions.append(
+                                    ModuleDecision(
+                                        module="nikto",
+                                        status="SKIPPED",
+                                        reason="SPA fallback architecture detected; legacy CGI checks skipped to prevent duplicate noise.",
+                                    )
+                                )
+                            else:
+                                nikto_findings, _ = run_nikto(self.workspace, runner, self.target, service.port)
+                                for nf in nikto_findings:
+                                    self.workspace.upsert_finding(nf)
+                                web_target.module_decisions.append(
+                                    ModuleDecision(
+                                        module="nikto",
+                                        status="EXECUTED",
+                                        reason="Executed CGI and server misconfiguration audit.",
+                                    )
+                                )
+
+                        self.workspace.upsert_web_target(web_target)
 
                     except Exception as exc:
                         self.workspace.write(
@@ -111,6 +175,7 @@ class Orchestrator:
                             str(exc),
                         )
             progress.complete_stage("services")
+
 
             # STAGE 4: Protocol-Specific Service Enumeration (SMB, LDAP, Kerberos, SSH, FTP, DB, etc.)
             progress.start_stage("enumeration")

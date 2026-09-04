@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,104 @@ class SubsystemState(str, Enum):
     SKIPPED = "SKIPPED"
 
 
+class EvidenceClassification(str, Enum):
+    VALIDATED = "VALIDATED"
+    DISTINCT = "DISTINCT"
+    CANDIDATE = "CANDIDATE"
+    SUPPRESSED_FALLBACK = "SUPPRESSED_FALLBACK"
+    DUPLICATE = "DUPLICATE"
+    FALSE_POSITIVE = "FALSE_POSITIVE"
+
+
+class BaselineClassification(str, Enum):
+    NORMAL_404 = "NORMAL_404"
+    SOFT_404 = "SOFT_404"
+    SPA_FALLBACK = "SPA_FALLBACK"
+    GENERIC_ERROR_TEMPLATE = "GENERIC_ERROR_TEMPLATE"
+    REDIRECT_CATCH_ALL = "REDIRECT_CATCH_ALL"
+    UNKNOWN = "UNKNOWN"
+
+
+class WebApplicationType(str, Enum):
+    STATIC_SITE = "STATIC_SITE"
+    TRADITIONAL_WEB_APP = "TRADITIONAL_WEB_APP"
+    SPA = "SPA"
+    API = "API"
+    HYBRID = "HYBRID"
+    UNKNOWN = "UNKNOWN"
+
+
+class TechCategory(str, Enum):
+    FRAMEWORK = "FRAMEWORK"
+    RUNTIME = "RUNTIME"
+    LANGUAGE = "LANGUAGE"
+    WEBSERVER = "WEBSERVER"
+    REVERSE_PROXY = "REVERSE_PROXY"
+    CMS = "CMS"
+    LIBRARY = "LIBRARY"
+    ANALYTICS = "ANALYTICS"
+    SECURITY_CONTROL = "SECURITY_CONTROL"
+    DATABASE = "DATABASE"
+    BUILD_TOOL = "BUILD_TOOL"
+    UNKNOWN = "UNKNOWN"
+
+
+class RawObservation(BaseModel):
+    source_tool: str
+    target: str
+    timestamp: datetime = Field(default_factory=utcnow)
+    observation_type: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    artifact_path: str = ""
+
+
+class ResponseFingerprint(BaseModel):
+    status_code: int = 0
+    content_type: str = ""
+    normalized_body_length: int = 0
+    title: str = ""
+    normalized_body_hash: str = ""
+    similarity_hash: str = ""
+    structural_signature: str = ""
+    redirect_chain: list[str] = Field(default_factory=list)
+    final_url: str = ""
+    is_html: bool = False
+    is_json: bool = False
+    is_spa_fallback: bool = False
+
+
+class ResponseFamily(BaseModel):
+    family_id: str
+    representative_fingerprint: ResponseFingerprint
+    member_count: int = 1
+    representative_paths: list[str] = Field(default_factory=list)
+    classification: EvidenceClassification = EvidenceClassification.DISTINCT
+    confidence: float = 0.90
+    evidence_references: list[str] = Field(default_factory=list)
+
+
+class Parameter(BaseModel):
+    name: str
+    location: str = "query"  # query, path, body, header, cookie
+    source: str = "url"      # form, javascript, url, openapi, graphql, json_schema
+    endpoint: str = ""
+    confidence: float = Field(default=0.8, ge=0, le=1)
+
+
+class NormalizedTechnology(BaseModel):
+    name: str
+    category: TechCategory = TechCategory.UNKNOWN
+    version: str = ""
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    evidence_sources: list[str] = Field(default_factory=list)
+
+
+class ModuleDecision(BaseModel):
+    module: str
+    status: str = "EXECUTED"  # EXECUTED, SKIPPED, DEFERRED, FAILED, COMPLETE
+    reason: str = ""
+
+
 class DiscoveredPath(BaseModel):
     url: str
     path: str
@@ -56,7 +154,28 @@ class DiscoveredPath(BaseModel):
     confidence: float = 0.90
     validated: bool = False
     validation_state: ValidationState = ValidationState.unverified
+    evidence_classification: EvidenceClassification = EvidenceClassification.CANDIDATE
+    response_family_id: str = ""
+    fingerprint: Optional[ResponseFingerprint] = None
     timestamp: datetime = Field(default_factory=utcnow)
+
+
+class WebTarget(BaseModel):
+    scheme: str = "http"
+    host: str = ""
+    port: int = 80
+    base_url: str = ""
+    service_identifier: str = ""
+    application_type: WebApplicationType = WebApplicationType.UNKNOWN
+    baseline_classification: BaselineClassification = BaselineClassification.UNKNOWN
+    baseline_fingerprints: list[ResponseFingerprint] = Field(default_factory=list)
+    endpoints: list[DiscoveredPath] = Field(default_factory=list)
+    technologies: list[NormalizedTechnology] = Field(default_factory=list)
+    response_families: list[ResponseFamily] = Field(default_factory=list)
+    parameters: list[Parameter] = Field(default_factory=list)
+    module_decisions: list[ModuleDecision] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+
 
 
 class ArtifactRecord(BaseModel):
@@ -295,6 +414,7 @@ class WorkspaceState(BaseModel):
     services: list[Service] = Field(default_factory=list)
     software: list[Software] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
+    normalized_technologies: list[NormalizedTechnology] = Field(default_factory=list)
     credentials: list[Credential] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     audit: list[AuditEntry] = Field(default_factory=list)
@@ -305,8 +425,26 @@ class WorkspaceState(BaseModel):
     subsystem_states: dict[str, str] = Field(default_factory=dict)
     discovered_paths: list[DiscoveredPath] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    raw_observations: list[RawObservation] = Field(default_factory=list)
+    web_targets: list[WebTarget] = Field(default_factory=list)
+    parameters: list[Parameter] = Field(default_factory=list)
+    response_families: list[ResponseFamily] = Field(default_factory=list)
+
+    def get_web_target(self, port: int) -> WebTarget | None:
+        for wt in self.web_targets:
+            if wt.port == port:
+                return wt
+        return None
+
+    def upsert_web_target(self, target: WebTarget) -> None:
+        for idx, wt in enumerate(self.web_targets):
+            if wt.port == target.port and wt.host == target.host:
+                self.web_targets[idx] = target
+                return
+        self.web_targets.append(target)
 
     def get_subsystem_state(self, name: str) -> SubsystemState:
+
         val = self.subsystem_states.get(name, SubsystemState.NOT_RUN.value)
         try:
             return SubsystemState(val)

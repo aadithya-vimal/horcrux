@@ -66,7 +66,21 @@ def build_bounded_workspace_context(state: WorkspaceState, question: str, max_ch
         })
     ctx["audit"] = audit
 
-    # 6. Specific finding deep-dive if referenced by ID in question
+    # 6. Web targets & attack surface
+    if state.web_targets:
+        web_targets = []
+        for wt in state.web_targets[:6]:
+            web_targets.append({
+                "port": wt.port,
+                "app_type": wt.application_type.value,
+                "baseline": wt.baseline_classification.value,
+                "endpoints": [ep.path for ep in wt.endpoints[:10]],
+                "technologies": [t.name for t in wt.technologies[:8]],
+                "parameters": [p.name for p in wt.parameters[:8]],
+            })
+        ctx["web_targets"] = web_targets
+
+    # 7. Specific finding deep-dive if referenced by ID in question
     q_lower = question.lower()
     for f in state.findings:
         if f.id.lower() in q_lower:
@@ -88,6 +102,8 @@ def build_bounded_workspace_context(state: WorkspaceState, question: str, max_ch
         ctx["services"] = ctx["services"][:10]
         ctx["findings"] = ctx["findings"][:6]
         ctx["software"] = ctx["software"][:8]
+        if "web_targets" in ctx:
+            ctx["web_targets"] = ctx["web_targets"][:2]
 
     return ctx
 
@@ -125,7 +141,7 @@ Operator Question:
 {question}
 """
         payload = {"question": question, "mode": "general"}
-        resp = ai_manager.call_task("operator_ask_general", prompt, payload=payload, max_tokens=1024)
+        resp = ai_manager.call_task("operator_ask_general", prompt, payload=payload, max_tokens=1024, structured=False)
         if resp and resp.content and resp.content.strip():
             return resp.content.strip()
 
@@ -164,7 +180,7 @@ Workspace Context:
 Operator Question:
 {question}
 """
-    resp = ai_manager.call_task("operator_ask", prompt, payload=payload, max_tokens=1024)
+    resp = ai_manager.call_task("operator_ask", prompt, payload=payload, max_tokens=1024, structured=False)
     if resp and resp.content and resp.content.strip():
         return resp.content.strip()
 

@@ -153,7 +153,35 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
                 )
             )
 
-    # 8. CVE / SearchSploit Intelligence State
+    # 8. Validated API Endpoints
+    validated_apis = [
+        p for p in state.discovered_paths
+        if p.path.startswith(("/api", "/v1", "/v2", "/graphql", "/rest")) and p.validated and p.status in (200, 204, 401, 403)
+    ]
+    if validated_apis:
+        sample_api = validated_apis[0]
+        actions.append(
+            Action(
+                id="api_inspect",
+                title=f"Investigate validated API route: {sample_api.path}",
+                reason="Accessible API endpoint confirmed on perimeter; inspect schemas, methods, and authorization.",
+                score=93.5,
+            )
+        )
+
+    # 9. Discovered Parameters (STRICTLY GATED BY ACTUAL PARAMETER EVIDENCE)
+    if state.parameters:
+        sample_param = state.parameters[0]
+        actions.append(
+            Action(
+                id="param_audit",
+                title=f"Audit input parameter '{sample_param.name}' ({sample_param.location})",
+                reason=f"Parameter evidence identified from {sample_param.source} on {sample_param.endpoint or 'web target'}; test input validation.",
+                score=91.5,
+            )
+        )
+
+    # 10. CVE / SearchSploit Intelligence State
     # Gated by reliable software evidence: MUST have valid version and confidence >= 0.70
     reliable_software = [
         s for s in state.software
@@ -197,12 +225,12 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
                 )
             )
 
-    # 9. Fallback if initial stages complete and no immediate exposures
+    # 11. Fallback if initial stages complete and no immediate exposures
     if not actions:
         actions.append(
             Action(
                 id="deep_recon",
-                title="Perform deep full-port reconnaissance or custom parameter fuzzing",
+                title="Perform deep full-port reconnaissance and service inspection",
                 reason="Initial attack surface fully mapped without immediate high-severity exposures.",
                 score=50.0,
                 command=f"scan {state.target} --profile deep",
@@ -216,3 +244,7 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
             unique_actions[a.id] = a
 
     return list(unique_actions.values())
+
+
+evaluate_next_actions = compute_next_actions
+
