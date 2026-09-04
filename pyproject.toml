@@ -19,3 +19,6 @@ horcrux = "horcrux.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["horcrux*"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:anchorpy"

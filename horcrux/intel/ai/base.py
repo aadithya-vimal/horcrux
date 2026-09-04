@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Generator, Optional
 
-from horcrux.core.settings import DEFAULT_MODELS, ProviderConfig, SettingsManager
+from horcrux.core.sanitizer import redact_secrets
+from horcrux.core.settings import CredentialInfo, DEFAULT_MODELS, ProviderConfig, SettingsManager
 
 
 HORCRUX_EVIDENCE_POLICY = """You are HORCRUX AI, an expert senior offensive-security reasoning analyst.
@@ -38,6 +39,8 @@ class AIErrorType(str, Enum):
     NETWORK_ERROR = "NETWORK_ERROR"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     UNSUPPORTED_FEATURE = "UNSUPPORTED_FEATURE"
+    SAFETY_BLOCK = "SAFETY_BLOCK"
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
 
 
 class AIError(Exception):
@@ -49,10 +52,12 @@ class AIError(Exception):
         provider: str = "",
         raw_status: int | None = None,
     ):
-        super().__init__(message)
+        clean_msg = redact_secrets(message)
+        clean_hint = redact_secrets(suggested_action)
+        super().__init__(clean_msg)
         self.error_type = error_type
-        self.message = message
-        self.suggested_action = suggested_action
+        self.message = clean_msg
+        self.suggested_action = clean_hint
         self.provider = provider
         self.raw_status = raw_status
 
@@ -82,6 +87,14 @@ class ModelInfo:
         return self.id
 
 
+@dataclass
+class ProviderCapabilities:
+    supports_model_listing: bool = True
+    supports_streaming: bool = True
+    supports_system_prompt: bool = True
+    supports_usage_metadata: bool = True
+    supports_reasoning_metadata: bool = False
+
 
 @dataclass
 class AIResponse:
@@ -97,6 +110,36 @@ class AIResponse:
     request_id: str = ""
     cached: bool = False
     finish_reason: str = ""
+    raw_metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        """Standard property returning generated text content."""
+        return self.content
+
+    @text.setter
+    def text(self, val: str) -> None:
+        self.content = val
+
+    @property
+    def input_tokens(self) -> int:
+        return self.prompt_tokens
+
+    @input_tokens.setter
+    def input_tokens(self, val: int) -> None:
+        self.prompt_tokens = val
+
+    @property
+    def output_tokens(self) -> int:
+        return self.completion_tokens
+
+    @output_tokens.setter
+    def output_tokens(self, val: int) -> None:
+        self.completion_tokens = val
+
+    @property
+    def latency_ms(self) -> int:
+        return int(round(self.latency * 1000))
 
 
 def extract_json_payload(text: str) -> Any:
@@ -167,8 +210,26 @@ class AIProvider(abc.ABC):
     def get_api_key(self) -> str:
         return self.settings.get_api_key(self.name)
 
+    def get_credential_info(self) -> CredentialInfo:
+        return self.settings.get_credential_info(self.name)
+
+    def get_active_model(self) -> str:
+        return self.settings.get_model(self.name) or self.config.model or DEFAULT_MODELS.get(self.name, "")
+
     def is_configured(self) -> bool:
         return bool(self.get_api_key())
+
+    def validate_configuration(self) -> tuple[bool, str]:
+        """Check if provider has credential and active model."""
+        if not self.is_configured():
+            return False, f"Provider '{self.name}' has no API key configured."
+        if not self.get_active_model():
+            return False, f"Provider '{self.name}' has no model configured."
+        return True, "Configuration valid."
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
 
     @abc.abstractmethod
     def list_models(self) -> list[ModelInfo]:
@@ -200,6 +261,16 @@ class AIProvider(abc.ABC):
         """Execute a text completion request."""
         pass
 
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AIResponse:
+        """Provider-agnostic text generation; invokes complete()."""
+        return self.complete(prompt, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+
     def structured(
         self,
         prompt: str,
@@ -228,9 +299,14 @@ class AIProvider(abc.ABC):
         resp = self.complete(prompt, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
         yield resp.content
 
+    def test_connection(self) -> tuple[bool, str, AIErrorType | None, float]:
+        """Alias for validate_credentials."""
+        return self.validate_credentials()
+
     def validate_credentials(self) -> tuple[bool, str, AIErrorType | None, float]:
         """
         Test provider credentials and selected model with minimal low-cost request.
+        Uses the exact same generate/complete request pathway as production requests.
         Returns: (success, message, error_type, latency_seconds)
         """
         if not self.is_configured():
@@ -238,14 +314,20 @@ class AIProvider(abc.ABC):
 
         t0 = time.perf_counter()
         try:
-            resp = self.complete("Say ok in one word.", max_tokens=5, temperature=0.0)
+            # Send enough tokens (100) so thinking/reasoning models don't exhaust completion budget
+            resp = self.complete("Respond with OK.", max_tokens=100, temperature=0.0)
             latency = time.perf_counter() - t0
-            if resp and resp.content:
-                # Update last validated timestamp in settings
+            if resp and resp.content and resp.content.strip():
                 self.settings.set_provider_validation(self.name, True, "READY")
                 return True, f"Connection verified successfully. Model: {resp.model}", None, round(latency, 2)
+
             self.settings.set_provider_validation(self.name, False, "EMPTY_RESPONSE")
-            return False, "Received empty response from provider.", AIErrorType.INVALID_RESPONSE, round(latency, 2)
+            return (
+                False,
+                f"Provider {self.name.upper()} returned an empty response. Verify model availability or permissions.",
+                AIErrorType.INVALID_RESPONSE,
+                round(latency, 2),
+            )
         except Exception as exc:
             latency = time.perf_counter() - t0
             if isinstance(exc, AIError):
@@ -261,7 +343,7 @@ class AIProvider(abc.ABC):
         return {
             "name": self.name,
             "configured": self.is_configured(),
-            "selected_model": self.config.model,
+            "selected_model": self.get_active_model(),
             "supports_streaming": True,
             "supports_structured": True,
         }
@@ -274,47 +356,49 @@ class AIProvider(abc.ABC):
         if isinstance(exc, AIError):
             return exc.error_type, exc.message, exc.suggested_action
 
-        err_str = str(exc)
+        active_key = self.get_api_key()
+        err_str = redact_secrets(str(exc), extra_secrets=[active_key] if active_key else None)
 
         status = getattr(exc, "status_code", None)
         if status is None and hasattr(exc, "response") and exc.response is not None:
             status = getattr(exc.response, "status_code", None)
 
         # 1. Authentication / Invalid Key (401)
-        if status == 401 or any(k in err_str.lower() for k in ["invalid api key", "invalid_api_key", "unauthorized", "api_key_invalid"]):
+        if status == 401 or any(k in err_str.lower() for k in ["invalid api key", "invalid_api_key", "unauthorized", "api_key_invalid", "authentication failed"]):
             return (
                 AIErrorType.AUTHENTICATION_FAILED,
-                "API key rejected by provider.",
-                f"Verify your API key using 'settings provider {self.name}'.",
+                f"{self.name.upper()} authentication failed. The configured API key was rejected.",
+                f"Run: settings provider {self.name}",
             )
 
         # 2. Model Not Found or Model Unavailable (404 or deprecated model message)
-        if status == 404 or any(k in err_str.lower() for k in ["model_not_found", "model not found", "not found for api version", "no longer available"]):
+        if status == 404 or any(k in err_str.lower() for k in ["model_not_found", "model not found", "not found for api version", "no longer available", "is not supported"]):
+            curr_model = self.get_active_model()
             return (
                 AIErrorType.MODEL_UNAVAILABLE,
-                f"Model '{self.config.model}' is unavailable or not accessible to this account.",
-                "Run 'settings models' to view and select an available model for your account.",
+                f"Model '{curr_model}' is unavailable or not accessible to this account.",
+                f"Run: settings models {self.name}",
             )
 
         # 3. Permission Denied / Project Access (403)
         if status == 403 or "permission_denied" in err_str.lower() or "forbidden" in err_str.lower():
             return (
                 AIErrorType.PERMISSION_DENIED,
-                "Access forbidden or insufficient project permissions.",
+                f"{self.name.upper()} access forbidden or insufficient permissions.",
                 "Check account tier, project billing, and API enablement.",
             )
 
         # 4. Rate Limited (429)
         if status == 429:
-            if "quota" in err_str.lower() or "insufficient_quota" in err_str.lower():
+            if "quota" in err_str.lower() or "insufficient_quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
                 return (
                     AIErrorType.QUOTA_EXCEEDED,
-                    "Provider quota or credits exhausted.",
+                    f"{self.name.upper()} quota or credits exhausted.",
                     "Check billing or account balance at provider console.",
                 )
             return (
                 AIErrorType.RATE_LIMITED,
-                "Provider rate limit reached.",
+                f"{self.name.upper()} rate limit reached.",
                 "Wait a moment before retrying or switch default provider.",
             )
 
@@ -322,15 +406,15 @@ class AIProvider(abc.ABC):
         if any(k in err_str.lower() for k in ["timeout", "timed out", "readtimeouterror"]):
             return (
                 AIErrorType.TIMEOUT,
-                "Provider request timed out.",
+                f"{self.name.upper()} request timed out.",
                 "Check network connection or increase timeout in settings.",
             )
 
         # 6. Network Error / Connect failure
-        if any(k in err_str.lower() for k in ["connection refused", "nameresolutionerror", "connecterror"]):
+        if any(k in err_str.lower() for k in ["connection refused", "nameresolutionerror", "connecterror", "gaierror"]):
             return (
                 AIErrorType.NETWORK_ERROR,
-                "Unable to connect to provider endpoint.",
+                f"Unable to connect to {self.name.upper()} endpoint.",
                 "Check internet connectivity and DNS resolution.",
             )
 
@@ -338,15 +422,15 @@ class AIProvider(abc.ABC):
         if status == 400:
             return (
                 AIErrorType.BAD_REQUEST,
-                f"Invalid request parameters sent to {self.name}.",
-                "Check model configuration and custom endpoint.",
+                f"Invalid request parameters sent to {self.name.upper()}.",
+                "Check model configuration or prompt parameters.",
             )
 
-        # 8. Server error (500, 502, 503)
+        # 8. Server error (500, 502, 503, 504)
         if status and status >= 500:
             return (
                 AIErrorType.PROVIDER_UNAVAILABLE,
-                f"Provider {self.name} is currently experiencing service disruption (HTTP {status}).",
+                f"Provider {self.name.upper()} is currently experiencing service disruption (HTTP {status}).",
                 "Try again later or switch to a fallback provider.",
             )
 

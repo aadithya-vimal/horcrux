@@ -99,11 +99,14 @@ def report(
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="Question to ask AI security analyst"),
-    target: str = typer.Option("ready", "--target", "-t", help="Target workspace context"),
+    target: str = typer.Option("", "--target", "-t", help="Target workspace context (optional)"),
 ):
     """Query the HORCRUX AI security analyst with target context."""
     app_inst = ConsoleApp()
-    app_inst.workspace = Workspace(target)
+    if target and target.lower() != "ready":
+        app_inst.workspace = Workspace(target)
+    else:
+        app_inst.workspace = None
     app_inst.ask_cmd(["ask", question])
 
 

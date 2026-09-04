@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from horcrux.core.settings import AVAILABLE_MODELS, SettingsManager
+from horcrux.core.settings import (
+    AVAILABLE_MODELS,
+    CredentialInfo,
+    SettingsManager,
+    normalize_provider_name,
+)
 from horcrux.intel.ai.anthropic import AnthropicProvider
 from horcrux.intel.ai.base import (
     AIError,
@@ -45,26 +50,32 @@ class AIManager:
 
     def get_provider(self, name: str | None = None) -> AIProvider | None:
         """Returns the requested provider if configured, or the default configured provider."""
-        target_name = (name or self.settings.settings.default_provider).lower()
+        raw_name = name or self.settings.settings.default_provider
+        target_name = normalize_provider_name(raw_name)
         provider = self.providers.get(target_name)
         if provider and provider.is_configured():
             return provider
+
+        # Fallback to default provider instance if requested specifically
+        if name and target_name in self.providers:
+            return self.providers[target_name]
 
         # Fallback to any configured provider
         for p in self.providers.values():
             if p.is_configured():
                 return p
-        return None
+        return self.providers.get(self.settings.settings.default_provider)
 
     def active_provider_name(self) -> str:
         p = self.get_provider()
         return p.name if p else "none"
 
     def get_available_models(self, provider_name: str) -> list[ModelInfo]:
-        p = self.providers.get(provider_name.lower())
+        p_norm = normalize_provider_name(provider_name)
+        p = self.providers.get(p_norm)
         if p:
             return p.list_models()
-        return [ModelInfo(id=m, name=m) for m in AVAILABLE_MODELS.get(provider_name.lower(), [])]
+        return [ModelInfo(id=m, name=m) for m in AVAILABLE_MODELS.get(p_norm, [])]
 
     @property
     def stats(self):
@@ -84,20 +95,27 @@ class AIManager:
         return self.cache._cache
 
     def status(self) -> dict[str, Any]:
-
-
         p = self.get_provider()
-        configured = p is not None
-        model = p.config.model if p else "none"
-        name = p.name if p else "none"
-        status_label = "READY" if (configured and self.is_enabled) else ("DISABLED" if not self.is_enabled else "NOT CONFIGURED")
+        configured = p is not None and p.is_configured()
+        model = p.get_active_model() if p else "none"
+        name = p.name if p else self.settings.settings.default_provider
 
+        cred_info: CredentialInfo = (
+            p.get_credential_info()
+            if p
+            else CredentialInfo("none", "", "NOT CONFIGURED", "NONE", False)
+        )
+
+        status_label = "READY" if (configured and self.is_enabled) else ("DISABLED" if not self.is_enabled else "NOT CONFIGURED")
         usage = self.cache.get_summary()
+
         return {
             "enabled": self.is_enabled,
             "status": status_label,
             "provider": name,
             "model": model,
+            "credential_source": cred_info.source,
+            "credential_fingerprint": cred_info.fingerprint,
             "calls": usage["total_calls"],
             "cached_calls": usage["total_cached_calls"],
             "total_tokens": usage["total_tokens"],
@@ -108,6 +126,13 @@ class AIManager:
 
     def clear_cache(self) -> None:
         self.cache.clear()
+
+    def reset_stats(self) -> None:
+        if self.cache.usage_file.exists():
+            try:
+                self.cache.usage_file.write_text("{}", encoding="utf-8")
+            except Exception:
+                pass
 
     def get_usage(self) -> dict[str, Any]:
         return self.cache.get_summary()
@@ -128,7 +153,7 @@ class AIManager:
             return None
 
         primary = self.get_provider()
-        if not primary:
+        if not primary or not primary.is_configured():
             return None
 
         # Build fallback provider candidates
@@ -166,7 +191,12 @@ class AIManager:
             except AIError as err:
                 last_error = err
                 # Only fail over on transient errors (rate limit, timeout, provider down)
-                if err.error_type in (AIErrorType.RATE_LIMITED, AIErrorType.TIMEOUT, AIErrorType.PROVIDER_UNAVAILABLE, AIErrorType.NETWORK_ERROR):
+                if err.error_type in (
+                    AIErrorType.RATE_LIMITED,
+                    AIErrorType.TIMEOUT,
+                    AIErrorType.PROVIDER_UNAVAILABLE,
+                    AIErrorType.NETWORK_ERROR,
+                ):
                     continue
                 else:
                     # Configuration or authentication error; do not silently try other providers
@@ -220,7 +250,7 @@ class AIManager:
         if not self.is_enabled:
             return None
         provider = self.get_provider(provider_name)
-        if not provider:
+        if not provider or not provider.is_configured():
             return None
         model = self.settings.get_model(provider.name)
         if use_cache:
@@ -238,18 +268,23 @@ class AIManager:
 
     def ask(
         self,
-        question: str | WorkspaceState,
-        state: WorkspaceState | str | None = None,
+        arg1: str | WorkspaceState | None = None,
+        arg2: WorkspaceState | str | None = None,
     ) -> str:
-        if isinstance(question, WorkspaceState):
-            q_str = str(state or "")
-            st = question
-        elif isinstance(state, WorkspaceState):
-            q_str = str(question or "")
-            st = state
+        """
+        Operator query entrypoint supporting flexible argument ordering:
+          ask(question: str, state: WorkspaceState | None)
+          ask(state: WorkspaceState, question: str)
+        """
+        if isinstance(arg1, WorkspaceState):
+            state = arg1
+            question = str(arg2 or "")
+        elif isinstance(arg2, WorkspaceState):
+            question = str(arg1 or "")
+            state = arg2
         else:
-            q_str = str(question or "")
-            st = WorkspaceState()
-        from horcrux.intel.tasks.ask import execute_operator_ask
-        return execute_operator_ask(self, q_str, st)
+            question = str(arg1 or arg2 or "")
+            state = None
 
+        from horcrux.intel.tasks.ask import execute_operator_ask
+        return execute_operator_ask(self, question, state)

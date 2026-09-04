@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from horcrux.core.sanitizer import fingerprint_key, mask_key
+
 try:
     import keyring
 except ImportError:
@@ -30,34 +32,11 @@ def get_config_dir() -> Path:
     return config_dir
 
 
-def mask_key(key: str) -> str:
-    """Mask an API key for safe display in UI, logs, and settings screens."""
-    if not key or not key.strip():
-        return "NOT CONFIGURED"
-    k = key.strip()
-    if len(k) <= 8:
-        return "••••••••"
-
-    # Recognized provider prefix patterns
-    if k.startswith("gsk_"):
-        return f"gsk_••••••••{k[-4:]}"
-    elif k.startswith("sk-ant-"):
-        return f"sk-ant-••••••••{k[-4:]}"
-    elif k.startswith("sk-"):
-        return f"sk-••••••••{k[-4:]}"
-    elif k.startswith("AIza"):
-        return f"AIza••••••••{k[-4:]}"
-
-    prefix = k[:3]
-    suffix = k[-4:]
-    return f"{prefix}••••••••{suffix}"
-
-
 DEFAULT_MODELS: dict[str, str] = {
     "groq": "llama-3.3-70b-versatile",
     "openai": "gpt-4o",
     "anthropic": "claude-3-5-sonnet-latest",
-    "google": "gemini-1.5-flash",
+    "google": "gemini-3.6-flash",
 }
 
 AVAILABLE_MODELS: dict[str, list[str]] = {
@@ -86,11 +65,11 @@ AVAILABLE_MODELS: dict[str, list[str]] = {
         "claude-3-haiku-20240307",
     ],
     "google": [
+        "gemini-3.6-flash",
+        "gemini-2.5-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "gemini-3.6-flash",
         "gemini-2.5-pro",
     ],
 }
@@ -99,7 +78,7 @@ ENV_KEY_NAMES: dict[str, list[str]] = {
     "groq": ["GROQ_API_KEY"],
     "openai": ["OPENAI_API_KEY"],
     "anthropic": ["ANTHROPIC_API_KEY"],
-    "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY"],
+    "google": ["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
 }
 
 ENV_MODEL_NAMES: dict[str, list[str]] = {
@@ -108,6 +87,32 @@ ENV_MODEL_NAMES: dict[str, list[str]] = {
     "anthropic": ["ANTHROPIC_MODEL"],
     "google": ["GOOGLE_MODEL", "GEMINI_MODEL"],
 }
+
+PROVIDER_ALIASES: dict[str, str] = {
+    "claude": "anthropic",
+    "gemini": "google",
+    "google-ai": "google",
+    "google_ai": "google",
+}
+
+
+def normalize_provider_name(name: str) -> str:
+    """Normalize user-supplied provider names and aliases."""
+    if not name:
+        return ""
+    n = name.strip().lower()
+    return PROVIDER_ALIASES.get(n, n)
+
+
+@dataclass
+class CredentialInfo:
+    """Structured information about resolved provider credentials."""
+    source: str  # "runtime" | "persisted" | "environment" | "none"
+    key: str
+    masked: str
+    fingerprint: str
+    is_configured: bool
+    env_var: Optional[str] = None
 
 
 @dataclass
@@ -157,6 +162,7 @@ class SettingsManager:
         self.settings_file = self.config_dir / "settings.json"
         self.cache_file = self.config_dir / "ai_cache.json"
         self.usage_file = self.config_dir / "ai_usage.json"
+        self._runtime_overrides: dict[str, str] = {}
         self.settings = self.load()
 
     def load(self) -> HorcruxSettings:
@@ -169,9 +175,10 @@ class SettingsManager:
             raw = json.loads(self.settings_file.read_text(encoding="utf-8"))
             providers = {}
             for name, p_data in raw.get("providers", {}).items():
-                providers[name] = ProviderConfig(
-                    name=name,
-                    model=p_data.get("model", DEFAULT_MODELS.get(name, "")),
+                norm_name = normalize_provider_name(name)
+                providers[norm_name] = ProviderConfig(
+                    name=norm_name,
+                    model=p_data.get("model", DEFAULT_MODELS.get(norm_name, "")),
                     custom_endpoint=p_data.get("custom_endpoint", ""),
                     timeout=p_data.get("timeout", 60),
                     max_tokens=p_data.get("max_tokens", 2048),
@@ -183,19 +190,23 @@ class SettingsManager:
                 if name not in providers:
                     providers[name] = ProviderConfig(name=name, model=DEFAULT_MODELS.get(name, ""))
 
+            default_prov = normalize_provider_name(raw.get("default_provider", "groq"))
+            if default_prov not in ("groq", "openai", "anthropic", "google"):
+                default_prov = "groq"
+
             return HorcruxSettings(
                 enabled=raw.get("enabled", True),
-                default_provider=raw.get("default_provider", "groq"),
+                default_provider=default_prov,
                 call_budget=raw.get("call_budget", 50),
-                fallback_sequence=raw.get("fallback_sequence", ["google", "openai"]),
+                fallback_sequence=[normalize_provider_name(s) for s in raw.get("fallback_sequence", ["google", "openai"])],
                 providers=providers,
                 _keys_file_fallback=raw.get("_keys_fallback", {}),
             )
         except Exception:
             return HorcruxSettings.default()
 
-
     def save(self, settings: HorcruxSettings | None = None) -> None:
+        """Atomic write of configuration to prevent corruption."""
         if settings is not None:
             self.settings = settings
 
@@ -210,123 +221,211 @@ class SettingsManager:
             "_keys_fallback": self.settings._keys_file_fallback,
         }
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+        tmp_file = self.settings_file.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
         if sys.platform != "win32":
             try:
-                os.chmod(self.settings_file, 0o600)
+                os.chmod(tmp_file, 0o600)
             except Exception:
                 pass
 
-    def get_api_key(self, provider: str) -> str:
-        provider = provider.lower()
-        env_names = ENV_KEY_NAMES.get(provider, [f"{provider.upper()}_API_KEY"])
+        os.replace(tmp_file, self.settings_file)
+
+    def set_runtime_credential(self, provider: str, key: str) -> None:
+        """Set in-memory runtime credential override (highest priority)."""
+        prov = normalize_provider_name(provider)
+        if key and key.strip():
+            self._runtime_overrides[prov] = key.strip()
+        else:
+            self._runtime_overrides.pop(prov, None)
+
+    def get_credential_info(self, provider: str) -> CredentialInfo:
+        """
+        Centralized credential resolution following strict precedence:
+          1. Explicit runtime credential override
+          2. Persisted HORCRUX settings credential (keyring / settings file fallback)
+          3. Environment variable fallback
+          4. No credential
+        """
+        prov = normalize_provider_name(provider)
+
+        # 1. Runtime override
+        if prov in self._runtime_overrides:
+            val = self._runtime_overrides[prov]
+            if val and val.strip():
+                k = val.strip()
+                return CredentialInfo(
+                    source="runtime",
+                    key=k,
+                    masked=mask_key(k),
+                    fingerprint=fingerprint_key(k),
+                    is_configured=True,
+                )
+
+        # 2. Persisted credential
+        # Check system keyring first
+        if keyring is not None:
+            try:
+                stored = keyring.get_password(self.SERVICE_NAME, prov)
+                if stored and stored.strip():
+                    k = stored.strip()
+                    return CredentialInfo(
+                        source="persisted",
+                        key=k,
+                        masked=mask_key(k),
+                        fingerprint=fingerprint_key(k),
+                        is_configured=True,
+                    )
+            except Exception:
+                pass
+
+        # Check settings file fallback
+        if prov in self.settings._keys_file_fallback:
+            val = self.settings._keys_file_fallback[prov]
+            if val and val.strip():
+                k = val.strip()
+                return CredentialInfo(
+                    source="persisted",
+                    key=k,
+                    masked=mask_key(k),
+                    fingerprint=fingerprint_key(k),
+                    is_configured=True,
+                )
+
+        # 3. Environment variable fallback
+        env_names = ENV_KEY_NAMES.get(prov, [f"{prov.upper()}_API_KEY"])
         for env_var in env_names:
             val = os.environ.get(env_var)
             if val and val.strip():
-                return val.strip()
+                k = val.strip()
+                return CredentialInfo(
+                    source="environment",
+                    key=k,
+                    masked=mask_key(k),
+                    fingerprint=fingerprint_key(k),
+                    is_configured=True,
+                    env_var=env_var,
+                )
 
-        if keyring is not None:
-            try:
-                stored = keyring.get_password(self.SERVICE_NAME, provider)
-                if stored and stored.strip():
-                    return stored.strip()
-            except Exception:
-                pass
+        # 4. No credential
+        return CredentialInfo(
+            source="none",
+            key="",
+            masked="NOT CONFIGURED",
+            fingerprint="NONE",
+            is_configured=False,
+        )
 
-        return self.settings._keys_file_fallback.get(provider, "")
+    def get_api_key(self, provider: str) -> str:
+        """Resolve API key using centralized precedence."""
+        return self.get_credential_info(provider).key
 
     def set_api_key(self, provider: str, key: str) -> None:
-        provider = provider.lower()
+        """Store new API key atomically, replacing previous credential."""
+        prov = normalize_provider_name(provider)
         key = key.strip()
+        if not key:
+            raise ValueError(f"API key for provider '{prov}' cannot be empty.")
 
+        # Save to keyring or file fallback
         stored_in_keyring = False
         if keyring is not None:
             try:
-                keyring.set_password(self.SERVICE_NAME, provider, key)
+                keyring.set_password(self.SERVICE_NAME, prov, key)
                 stored_in_keyring = True
             except Exception:
                 stored_in_keyring = False
 
         if not stored_in_keyring:
-            self.settings._keys_file_fallback[provider] = key
+            self.settings._keys_file_fallback[prov] = key
         else:
-            self.settings._keys_file_fallback.pop(provider, None)
+            self.settings._keys_file_fallback.pop(prov, None)
 
         self.save()
 
     def remove_api_key(self, provider: str) -> None:
-        provider = provider.lower()
+        """Remove stored API key and safely update default provider if needed."""
+        prov = normalize_provider_name(provider)
         if keyring is not None:
             try:
-                keyring.delete_password(self.SERVICE_NAME, provider)
+                keyring.delete_password(self.SERVICE_NAME, prov)
             except Exception:
                 pass
-        self.settings._keys_file_fallback.pop(provider, None)
+        self.settings._keys_file_fallback.pop(prov, None)
+        self._runtime_overrides.pop(prov, None)
+
+        # If removed provider was default, switch to another configured provider if one exists
+        if self.settings.default_provider == prov:
+            other_configured = [
+                p for p in ("groq", "google", "openai", "anthropic")
+                if p != prov and self.get_credential_info(p).is_configured
+            ]
+            if other_configured:
+                self.settings.default_provider = other_configured[0]
+
         self.save()
 
     def get_key_source(self, provider: str) -> str:
-        provider = provider.lower()
-        env_names = ENV_KEY_NAMES.get(provider, [f"{provider.upper()}_API_KEY"])
-        for env_var in env_names:
-            val = os.environ.get(env_var)
-            if val and val.strip():
-                return f"ENV (${env_var})"
-        if keyring is not None:
-            try:
-                stored = keyring.get_password(self.SERVICE_NAME, provider)
-                if stored and stored.strip():
-                    return "KEYCHAIN"
-            except Exception:
-                pass
-        if provider in self.settings._keys_file_fallback:
-            return "FILE (PROTECTED)"
-        return "NONE"
+        info = self.get_credential_info(provider)
+        if info.source == "environment" and info.env_var:
+            return f"environment (${info.env_var})"
+        return info.source
 
     def get_provider_status(self, provider: str) -> tuple[bool, str]:
-        key = self.get_api_key(provider)
-        if key:
-            return True, mask_key(key)
-        return False, "NOT CONFIGURED"
-
+        info = self.get_credential_info(provider)
+        return info.is_configured, info.masked
 
     def get_model(self, provider: str) -> str:
-        provider = provider.lower()
-        env_names = ENV_MODEL_NAMES.get(provider, [f"{provider.upper()}_MODEL"])
+        prov = normalize_provider_name(provider)
+        env_names = ENV_MODEL_NAMES.get(prov, [f"{prov.upper()}_MODEL"])
         for env_var in env_names:
             val = os.environ.get(env_var)
             if val and val.strip():
                 return val.strip()
-        if provider in self.settings.providers:
-            return self.settings.providers[provider].model or DEFAULT_MODELS.get(provider, "")
-        return DEFAULT_MODELS.get(provider, "")
+        if prov in self.settings.providers:
+            return self.settings.providers[prov].model or DEFAULT_MODELS.get(prov, "")
+        return DEFAULT_MODELS.get(prov, "")
 
     def set_model(self, provider: str, model: str) -> None:
-        provider = provider.lower()
-        if provider in self.settings.providers:
-            self.settings.providers[provider].model = model.strip()
+        prov = normalize_provider_name(provider)
+        m = model.strip()
+        if not m:
+            raise ValueError(f"Model name for provider '{prov}' cannot be empty.")
+        if prov not in self.settings.providers:
+            self.settings.providers[prov] = ProviderConfig(name=prov, model=m)
+        else:
+            self.settings.providers[prov].model = m
+        self.save()
+
+    def reset_model(self, provider: str) -> str:
+        """Reset model for a provider to its canonical default."""
+        prov = normalize_provider_name(provider)
+        def_model = DEFAULT_MODELS.get(prov, "")
+        if prov in self.settings.providers:
+            self.settings.providers[prov].model = def_model
             self.save()
+        return def_model
 
     def set_provider_validation(self, provider: str, valid: bool, status: str) -> None:
         import datetime
-        provider = provider.lower()
-        if provider in self.settings.providers:
-            self.settings.providers[provider].last_validated = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            self.settings.providers[provider].last_status = status
+        prov = normalize_provider_name(provider)
+        if prov in self.settings.providers:
+            self.settings.providers[prov].last_validated = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self.settings.providers[prov].last_status = status
             self.save()
 
     def set_fallback_sequence(self, sequence: list[str]) -> None:
-        self.settings.fallback_sequence = [s.lower() for s in sequence if s.lower() in self.settings.providers]
+        self.settings.fallback_sequence = [normalize_provider_name(s) for s in sequence if normalize_provider_name(s) in self.settings.providers]
         self.save()
 
     def set_default_provider(self, provider: str) -> None:
-        provider = provider.lower()
-        if provider in self.settings.providers:
-            self.settings.default_provider = provider
+        prov = normalize_provider_name(provider)
+        if prov in self.settings.providers:
+            self.settings.default_provider = prov
             self.save()
 
     def set_enabled(self, enabled: bool) -> None:
         self.settings.enabled = enabled
         self.save()
-

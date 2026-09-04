@@ -14,11 +14,19 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from horcrux import __version__
 from horcrux.core.actions import compute_next_actions
 from horcrux.core.doctor import check_tools, CATEGORIES
 from horcrux.core.intel import run_nuclei
 from horcrux.core.runner import CommandRunner
-from horcrux.core.settings import AVAILABLE_MODELS, DEFAULT_MODELS, SettingsManager, mask_key
+from horcrux.core.sanitizer import fingerprint_key
+from horcrux.core.settings import (
+    AVAILABLE_MODELS,
+    DEFAULT_MODELS,
+    SettingsManager,
+    mask_key,
+    normalize_provider_name,
+)
 from horcrux.core.storage import Workspace
 from horcrux.intel.ai.manager import AIManager
 from horcrux.intel.search import searchsploit_workspace
@@ -230,9 +238,37 @@ class ConsoleApp:
                 self.console.print(f"[bold red]✖ Error:[/bold red] {exc}")
 
     def dispatch(self, args: list[str]):
-        if not args:
+        GLOBAL_COMMANDS = {
+            "help",
+            "clear",
+            "exit",
+            "quit",
+            "version",
+            "doctor",
+            "tools",
+            "artifacts",
+            "gallery",
+            "art",
+            "settings",
+            "ai",
+            "scan",
+            "ask",
+        }
+
+        # Clean leading colons or slashes and filter empty arguments
+        cleaned_args = []
+        for arg in args:
+            if arg in {":", "/"}:
+                continue
+            if arg.startswith(":") or arg.startswith("/"):
+                arg = arg.lstrip(":").lstrip("/")
+            if arg:
+                cleaned_args.append(arg)
+
+        if not cleaned_args:
             return
 
+        args = cleaned_args
         command = args[0].lower()
 
         if command == "help":
@@ -241,6 +277,11 @@ class ConsoleApp:
 
         if command == "clear":
             self.console.clear()
+            return
+
+        if command == "version":
+            banner(self.console, __version__, duration=0.4)
+            self.console.print(f"[bold bright_magenta]HORCRUX[/bold bright_magenta] version [bold bright_cyan]{__version__}[/bold bright_cyan]\n")
             return
 
         if command == "doctor":
@@ -261,6 +302,10 @@ class ConsoleApp:
 
         if command == "ai":
             self.ai_cmd(args)
+            return
+
+        if command == "ask":
+            self.ask_cmd(args)
             return
 
         if command == "scan":
@@ -294,16 +339,16 @@ class ConsoleApp:
             self.status()
             return
 
+        # Commands below this guard strictly require an active target workspace
+        self.require_workspace()
+
         if command == "local":
-            self.require_workspace()
             loading(self.console, "Running Linux local enumeration", 0.5)
             enumerate_linux(self.workspace, CommandRunner(self.workspace))
             self.console.print(
                 f"[bold green]✔ Saved:[/bold green] [cyan]{self.workspace.root}[/cyan]"
             )
             return
-
-        self.require_workspace()
 
         if command == "status":
             self.status()
@@ -325,9 +370,6 @@ class ConsoleApp:
 
         elif command == "inspect":
             self.inspect_finding(args)
-
-        elif command == "ask":
-            self.ask_cmd(args)
 
         elif command in {"next", "actions", "action"}:
             self.next_actions()
@@ -1095,11 +1137,11 @@ class ConsoleApp:
     def ask_cmd(self, args: list[str]):
         if len(args) < 2:
             raise ValueError("usage: ask <question in quotes>")
-        question = " ".join(args[1:])
-        state = self.workspace.load()
+        question = " ".join(args[1:]).strip()
+        state = self.workspace.load() if self.workspace else None
 
-        loading(self.console, "Consulting HORCRUX AI reasoning engine", 0.6)
-        answer = self.ai_manager.ask(state, question)
+        loading(self.console, "Consulting HORCRUX AI reasoning engine", 0.5)
+        answer = self.ai_manager.ask(question, state)
 
         self.console.print()
         self.console.print(
@@ -1134,37 +1176,59 @@ class ConsoleApp:
 
             for idx, (p_id, p_label) in enumerate(prov_names):
                 sym = symbols[idx]
-                has_key, masked = mgr.get_provider_status(p_id)
-                status_icon = "[bold green]● CONFIGURED[/bold green]" if has_key else "[dim]○ NOT CONFIGURED[/dim]"
+                cred_info = mgr.get_credential_info(p_id)
+                status_icon = "[bold green]● CONFIGURED[/bold green]" if cred_info.is_configured else "[dim]○ NOT CONFIGURED[/dim]"
                 model = st.providers.get(p_id, None)
                 m_str = f"[dim cyan]Model: {model.model}[/dim cyan]" if (model and model.model) else ""
-                key_str = f"[dim white]({masked})[/dim white]" if has_key else ""
+
+                if cred_info.is_configured:
+                    if cred_info.source == "environment":
+                        key_str = f"[dim white]({cred_info.masked} from ${cred_info.env_var})[/dim white]"
+                    else:
+                        key_str = f"[dim white]({cred_info.masked})[/dim white]"
+                else:
+                    key_str = "[dim]not configured[/dim]"
+
+                last_status = model.last_status if model and model.last_status else None
+                if last_status == "READY":
+                    test_str = "[dim green]Last Test: SUCCESS[/dim green]"
+                elif last_status:
+                    test_str = f"[dim red]Last Test: {last_status}[/dim red]"
+                else:
+                    test_str = "[dim]Last Test: NOT TESTED[/dim]"
+
                 providers_lines.append(f"  {sym} [bold bright_white]{p_label:<24}[/bold bright_white] {status_icon} {key_str}")
+                line_details = []
                 if m_str:
-                    providers_lines.append(f"     {m_str}")
+                    line_details.append(m_str)
+                line_details.append(test_str)
+                providers_lines.append(f"     {' | '.join(line_details)}")
                 providers_lines.append("")
 
             body = (
                 "[bold bright_magenta]AI PROVIDERS[/bold bright_magenta]\n\n"
                 + "\n".join(providers_lines)
-                + f"[bold bright_yellow]Default Provider:[/bold bright_yellow] [bold bright_cyan]{default_p.upper()}[/bold bright_cyan]\n"
-                + f"[bold bright_yellow]Default Model:   [/bold bright_yellow] [bold bright_cyan]{model_name}[/bold bright_cyan]\n"
-                + f"[bold bright_yellow]AI Engine Status:[/bold bright_yellow] {ai_status}\n\n"
-                + "[dim cyan]💡 Tip: Model availability may vary by region or account. Use 'settings model' to select or switch.[/dim cyan]\n\n"
+                + f"[bold bright_yellow]Default Provider:   [/bold bright_yellow] [bold bright_cyan]{default_p.upper()}[/bold bright_cyan]\n"
+                + f"[bold bright_yellow]Default Model:      [/bold bright_yellow] [bold bright_cyan]{model_name}[/bold bright_cyan]\n"
+                + f"[bold bright_yellow]AI Engine Status:   [/bold bright_yellow] {ai_status}\n"
+                + f"[bold bright_yellow]Configuration Path: [/bold bright_yellow] [dim]{mgr.settings_file}[/dim]\n\n"
+                + "[dim cyan]💡 Tip: Global configuration is active. No workspace is required for AI configuration or general queries.[/dim cyan]\n\n"
                 + "[dim white]Commands:\n"
-                + "  settings provider <groq|openai|anthropic|google> [api_key]\n"
-                + "  settings model [provider] [model_name]  (select or change model)\n"
-                + "  settings models [provider]              (list available regional models)\n"
-                + "  settings default <provider>\n"
-                + "  settings test [provider]\n"
-                + "  settings remove <provider>[/dim white]"
+                + "  settings status                         (deep diagnostics & credential sources)\n"
+                + "  settings provider <provider> [api_key]   (store or update provider key)\n"
+                + "  settings model <provider> [model_name]  (select or change active model)\n"
+                + "  settings models [provider]              (discover available generation models)\n"
+                + "  settings default <provider>             (set default AI provider)\n"
+                + "  settings test [provider]                (verify connection & text generation)\n"
+                + "  settings remove <provider>              (remove provider credential)\n"
+                + "  settings reset-model <provider>         (reset provider model to default)[/dim white]"
             )
 
             self.console.print()
             self.console.print(
                 Panel(
                     body,
-                    title="[bold bright_magenta]✦ HORCRUX SETTINGS ✦[/bold bright_magenta]",
+                    title="[bold bright_magenta]✦ HORCRUX AI SETTINGS ✦[/bold bright_magenta]",
                     box=box.ROUNDED,
                     border_style="bright_magenta",
                     padding=(1, 2),
@@ -1174,84 +1238,144 @@ class ConsoleApp:
             return
 
         sub = args[1].lower()
+
+        if sub == "status":
+            st = mgr.settings
+            default_p = st.default_provider
+            cred = mgr.get_credential_info(default_p)
+            model = mgr.get_model(default_p)
+            cfg = st.providers.get(default_p)
+            last_test_time = cfg.last_validated if cfg and cfg.last_validated else "Never"
+            last_status = cfg.last_status if cfg and cfg.last_status else "NOT TESTED"
+
+            configured_list = [p for p in ("groq", "openai", "anthropic", "google") if mgr.get_credential_info(p).is_configured]
+            conf_str = ", ".join(configured_list).upper() if configured_list else "NONE"
+
+            table = Table(
+                title="[bold bright_magenta]✦ HORCRUX AI SUBSYSTEM DIAGNOSTICS ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                header_style="bold bright_cyan",
+            )
+            table.add_column("Property", style="bold bright_yellow")
+            table.add_column("Value", style="bold bright_white")
+
+            table.add_row("Active/Default Provider", default_p.upper())
+            table.add_row("Configured Model", model)
+            table.add_row("Credential Source", cred.source if cred.source != "environment" else f"environment (${cred.env_var})")
+            table.add_row("Credential Fingerprint", cred.fingerprint)
+            table.add_row("Configured Providers", conf_str)
+            table.add_row("Last Connection Test", last_test_time)
+            table.add_row("Last Test Result", last_status)
+            table.add_row("AI Engine State", "ENABLED" if st.enabled else "DISABLED")
+            table.add_row("Configuration File", str(mgr.settings_file))
+            table.add_row("Persistence Status", "OK (Writable)" if mgr.settings_file.parent.exists() else "UNWRITABLE")
+
+            self.console.print()
+            self.console.print(table)
+            self.console.print()
+            return
+
         if sub == "provider":
             if len(args) < 3:
                 raise ValueError("usage: settings provider <groq|openai|anthropic|google> [api_key]")
-            p_name = args[2].lower()
+            p_name = normalize_provider_name(args[2])
+            if p_name not in ("groq", "openai", "anthropic", "google"):
+                raise ValueError(f"unknown provider '{args[2]}' — choose groq, openai, anthropic, or google")
+
+            existing_cred = mgr.get_credential_info(p_name)
+            if existing_cred.is_configured and len(args) < 4:
+                replace = Prompt.ask(
+                    f"[yellow]A key is already configured for {p_name.upper()} ({existing_cred.masked}). Replace it?[/yellow]",
+                    choices=["y", "n"],
+                    default="n",
+                )
+                if replace.lower() != "y":
+                    self.console.print(f"[dim]Existing key for '{p_name}' retained.[/dim]")
+                    return
+
             if len(args) >= 4:
                 key_val = args[3].strip()
             else:
                 key_val = Prompt.ask(f"[bold bright_cyan]Enter API key for {p_name.upper()}[/bold bright_cyan]", password=True).strip()
-            if key_val:
-                mgr.set_api_key(p_name, key_val)
-                self.ai_manager = AIManager()
-                self.console.print(f"[bold green]✔ API key stored securely for provider '{p_name}'.[/bold green]")
-                try:
-                    choose_model = Prompt.ask(
-                        f"[dim cyan]Would you like to select a specific model for {p_name.upper()}? (may vary by region)[/dim cyan]",
-                        choices=["y", "n"],
-                        default="n",
-                    )
-                    if choose_model.lower() == "y":
-                        self.settings_cmd(["settings", "model", p_name])
-                except Exception:
-                    pass
-            else:
-                self.console.print("[yellow]No key provided.[/yellow]")
+
+            if not key_val:
+                self.console.print("[yellow]No key provided. Configuration unchanged.[/yellow]")
+                return
+
+            mgr.set_api_key(p_name, key_val)
+            self.ai_manager = AIManager(mgr)
+            self.console.print(f"[bold green]✔ API key stored securely for provider '{p_name}'.[/bold green]")
+
+            try:
+                choose_model = Prompt.ask(
+                    f"[dim cyan]Would you like to select a specific model for {p_name.upper()}?[/dim cyan]",
+                    choices=["y", "n"],
+                    default="n",
+                )
+                if choose_model.lower() == "y":
+                    self.settings_cmd(["settings", "model", p_name])
+            except Exception:
+                pass
 
         elif sub in {"model", "models"}:
-            # Determine provider
-            if len(args) >= 3 and args[2].lower() in {"groq", "openai", "anthropic", "google"}:
-                p_name = args[2].lower()
+            if len(args) >= 3 and normalize_provider_name(args[2]) in {"groq", "openai", "anthropic", "google"}:
+                p_name = normalize_provider_name(args[2])
             else:
-                p_name = Prompt.ask(
+                p_name = normalize_provider_name(Prompt.ask(
                     "[bold bright_cyan]Select AI Provider[/bold bright_cyan]",
                     choices=["groq", "openai", "anthropic", "google"],
                     default=mgr.settings.default_provider,
-                ).lower()
+                ))
 
-            # Direct CLI or console set: `settings model <provider> <model_name>`
+            # Direct CLI set: `settings model <provider> <model_name>`
             if len(args) >= 4 and sub == "model":
                 m_name = " ".join(args[3:]).strip()
                 mgr.set_model(p_name, m_name)
-                self.ai_manager = AIManager()
+                self.ai_manager = AIManager(mgr)
                 self.console.print(f"[bold green]✔ Active model for '{p_name}' set to '{m_name}'.[/bold green]")
                 return
 
-            # Interactive model selector with regional discovery
-            cur_model = mgr.settings.providers.get(p_name, ProviderConfig(name=p_name, model=DEFAULT_MODELS.get(p_name, ""))).model
-
-            loading(self.console, f"Discovering available models for {p_name.upper()} (regional/account)...", 0.4)
+            # Interactive model selector with dynamic discovery
+            cur_model = mgr.get_model(p_name)
+            loading(self.console, f"Discovering available models for {p_name.upper()}...", 0.4)
             available = self.ai_manager.get_available_models(p_name)
-            if not available:
-                available = AVAILABLE_MODELS.get(p_name, [cur_model])
+            avail_ids = [m.id for m in available]
+            if not avail_ids:
+                avail_ids = AVAILABLE_MODELS.get(p_name, [cur_model])
 
-            if cur_model and cur_model not in available:
-                available = [cur_model] + available
+            if cur_model and cur_model not in avail_ids:
+                avail_ids = [cur_model] + avail_ids
 
             table = Table(
-                title=f"[bold bright_magenta]✦ {p_name.upper()} AVAILABLE MODELS (REGIONAL SELECTION) ✦[/bold bright_magenta]",
+                title=f"[bold bright_magenta]✦ {p_name.upper()} AVAILABLE GENERATION MODELS ✦[/bold bright_magenta]",
                 box=box.ROUNDED,
                 border_style="magenta",
                 header_style="bold bright_cyan",
             )
             table.add_column("#", justify="center", style="bold yellow", no_wrap=True)
             table.add_column("Model Identifier", style="bold bright_white")
+            table.add_column("Context Window", justify="right", style="cyan")
             table.add_column("Status", justify="center", no_wrap=True)
 
-            for idx, m_id in enumerate(available, 1):
+            model_map = {m.id: m for m in available}
+            for idx, m_id in enumerate(avail_ids, 1):
                 st_badge = "[bold green]★ CURRENT[/bold green]" if m_id == cur_model else "[dim cyan]available[/dim cyan]"
-                table.add_row(str(idx), m_id, st_badge)
+                m_info = model_map.get(m_id)
+                ctx_str = f"{m_info.context_window:,}" if (m_info and m_info.context_window) else "standard"
+                table.add_row(str(idx), m_id, ctx_str, st_badge)
 
             self.console.print()
             self.console.print(table)
-            self.console.print(
-                "[dim cyan]💡 Tip: Model availability varies by region, quota, or enterprise tenancy.\n"
-                "   Choose a number [1-N], enter a custom model name (e.g. gemini-1.5-flash), or press Enter to keep current.[/dim cyan]\n"
-            )
 
+            if sub == "models":
+                return
+
+            self.console.print(
+                "[dim cyan]💡 Tip: Choose a number [1-N], enter a custom model name, or press Enter to keep current.[/dim cyan]\n"
+            )
             choice = Prompt.ask(
-                f"[bold bright_yellow]Select model for {p_name.upper()} [1-{len(available)} or custom][/bold bright_yellow]",
+                f"[bold bright_yellow]Select model for {p_name.upper()} [1-{len(avail_ids)} or custom][/bold bright_yellow]",
                 default=cur_model,
             ).strip()
 
@@ -1259,64 +1383,116 @@ class ConsoleApp:
                 self.console.print(f"[dim]Retaining current model '{cur_model}'.[/dim]")
                 return
 
-            if choice.isdigit() and 1 <= int(choice) <= len(available):
-                chosen_model = available[int(choice) - 1]
+            if choice.isdigit() and 1 <= int(choice) <= len(avail_ids):
+                chosen_model = avail_ids[int(choice) - 1]
             else:
                 chosen_model = choice
 
             mgr.set_model(p_name, chosen_model)
-            self.ai_manager = AIManager()
+            self.ai_manager = AIManager(mgr)
             self.console.print(f"[bold green]✔ Active model for '{p_name}' successfully set to '{chosen_model}'.[/bold green]")
-
 
         elif sub == "default":
             if len(args) < 3:
                 raise ValueError("usage: settings default <groq|openai|anthropic|google>")
-            p_name = args[2].lower()
+            p_name = normalize_provider_name(args[2])
+            if p_name not in ("groq", "openai", "anthropic", "google"):
+                raise ValueError(f"unknown provider '{args[2]}' — choose groq, openai, anthropic, or google")
+
+            cred = mgr.get_credential_info(p_name)
+            if not cred.is_configured:
+                confirm = Prompt.ask(
+                    f"[yellow]Provider '{p_name.upper()}' has no configured API key. Set as default anyway?[/yellow]",
+                    choices=["y", "n"],
+                    default="n",
+                )
+                if confirm.lower() != "y":
+                    return
+
             mgr.set_default_provider(p_name)
-            self.ai_manager = AIManager()
-            self.console.print(f"[bold green]✔ Default provider set to '{p_name}'.[/bold green]")
+            self.ai_manager = AIManager(mgr)
+            self.console.print(f"[bold green]✔ Default provider set to '{p_name.upper()}'.[/bold green]")
 
         elif sub == "remove":
             if len(args) < 3:
-                raise ValueError("usage: settings remove <provider>")
-            p_name = args[2].lower()
+                raise ValueError("usage: settings remove <groq|openai|anthropic|google>")
+            p_name = normalize_provider_name(args[2])
+            confirm = Prompt.ask(
+                f"[yellow]Remove stored API key for provider '{p_name.upper()}'?[/yellow]",
+                choices=["y", "n"],
+                default="n",
+            )
+            if confirm.lower() != "y":
+                self.console.print("[dim]Key removal cancelled.[/dim]")
+                return
+
+            prev_default = mgr.settings.default_provider
             mgr.remove_api_key(p_name)
-            self.ai_manager = AIManager()
+            self.ai_manager = AIManager(mgr)
             self.console.print(f"[bold yellow]✔ Removed stored API key for '{p_name}'.[/bold yellow]")
+            if prev_default == p_name and mgr.settings.default_provider != prev_default:
+                self.console.print(f"[dim cyan]Default provider automatically updated to '{mgr.settings.default_provider.upper()}'.[/dim cyan]")
+
+        elif sub in {"reset-model", "resetmodel"}:
+            if len(args) < 3:
+                raise ValueError("usage: settings reset-model <groq|openai|anthropic|google>")
+            p_name = normalize_provider_name(args[2])
+            def_model = mgr.reset_model(p_name)
+            self.ai_manager = AIManager(mgr)
+            self.console.print(f"[bold green]✔ Active model for '{p_name}' reset to default '{def_model}'.[/bold green]")
 
         elif sub == "test":
-            p_name = args[2].lower() if len(args) >= 3 else mgr.settings.default_provider
-            loading(self.console, f"Testing connection to {p_name.upper()}...", 0.4)
+            p_name = normalize_provider_name(args[2]) if len(args) >= 3 else mgr.settings.default_provider
+            cred = mgr.get_credential_info(p_name)
+            active_model = mgr.get_model(p_name)
+
+            self.console.print(f"\n[bold bright_cyan]✔ Testing API connection to {p_name.upper()}[/bold bright_cyan]")
+            self.console.print(f"  [dim white]Model:             {active_model}[/dim white]")
+            self.console.print(f"  [dim white]Credential source: {cred.source}[/dim white]")
+            if cred.source == "environment":
+                self.console.print(f"  [dim white]Environment var:   ${cred.env_var}[/dim white]")
+
             provider = self.ai_manager.providers.get(p_name)
             if not provider:
-                self.console.print(f"[bold red]✖ Unknown provider '{p_name}'.[/bold red]")
+                self.console.print(f"[bold red]✖ Unknown provider '{p_name}'.[/bold red]\n")
                 return
+
+            loading(self.console, f"Executing live test generation for {p_name.upper()}...", 0.4)
             ok, msg, err_type, latency = provider.validate_credentials()
+
             if ok:
-                self.console.print(f"\n[bold green]✔ Testing {p_name.upper()}[/bold green]")
-                self.console.print("[bold green]✔ API key accepted[/bold green]")
-                self.console.print(f"[bold green]✔ Model available[/bold green] ({provider.config.model})")
-                self.console.print(f"[bold green]✔ Generation successful[/bold green] (Latency: {latency}s)\n")
+                latency_ms = int(latency * 1000)
+                self.console.print(f"\n[bold green]✔ Connection successful[/bold green]")
+                self.console.print(f"[bold green]✔ Response received[/bold green]")
+                self.console.print(f"[bold green]✔ Latency: {latency_ms} ms ({latency}s)[/bold green]")
+                self.console.print(f"[bold green]✔ Model: {active_model}[/bold green]\n")
             else:
-                self.console.print(f"\n[bold red]✖ {p_name.upper()}[/bold red]")
-                self.console.print(f"[bold red]Reason: {err_type.value if err_type else 'ERROR'}[/bold red]")
+                err_label = err_type.value if err_type else "ERROR"
+                self.console.print(f"\n[bold red]✖ {p_name.upper()} connection failed[/bold red]")
+                self.console.print(f"[bold red]Reason: {err_label}[/bold red]")
                 self.console.print(f"[white]{msg}[/white]\n")
 
+        else:
+            raise ValueError(f"unknown settings command: '{sub}' — run 'settings' for help")
+
     def ai_cmd(self, args: list[str]):
+        mgr = self.ai_manager.settings
+
         if len(args) == 1 or args[1].lower() == "status":
             st = self.ai_manager.status()
             status_badge = "[bold green]READY[/bold green]" if st["status"] == "READY" else f"[dim yellow]{st['status']}[/dim yellow]"
             body = (
-                f"[bold bright_yellow]Status:          [/bold bright_yellow] {status_badge}\n"
-                f"[bold bright_yellow]Active Provider: [/bold bright_yellow] [bold bright_cyan]{st['provider'].upper()}[/bold bright_cyan]\n"
-                f"[bold bright_yellow]Active Model:    [/bold bright_yellow] [bold bright_white]{st['model']}[/bold bright_white]\n"
-                f"[bold bright_yellow]Calls Made:      [/bold bright_yellow] {st['calls']}\n"
-                f"[bold bright_yellow]Cached Responses:[/bold bright_yellow] {st['cached_calls']}\n"
-                f"[bold bright_yellow]Input Tokens:    [/bold bright_yellow] {st['input_tokens']:,}\n"
-                f"[bold bright_yellow]Output Tokens:   [/bold bright_yellow] {st['output_tokens']:,}\n"
-                f"[bold bright_yellow]Reasoning Tokens:[/bold bright_yellow] {st['reasoning_tokens']:,}\n"
-                f"[bold bright_yellow]Total Tokens:    [/bold bright_yellow] {st['total_tokens']:,}\n"
+                f"[bold bright_yellow]Status:                 [/bold bright_yellow] {status_badge}\n"
+                f"[bold bright_yellow]Active Provider:        [/bold bright_yellow] [bold bright_cyan]{st['provider'].upper()}[/bold bright_cyan]\n"
+                f"[bold bright_yellow]Active Model:           [/bold bright_yellow] [bold bright_white]{st['model']}[/bold bright_white]\n"
+                f"[bold bright_yellow]Credential Source:      [/bold bright_yellow] [dim]{st['credential_source']}[/dim]\n"
+                f"[bold bright_yellow]Credential Fingerprint: [/bold bright_yellow] [dim]{st['credential_fingerprint']}[/dim]\n"
+                f"[bold bright_yellow]Calls Made:             [/bold bright_yellow] {st['calls']}\n"
+                f"[bold bright_yellow]Cached Responses:       [/bold bright_yellow] {st['cached_calls']}\n"
+                f"[bold bright_yellow]Input Tokens:           [/bold bright_yellow] {st['input_tokens']:,}\n"
+                f"[bold bright_yellow]Output Tokens:          [/bold bright_yellow] {st['output_tokens']:,}\n"
+                f"[bold bright_yellow]Reasoning Tokens:       [/bold bright_yellow] {st['reasoning_tokens']:,}\n"
+                f"[bold bright_yellow]Total Tokens:           [/bold bright_yellow] {st['total_tokens']:,}\n"
             )
             self.console.print()
             self.console.print(
@@ -1331,15 +1507,55 @@ class ConsoleApp:
             return
 
         sub = args[1].lower()
-        if sub == "enable":
+
+        if sub in {"providers", "provider"}:
+            table = Table(
+                title="[bold bright_magenta]✦ HORCRUX AI PROVIDERS ECOSYSTEM ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                header_style="bold bright_cyan",
+            )
+            table.add_column("Provider", style="bold bright_white")
+            table.add_column("Status", justify="center")
+            table.add_column("Model", style="cyan")
+            table.add_column("Credential Source", style="dim white")
+            table.add_column("Fingerprint", style="dim yellow")
+            table.add_column("Last Test", justify="center")
+
+            def_prov = mgr.settings.default_provider
+            for p_id in ("groq", "openai", "anthropic", "google"):
+                cred = mgr.get_credential_info(p_id)
+                st_badge = "[bold green]CONFIGURED[/bold green]" if cred.is_configured else "[dim]NOT CONFIGURED[/dim]"
+                model = mgr.get_model(p_id)
+                cfg = mgr.settings.providers.get(p_id)
+                last_st = cfg.last_status if cfg and cfg.last_status else "NOT TESTED"
+                test_badge = "[green]SUCCESS[/green]" if last_st == "READY" else (f"[red]{last_st}[/red]" if last_st != "NOT TESTED" else "[dim]NOT TESTED[/dim]")
+                p_display = f"{p_id.upper()} [bold yellow]★ DEFAULT[/bold yellow]" if p_id == def_prov else p_id.upper()
+                table.add_row(p_display, st_badge, model, cred.source, cred.fingerprint, test_badge)
+
+            self.console.print()
+            self.console.print(table)
+            self.console.print()
+
+        elif sub in {"models", "model"}:
+            self.settings_cmd(["settings", "models"] + args[2:])
+
+        elif sub == "enable":
             self.ai_manager.settings.set_enabled(True)
             self.console.print("[bold green]✔ AI engine enabled.[/bold green]")
+
         elif sub == "disable":
             self.ai_manager.settings.set_enabled(False)
             self.console.print("[bold yellow]✔ AI engine disabled. Falling back to local deterministic intelligence.[/bold yellow]")
+
         elif sub in {"clear-cache", "clearcache"}:
             self.ai_manager.clear_cache()
             self.console.print("[bold green]✔ AI response cache cleared.[/bold green]")
+
+        elif sub in {"reset-stats", "resetstats"}:
+            self.ai_manager.reset_stats()
+            self.console.print("[bold green]✔ AI usage statistics reset to zero.[/bold green]")
+
         elif sub == "usage":
             usage = self.ai_manager.get_usage()
             table = Table(
@@ -1377,11 +1593,8 @@ class ConsoleApp:
                 f"[bold bright_yellow]Total Calls:[/bold bright_yellow] {usage['total_calls']} "
                 f"([green]{usage['total_cached_calls']} cached[/green])\n"
             )
-        elif sub in {"models", "model"}:
-            self.settings_cmd(["settings", "models"] + args[2:])
         else:
-            raise ValueError("usage: ai [status|enable|disable|usage|clear-cache|models]")
-
+            raise ValueError("usage: ai [status|providers|models|enable|disable|usage|clear-cache|reset-stats]")
 
     def raw_cmd(self, args: list[str]):
         if len(args) < 2:
