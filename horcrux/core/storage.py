@@ -12,9 +12,13 @@ from horcrux.models import (
     DiscoveredPath,
     ExploitCandidate,
     Finding,
+    Parameter,
+    RawObservation,
+    ResponseFamily,
     Service,
     Software,
     SubsystemState,
+    WebTarget,
     WorkspaceState,
 )
 

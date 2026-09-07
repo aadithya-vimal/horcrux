@@ -13,6 +13,18 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
     ports = {s.port for s in state.services}
     finding_ids = {f.id for f in state.findings}
 
+    # 0. Interrupted / Failed Scan Recovery (Top Priority)
+    if state.get_subsystem_state("scan") == SubsystemState.FAILED:
+        actions.append(
+            Action(
+                id="retry_scan",
+                title=f"Re-run reconnaissance scan against {state.target}",
+                reason="Previous reconnaissance pass failed or was interrupted before completion.",
+                score=99.0,
+                command=f"scan {state.target}",
+            )
+        )
+
     # 1. Harvested Credentials (Top Priority)
     if state.credentials:
         cred = state.credentials[0]

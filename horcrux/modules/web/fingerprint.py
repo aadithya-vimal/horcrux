@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 from horcrux.models import NormalizedTechnology, RawObservation, Software
 from horcrux.modules.web.tech_normalizer import (
     BLACKLIST_SCANNER_LABELS,

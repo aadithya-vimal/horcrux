@@ -125,10 +125,20 @@ def get_exploit_decision_badge(relevance: str, decision: str = "") -> str:
 
 
 class ConsoleApp:
-    def __init__(self):
-        self.console = Console()
+    def __init__(self, console: Console | None = None):
+        self.console = console or Console()
         self.workspace: Workspace | None = None
         self.ai_manager = AIManager()
+        self.banner_rendered: bool = False
+        self.banner_count: int = 0
+
+    def startup(self, duration: float = 1.0) -> None:
+        """Render the application startup banner exactly once per console session."""
+        if not self.banner_rendered:
+            banner(self.console, duration=duration)
+            self.banner_rendered = True
+            self.banner_count += 1
+            self.console.print("[dim cyan]⚡ Welcome to HORCRUX.[/dim cyan] [dim white]Type [bold magenta]'help'[/bold magenta] for command reference.[/dim white]\n")
 
     def print_help(self):
         grid = Table.grid(padding=(0, 2))
@@ -214,8 +224,7 @@ class ConsoleApp:
         self.console.print()
 
     def run(self):
-        banner(self.console, duration=1.0)
-        self.console.print("[dim cyan]⚡ Welcome to HORCRUX.[/dim cyan] [dim white]Type [bold magenta]'help'[/bold magenta] for command reference.[/dim white]\n")
+        self.startup(duration=1.0)
 
         while True:
             target_str = self.workspace.target if self.workspace else "ready"
@@ -282,7 +291,6 @@ class ConsoleApp:
             return
 
         if command == "version":
-            banner(self.console, __version__, duration=0.4)
             self.console.print(f"[bold bright_magenta]HORCRUX[/bold bright_magenta] version [bold bright_cyan]{__version__}[/bold bright_cyan]\n")
             return
 

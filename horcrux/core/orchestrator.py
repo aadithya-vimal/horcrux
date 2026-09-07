@@ -6,7 +6,14 @@ from rich.console import Console
 from horcrux.core.actions import compute_next_actions
 from horcrux.core.runner import CommandRunner
 from horcrux.core.storage import Workspace
-from horcrux.models import ScanProfile, SubsystemState, get_profile
+from horcrux.models import (
+    ModuleDecision,
+    ScanProfile,
+    SubsystemState,
+    WebApplicationType,
+    WebTarget,
+    get_profile,
+)
 from horcrux.modules.network import run_network
 from horcrux.modules.services import enumerate_services
 from horcrux.modules.web.discovery import run as web_discovery
@@ -29,12 +36,14 @@ class Orchestrator:
         if deep:
             profile = get_profile("deep")
 
-        with ScanProgressManager(self.console, self.target, profile.name) as progress:
-            runner = CommandRunner(
-                self.workspace,
-                on_start=progress.on_command_start,
-                on_finish=progress.on_command_finish,
-            )
+        self.workspace.set_subsystem_state("scan", SubsystemState.RUNNING)
+        try:
+            with ScanProgressManager(self.console, self.target, profile.name) as progress:
+                runner = CommandRunner(
+                    self.workspace,
+                    on_start=progress.on_command_start,
+                    on_finish=progress.on_command_finish,
+                )
 
             # STAGE 1: Reachability & Target Validation
             progress.start_stage("reachability")
@@ -237,6 +246,10 @@ class Orchestrator:
             progress.start_stage("synthesis")
             self.derive_actions()
             progress.complete_stage("synthesis")
+            self.workspace.set_subsystem_state("scan", SubsystemState.COMPLETE)
+        except Exception:
+            self.workspace.set_subsystem_state("scan", SubsystemState.FAILED)
+            raise
 
     def derive_actions(self):
         """Recompute state-aware next best actions without stale priorities."""

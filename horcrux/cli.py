@@ -46,14 +46,17 @@ def scan(
 ):
     """Run full automated attack surface reconnaissance against a target."""
     console = Console()
-    banner(console, __version__, duration=0.5)
     selected_profile = "deep" if deep else profile
+    console.print(f"\n[bold bright_magenta]⚡ SCANNING:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]  [dim]profile={selected_profile}[/dim]\n")
+    ws = Workspace(target)
     Orchestrator(
         target,
-        Workspace(target),
+        ws,
         console,
         profile=selected_profile,
     ).scan(deep=deep, verify=verify)
+    from horcrux.ui.ascii import fanfare
+    fanfare(console, f"TARGET SYNTHESIS COMPLETE: {target}")
 
 
 @app.command()
