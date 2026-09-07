@@ -36,6 +36,7 @@ class AICacheManager:
         self.usage_file = self.settings.usage_file
         self._cache: dict[str, dict[str, Any]] = {}
         self._usage: dict[str, dict[str, Any]] = {}
+        self._last_request: dict[str, Any] = {}
         self._load()
 
     def _load(self) -> None:
@@ -46,9 +47,13 @@ class AICacheManager:
                 self._cache = {}
         if self.usage_file.exists():
             try:
-                self._usage = json.loads(self.usage_file.read_text(encoding="utf-8"))
+                data = json.loads(self.usage_file.read_text(encoding="utf-8"))
+                # Separate last_request metadata from per-model records
+                self._last_request = data.pop("__last_request__", {})
+                self._usage = data
             except Exception:
                 self._usage = {}
+                self._last_request = {}
 
     def _save_cache(self) -> None:
         try:
@@ -60,7 +65,11 @@ class AICacheManager:
     def _save_usage(self) -> None:
         try:
             self.usage_file.parent.mkdir(parents=True, exist_ok=True)
-            self.usage_file.write_text(json.dumps(self._usage, indent=2), encoding="utf-8")
+            # Persist last_request alongside per-model records under a reserved key
+            combined = dict(self._usage)
+            if self._last_request:
+                combined["__last_request__"] = self._last_request
+            self.usage_file.write_text(json.dumps(combined, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -121,6 +130,21 @@ class AICacheManager:
         rec["reasoning_tokens"] += response.reasoning_tokens
         rec["total_tokens"] += response.total_tokens
         rec["total_latency"] += response.latency
+
+        # Track last-request metadata for ai status display
+        self._last_request = {
+            "at": time.time(),
+            "provider": response.provider,
+            "model": response.model,
+            "latency_ms": response.latency_ms,
+            "status": "OK" if response.content else "EMPTY",
+            "finish_reason": response.finish_reason or "",
+            "input_tokens": response.prompt_tokens,
+            "output_tokens": response.completion_tokens,
+            "total_tokens": response.total_tokens,
+            "cached": response.cached,
+        }
+
         self._save_usage()
 
     def record_hit(self, provider: str, model: str) -> None:
@@ -139,7 +163,6 @@ class AICacheManager:
             }
         self._usage[p_key]["cached_calls"] += 1
         self._save_usage()
-
 
     def clear(self) -> None:
         self._cache.clear()
@@ -161,4 +184,5 @@ class AICacheManager:
             "total_reasoning_tokens": total_reasoning,
             "total_tokens": total_tokens,
             "by_model": self._usage,
+            "last_request": self._last_request,
         }

@@ -108,6 +108,7 @@ class AIManager:
 
         status_label = "READY" if (configured and self.is_enabled) else ("DISABLED" if not self.is_enabled else "NOT CONFIGURED")
         usage = self.cache.get_summary()
+        last_req = usage.get("last_request", {})
 
         return {
             "enabled": self.is_enabled,
@@ -122,6 +123,7 @@ class AIManager:
             "input_tokens": usage["total_input_tokens"],
             "output_tokens": usage["total_output_tokens"],
             "reasoning_tokens": usage["total_reasoning_tokens"],
+            "last_request": last_req,
         }
 
     def clear_cache(self) -> None:
@@ -270,7 +272,7 @@ class AIManager:
             resp = provider.complete(prompt, system_prompt=system_prompt)
             if use_cache:
                 self.cache.put(provider.name, model, "complete", prompt, resp)
-                self.cache.record_usage(resp)
+            self.cache.record_usage(resp)
             return resp
         except Exception:
             return None

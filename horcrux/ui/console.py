@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import shlex
 import sys
 from typing import List
@@ -8,6 +9,7 @@ from rich import box
 from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
@@ -323,7 +325,7 @@ class ConsoleApp:
                     profile_name = args[i + 1]
 
             self.workspace = Workspace(target)
-            banner(self.console, duration=0.4)
+            self.console.print(f"\n[bold bright_magenta]⚡ SCANNING:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]  [dim]profile={profile_name}[/dim]\n")
 
             Orchestrator(
                 target,
@@ -338,6 +340,7 @@ class ConsoleApp:
             fanfare(self.console, f"TARGET SYNTHESIS COMPLETE: {target}")
             self.status()
             return
+
 
         # Commands below this guard strictly require an active target workspace
         self.require_workspace()
@@ -439,7 +442,17 @@ class ConsoleApp:
             )
 
         else:
-            raise ValueError(f"unknown command: '{command}' — type 'help' for command reference")
+            _ALL_COMMANDS = [
+                "scan", "status", "surface", "services", "software", "web", "audit",
+                "findings", "inspect", "next", "actions", "creds", "credentials",
+                "graph", "subsystems", "states", "cve", "searchsploit", "intel",
+                "nuclei", "exploit", "exploits", "source", "raw", "report",
+                "local", "ask", "ai", "settings", "doctor", "tools", "help",
+                "artifacts", "gallery", "art", "version", "clear",
+            ]
+            close = difflib.get_close_matches(command, _ALL_COMMANDS, n=1, cutoff=0.6)
+            hint = f" — did you mean '[bold bright_cyan]{close[0]}[/bold bright_cyan]'?" if close else " — type 'help' for command reference"
+            raise ValueError(f"unknown command: '{command}'{hint}")
 
 
     def require_workspace(self):
@@ -1143,17 +1156,29 @@ class ConsoleApp:
         loading(self.console, "Consulting HORCRUX AI reasoning engine", 0.5)
         answer = self.ai_manager.ask(question, state)
 
+        # Build a clean question preview for the subtitle — truncate at word boundary
+        preview = question
+        if len(preview) > 60:
+            preview = preview[:57].rsplit(" ", 1)[0] + "…"
+
+        # Detect if the response contains Rich markup (dim, bold) vs plain Markdown
+        # Rich markup errors are returned as plain dim strings — render them directly.
+        # Proper Markdown responses are rendered with rich.markdown.Markdown.
+        is_rich_markup = answer.strip().startswith("[") and ("[dim" in answer or "[bold" in answer)
+
         self.console.print()
         self.console.print(
             Panel(
-                answer,
-                title=f"[bold bright_magenta]⚡ HORCRUX AI ADVISOR — '{question[:45]}'[/bold bright_magenta]",
+                answer if is_rich_markup else Markdown(answer),
+                title="[bold bright_magenta]⚡ HORCRUX AI[/bold bright_magenta]",
+                subtitle=f"[dim white]{preview}[/dim white]",
                 box=box.ROUNDED,
                 border_style="bright_magenta",
                 padding=(1, 2),
             )
         )
         self.console.print()
+
 
     def settings_cmd(self, args: list[str]):
         mgr = SettingsManager()
@@ -1479,20 +1504,59 @@ class ConsoleApp:
         mgr = self.ai_manager.settings
 
         if len(args) == 1 or args[1].lower() == "status":
+            import time as _time
             st = self.ai_manager.status()
             status_badge = "[bold green]READY[/bold green]" if st["status"] == "READY" else f"[dim yellow]{st['status']}[/dim yellow]"
+            last_req = st.get("last_request", {})
+
+            # Format last-request section
+            if last_req:
+                lr_at = last_req.get("at", 0)
+                lr_ago = ""
+                if lr_at:
+                    diff = _time.time() - lr_at
+                    if diff < 60:
+                        lr_ago = f"{int(diff)}s ago"
+                    elif diff < 3600:
+                        lr_ago = f"{int(diff // 60)}m ago"
+                    else:
+                        lr_ago = f"{int(diff // 3600)}h ago"
+                lr_provider = last_req.get("provider", "-").upper()
+                lr_model = last_req.get("model", "-")
+                lr_latency = last_req.get("latency_ms", 0)
+                lr_status = last_req.get("status", "-")
+                lr_finish = last_req.get("finish_reason", "")
+                lr_in = last_req.get("input_tokens", 0)
+                lr_out = last_req.get("output_tokens", 0)
+                lr_total = last_req.get("total_tokens", 0)
+                lr_cached = " [dim green](cached)[/dim green]" if last_req.get("cached") else ""
+                status_color = "green" if lr_status == "OK" else "red"
+                last_req_block = (
+                    f"\n[bold bright_yellow]── LAST REQUEST ─────────────────[/bold bright_yellow]\n"
+                    f"[bold bright_yellow]  Time:                [/bold bright_yellow] [dim]{lr_ago}[/dim]{lr_cached}\n"
+                    f"[bold bright_yellow]  Provider / Model:    [/bold bright_yellow] [bold bright_cyan]{lr_provider}[/bold bright_cyan] / [bright_white]{lr_model}[/bright_white]\n"
+                    f"[bold bright_yellow]  Latency:             [/bold bright_yellow] [bold]{lr_latency} ms[/bold]\n"
+                    f"[bold bright_yellow]  Status:              [/bold bright_yellow] [{status_color}]{lr_status}[/{status_color}]"
+                    + (f"  [dim]finish={lr_finish}[/dim]" if lr_finish else "") + "\n"
+                    f"[bold bright_yellow]  Tokens (in/out/tot): [/bold bright_yellow] {lr_in:,} / {lr_out:,} / {lr_total:,}\n"
+                )
+            else:
+                last_req_block = "\n[dim]No requests recorded in this session.[/dim]\n"
+
             body = (
                 f"[bold bright_yellow]Status:                 [/bold bright_yellow] {status_badge}\n"
                 f"[bold bright_yellow]Active Provider:        [/bold bright_yellow] [bold bright_cyan]{st['provider'].upper()}[/bold bright_cyan]\n"
                 f"[bold bright_yellow]Active Model:           [/bold bright_yellow] [bold bright_white]{st['model']}[/bold bright_white]\n"
                 f"[bold bright_yellow]Credential Source:      [/bold bright_yellow] [dim]{st['credential_source']}[/dim]\n"
                 f"[bold bright_yellow]Credential Fingerprint: [/bold bright_yellow] [dim]{st['credential_fingerprint']}[/dim]\n"
-                f"[bold bright_yellow]Calls Made:             [/bold bright_yellow] {st['calls']}\n"
-                f"[bold bright_yellow]Cached Responses:       [/bold bright_yellow] {st['cached_calls']}\n"
-                f"[bold bright_yellow]Input Tokens:           [/bold bright_yellow] {st['input_tokens']:,}\n"
-                f"[bold bright_yellow]Output Tokens:          [/bold bright_yellow] {st['output_tokens']:,}\n"
-                f"[bold bright_yellow]Reasoning Tokens:       [/bold bright_yellow] {st['reasoning_tokens']:,}\n"
-                f"[bold bright_yellow]Total Tokens:           [/bold bright_yellow] {st['total_tokens']:,}\n"
+                f"\n[bold bright_yellow]── LIFETIME USAGE ───────────────[/bold bright_yellow]\n"
+                f"[bold bright_yellow]  Calls Made:           [/bold bright_yellow] {st['calls']}\n"
+                f"[bold bright_yellow]  Cached Responses:     [/bold bright_yellow] {st['cached_calls']}\n"
+                f"[bold bright_yellow]  Input Tokens:         [/bold bright_yellow] {st['input_tokens']:,}\n"
+                f"[bold bright_yellow]  Output Tokens:        [/bold bright_yellow] {st['output_tokens']:,}\n"
+                f"[bold bright_yellow]  Reasoning Tokens:     [/bold bright_yellow] {st['reasoning_tokens']:,}\n"
+                f"[bold bright_yellow]  Total Tokens:         [/bold bright_yellow] {st['total_tokens']:,}\n"
+                + last_req_block
             )
             self.console.print()
             self.console.print(
@@ -1505,6 +1569,7 @@ class ConsoleApp:
             )
             self.console.print()
             return
+
 
         sub = args[1].lower()
 
@@ -1603,11 +1668,17 @@ class ConsoleApp:
         matching = list(self.workspace.raw.glob(f"*{target_name}*"))
         if not matching:
             raise ValueError(f"No raw artifacts matching '{target_name}' found in {self.workspace.raw}")
-        content = matching[0].read_text(encoding="utf-8", errors="replace")
+        path = matching[0]
+        content = path.read_text(encoding="utf-8", errors="replace")
+        size_kb = path.stat().st_size / 1024
+        subtitle = f"[dim]{path.name}  •  {size_kb:.1f} KB[/dim]"
+        if size_kb > 50:
+            self.console.print(f"[dim yellow]⚠ Large artifact ({size_kb:.1f} KB) — displaying full content.[/dim yellow]")
         self.console.print(
             Panel(
-                content[:4000] + ("\n... [truncated]" if len(content) > 4000 else ""),
-                title=f"[bold bright_cyan]{matching[0].name}[/bold bright_cyan]",
+                content,
+                title=f"[bold bright_cyan]{path.name}[/bold bright_cyan]",
+                subtitle=subtitle,
                 box=box.ROUNDED,
                 border_style="cyan",
             )
