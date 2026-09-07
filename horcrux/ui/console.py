@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import shlex
 import sys
+import time
 from typing import List
 
 from rich import box
@@ -18,7 +19,8 @@ from rich.tree import Tree
 
 from horcrux import __version__
 from horcrux.core.actions import compute_next_actions
-from horcrux.core.doctor import check_tools, CATEGORIES
+from horcrux.core.doctor import check_tools, CATEGORIES, ToolImportance
+from horcrux.ui.progress import AIProgressManager
 from horcrux.core.intel import run_nuclei
 from horcrux.core.runner import CommandRunner
 from horcrux.core.sanitizer import fingerprint_key
@@ -1161,8 +1163,22 @@ class ConsoleApp:
         question = " ".join(args[1:]).strip()
         state = self.workspace.load() if self.workspace else None
 
-        loading(self.console, "Consulting HORCRUX AI reasoning engine", 0.5)
-        answer = self.ai_manager.ask(question, state)
+        active_provider = self.ai_manager.active_provider_name()
+        provider_obj = self.ai_manager.get_provider()
+        active_model = provider_obj.get_active_model() if provider_obj else ""
+
+        with AIProgressManager(
+            self.console,
+            task_name="HORCRUX AI Reasoning",
+            provider=active_provider,
+            model=active_model,
+        ) as ai_prog:
+            ai_prog.set_phase("Preparing context & scope")
+            time.sleep(0.04)
+            ai_prog.set_phase(f"Consulting {active_provider.upper()}")
+            answer = self.ai_manager.ask(question, state)
+            ai_prog.set_phase("Normalizing response")
+            time.sleep(0.02)
 
         # Build a clean question preview for the subtitle — truncate at word boundary
         preview = question
@@ -1629,6 +1645,44 @@ class ConsoleApp:
             self.ai_manager.reset_stats()
             self.console.print("[bold green]✔ AI usage statistics reset to zero.[/bold green]")
 
+        elif sub in {"debug", "diag"}:
+            st = self.ai_manager.status()
+            last_req = st.get("last_request", {})
+            last_err = getattr(self.ai_manager, "last_error", None)
+            last_stage = getattr(self.ai_manager, "last_failure_stage", "") or last_req.get("failure_stage", "")
+            last_diag = getattr(self.ai_manager, "last_diagnostic", "") or last_req.get("diagnostic", "")
+            last_resp = getattr(self.ai_manager, "last_response", None)
+
+            debug_table = Table(
+                title="[bold bright_magenta]✦ HORCRUX AI INTERNAL NORMALIZATION & PIPELINE DIAGNOSTICS ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="bright_magenta",
+                expand=True,
+            )
+            debug_table.add_column("Component", style="bold bright_yellow", width=24)
+            debug_table.add_column("Diagnostic Value", style="bright_white")
+
+            debug_table.add_row("Configured Provider", f"[bold bright_cyan]{st['provider'].upper()}[/bold bright_cyan]")
+            debug_table.add_row("Configured Model", f"[bright_white]{st['model']}[/bright_white]")
+            debug_table.add_row("Provider Status", f"[bold green]{st['status']}[/bold green]" if st['status'] == 'READY' else f"[bold red]{st['status']}[/bold red]")
+            debug_table.add_row("Credential Source", f"[dim]{st['credential_source']}[/dim]")
+            debug_table.add_row("Last Failure Stage", f"[bold red]{last_stage}[/bold red]" if last_stage else "[dim green]NONE (last operation successful)[/dim green]")
+            if last_diag:
+                debug_table.add_row("Last Diagnostic", f"[italic white]{last_diag}[/italic white]")
+            if last_err:
+                debug_table.add_row("Last Raw Error", f"[red]{type(last_err).__name__}: {last_err}[/red]")
+            if last_resp:
+                debug_table.add_row(
+                    "Last Response Shape",
+                    f"tokens(in={last_resp.prompt_tokens}, out={last_resp.completion_tokens}, reason={last_resp.reasoning_tokens}) latency={last_resp.latency}s finish={last_resp.finish_reason or 'stop'}"
+                )
+                preview_content = last_resp.content[:120] + "..." if len(last_resp.content) > 120 else last_resp.content
+                debug_table.add_row("Content Preview", f"[dim]{preview_content}[/dim]")
+
+            self.console.print()
+            self.console.print(debug_table)
+            self.console.print()
+
         elif sub == "usage":
             usage = self.ai_manager.get_usage()
             table = Table(
@@ -1705,6 +1759,7 @@ class ConsoleApp:
         )
         table.add_column("Category", style="bold bright_yellow", no_wrap=True)
         table.add_column("Tool", style="bold bright_white")
+        table.add_column("Importance", justify="center", no_wrap=True)
         table.add_column("Status", justify="center", no_wrap=True)
         table.add_column("Purpose", style="dim white")
         table.add_column("Install Guidance", style="italic yellow")
@@ -1716,9 +1771,20 @@ class ConsoleApp:
                 item = tool_map.get(tool_name)
                 path = item[1] if item else None
                 install_guide = item[3] if item and len(item) > 3 else ""
+                importance = item[4] if item and len(item) > 4 else ToolImportance.OPTIONAL
+
+                if importance == ToolImportance.REQUIRED:
+                    imp_badge = "[bold red]REQUIRED[/bold red]"
+                elif importance == ToolImportance.RECOMMENDED:
+                    imp_badge = "[bold yellow]RECOMMENDED[/bold yellow]"
+                elif importance == ToolImportance.ENVIRONMENT:
+                    imp_badge = "[dim]ENV-SPECIFIC[/dim]"
+                else:
+                    imp_badge = "[dim cyan]OPTIONAL[/dim cyan]"
+
                 status_text = "[bold green]✔ OK[/bold green]" if path else "[dim red]✖ MISSING[/dim red]"
                 guide_text = "" if path else install_guide
-                table.add_row(cat_name, tool_name, status_text, desc, guide_text)
+                table.add_row(cat_name, tool_name, imp_badge, status_text, desc, guide_text)
 
         self.console.print()
         self.console.print(table)

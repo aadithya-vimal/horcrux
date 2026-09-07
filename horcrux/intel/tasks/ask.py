@@ -247,6 +247,23 @@ RESPONSE FORMAT RULES (CRITICAL):
 """
 
 
+def _format_failure_diagnostic(ai_manager) -> str:
+    stage = getattr(ai_manager, "last_failure_stage", "") or "REQUEST_FAILED"
+    diag = getattr(ai_manager, "last_diagnostic", "")
+    last_err = getattr(ai_manager, "last_error", None)
+    hint = getattr(last_err, "suggested_action", "") if last_err else ""
+
+    lines = [
+        f"[bold red]✖ AI generation failed[/bold red] [dim]({stage})[/dim]",
+    ]
+    if diag:
+        lines.append(f"[dim white]Diagnostic: {diag}[/dim white]")
+    if hint:
+        lines.append(f"[dim yellow]Suggested Action: {hint}[/dim yellow]")
+    lines.append("[dim]Run 'ai debug' or 'settings test' to inspect provider connection.[/dim]")
+    return "\n".join(lines)
+
+
 def execute_operator_ask(
     ai_manager,
     question: str,
@@ -272,9 +289,17 @@ def execute_operator_ask(
         and (bool(state.services) or bool(state.findings) or bool(state.software))
     )
 
+    policy_prefix = ""
+    if state is not None:
+        try:
+            policy = state.get_policy()
+            policy_prefix = policy.format_ai_context(state.target) + "\n\n"
+        except Exception:
+            pass
+
     if not has_workspace:
         # General offensive security assistant — no workspace required
-        prompt = f"""You are the HORCRUX AI Offensive Security Analyst.
+        prompt = f"""{policy_prefix}You are the HORCRUX AI Offensive Security Analyst.
 Answer the operator's question with technical authority, precision, and depth.
 Cover attack techniques, defensive concepts, risk factors, or testing methodologies directly.
 Format your response in Markdown with headings, bullets, bold terms, and code blocks.
@@ -294,10 +319,7 @@ Operator Question:
         if resp and resp.content and resp.content.strip():
             return _ensure_prose(resp.content.strip())
 
-        return (
-            "[dim red]AI provider did not return a response.[/dim red]\n"
-            "Check provider configuration with 'settings test' or switch provider with 'settings default'."
-        )
+        return _format_failure_diagnostic(ai_manager)
 
     # Workspace-aware context assembly
     bounded_ctx = build_bounded_workspace_context(state, question)
@@ -321,7 +343,7 @@ ANALYSIS RULES:
 5. Format your full response in Markdown — headings, bullets, bold, code blocks.
 """
 
-    prompt = f"""You are the HORCRUX AI Offensive Security Analyst advising an operator during an active engagement.
+    prompt = f"""{policy_prefix}You are the HORCRUX AI Offensive Security Analyst advising an operator during an active engagement.
 
 {evidence_schema}
 
@@ -344,7 +366,4 @@ ANALYSIS RULES:
     if resp and resp.content and resp.content.strip():
         return _ensure_prose(resp.content.strip())
 
-    return (
-        "[dim red]AI provider did not return a response.[/dim red]\n"
-        "Check provider configuration with 'settings test' or switch provider with 'settings default'."
-    )
+    return _format_failure_diagnostic(ai_manager)

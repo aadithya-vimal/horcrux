@@ -429,6 +429,22 @@ class WorkspaceState(BaseModel):
     web_targets: list[WebTarget] = Field(default_factory=list)
     parameters: list[Parameter] = Field(default_factory=list)
     response_families: list[ResponseFamily] = Field(default_factory=list)
+    policy: dict[str, Any] = Field(default_factory=dict)
+
+    def get_policy(self) -> Any:
+        from horcrux.core.policy import EngagementPolicy
+        if self.policy:
+            return EngagementPolicy.from_dict(self.policy)
+        pol = EngagementPolicy()
+        if self.target and self.target != "ready":
+            pol.scope.allowed_targets = [self.target]
+        return pol
+
+    def set_policy(self, policy: Any) -> None:
+        if hasattr(policy, "to_dict"):
+            self.policy = policy.to_dict()
+        elif isinstance(policy, dict):
+            self.policy = policy
 
     def get_web_target(self, port: int) -> WebTarget | None:
         for wt in self.web_targets:

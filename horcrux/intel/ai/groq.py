@@ -166,21 +166,13 @@ class GroqProvider(AIProvider):
 
         content = choices[0].get("message", {}).get("content", "").strip()
         finish_reason = choices[0].get("finish_reason", "")
-        usage = data.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
 
-        return AIResponse(
-            content=content,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+        return self.normalize_response(
+            raw_text=content,
+            resp_data=data,
             model=selected_model,
-            provider="groq",
             latency=round(latency, 2),
             finish_reason=finish_reason,
-            raw_metadata=data,
         )
 
     def structured(

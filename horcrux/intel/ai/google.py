@@ -73,19 +73,29 @@ class GoogleProvider(AIProvider):
         max_tok = max_tokens if max_tokens is not None else cfg.max_tokens
 
         system = system_prompt or HORCRUX_EVIDENCE_POLICY
-        full_text = f"{system}\n\n{prompt}" if system else prompt
 
         payload: dict[str, Any] = {
             "contents": [
                 {
-                    "parts": [{"text": full_text}]
+                    "parts": [{"text": prompt}]
                 }
             ],
             "generationConfig": {
                 "temperature": temp,
                 "maxOutputTokens": max_tok,
             },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
         }
+        if system:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system}]
+            }
+
 
         # Google Gemini officially supports the x-goog-api-key header
         headers = {
@@ -234,33 +244,24 @@ class GoogleProvider(AIProvider):
                 raise AIError(
                     AIErrorType.SAFETY_BLOCK,
                     f"Google Gemini candidate blocked due to policy (finishReason: {finish_reason}).",
-                    "Review prompt content.",
+                    "Review prompt content or engagement policy settings.",
                     provider="google",
+                    failure_stage=AIErrorType.SAFETY_BLOCK.value,
                 )
             raise AIError(
                 AIErrorType.INVALID_RESPONSE,
                 f"Google returned a successful response but no usable text (finishReason: {finish_reason or 'UNKNOWN'}).",
                 "Diagnostic: no candidate text parts were present.",
                 provider="google",
+                failure_stage=AIErrorType.CONTENT_EXTRACTION_FAILED.value,
             )
 
-        usage = resp_data.get("usageMetadata") or {}
-        prompt_tokens = usage.get("promptTokenCount", 0)
-        completion_tokens = usage.get("candidatesTokenCount", 0)
-        reasoning_tokens = usage.get("thoughtsTokenCount", 0)
-        total_tokens = usage.get("totalTokenCount", prompt_tokens + completion_tokens)
-
-        return AIResponse(
-            content=text,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            reasoning_tokens=reasoning_tokens,
-            total_tokens=total_tokens,
+        return self.normalize_response(
+            raw_text=text,
+            resp_data=resp_data,
             model=selected_model,
-            provider="google",
             latency=round(latency, 2),
             finish_reason=finish_reason,
-            raw_metadata=resp_data,
         )
 
     def list_models(self) -> list[ModelInfo]:

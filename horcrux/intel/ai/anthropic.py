@@ -156,21 +156,12 @@ class AnthropicProvider(AIProvider):
         text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text").strip()
         stop_reason = data.get("stop_reason", "")
 
-        usage = data.get("usage", {})
-        prompt_tokens = usage.get("input_tokens", 0)
-        completion_tokens = usage.get("output_tokens", 0)
-        total_tokens = prompt_tokens + completion_tokens
-
-        return AIResponse(
-            content=text,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+        return self.normalize_response(
+            raw_text=text,
+            resp_data=data,
             model=selected_model,
-            provider="anthropic",
             latency=round(latency, 2),
             finish_reason=stop_reason,
-            raw_metadata=data,
         )
 
     def list_models(self) -> list[ModelInfo]:

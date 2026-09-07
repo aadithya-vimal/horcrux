@@ -1,7 +1,49 @@
 from __future__ import annotations
 
 import shutil
+from enum import Enum
 from pathlib import Path
+import sys
+
+
+class ToolImportance(str, Enum):
+    REQUIRED = "REQUIRED"
+    RECOMMENDED = "RECOMMENDED"
+    OPTIONAL = "OPTIONAL"
+    ENVIRONMENT = "ENVIRONMENT-SPECIFIC"
+
+
+TOOL_IMPORTANCE: dict[str, ToolImportance] = {
+    # REQUIRED
+    "python": ToolImportance.REQUIRED,
+    "pip": ToolImportance.REQUIRED,
+    "nmap": ToolImportance.REQUIRED,
+    "curl": ToolImportance.REQUIRED,
+
+    # RECOMMENDED
+    "ffuf": ToolImportance.RECOMMENDED,
+    "httpx": ToolImportance.RECOMMENDED,
+    "nuclei": ToolImportance.RECOMMENDED,
+    "searchsploit": ToolImportance.RECOMMENDED,
+    "smbclient": ToolImportance.RECOMMENDED,
+    "whatweb": ToolImportance.RECOMMENDED,
+
+    # ENVIRONMENT-SPECIFIC
+    "linpeas": ToolImportance.ENVIRONMENT,
+    "winpeas": ToolImportance.ENVIRONMENT,
+    "pspy": ToolImportance.ENVIRONMENT,
+    "lse": ToolImportance.ENVIRONMENT,
+    "docker": ToolImportance.ENVIRONMENT,
+    "kubectl": ToolImportance.ENVIRONMENT,
+    "helm": ToolImportance.ENVIRONMENT,
+    "chisel": ToolImportance.ENVIRONMENT,
+    "proxychains4": ToolImportance.ENVIRONMENT,
+    "evil-winrm": ToolImportance.ENVIRONMENT,
+}
+
+
+def get_tool_importance(tool_name: str) -> ToolImportance:
+    return TOOL_IMPORTANCE.get(tool_name, ToolImportance.OPTIONAL)
 
 
 CATEGORIES = {
@@ -179,7 +221,7 @@ def find_wordlist(name: str):
 
 def check_tools():
     tool_rows = [
-        (name, shutil.which(name), purpose, get_install_instruction(name))
+        (name, shutil.which(name), purpose, get_install_instruction(name), get_tool_importance(name))
         for name, purpose in TOOLS.items()
     ]
     word_rows = [

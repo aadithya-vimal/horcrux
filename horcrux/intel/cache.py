@@ -147,6 +147,23 @@ class AICacheManager:
 
         self._save_usage()
 
+    def record_failure(self, provider: str, model: str, stage: str, diagnostic: str) -> None:
+        self._last_request = {
+            "at": time.time(),
+            "provider": provider,
+            "model": model,
+            "latency_ms": 0,
+            "status": "FAILED",
+            "failure_stage": stage,
+            "diagnostic": diagnostic,
+            "finish_reason": stage,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached": False,
+        }
+        self._save_usage()
+
     def record_hit(self, provider: str, model: str) -> None:
         p_key = f"{provider}:{model}"
         if p_key not in self._usage:

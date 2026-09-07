@@ -41,6 +41,12 @@ class AIErrorType(str, Enum):
     UNSUPPORTED_FEATURE = "UNSUPPORTED_FEATURE"
     SAFETY_BLOCK = "SAFETY_BLOCK"
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    # Explicit failure stages per spec
+    REQUEST_FAILED = "REQUEST_FAILED"
+    RESPONSE_EMPTY = "RESPONSE_EMPTY"
+    RESPONSE_PARSE_FAILED = "RESPONSE_PARSE_FAILED"
+    CONTENT_EXTRACTION_FAILED = "CONTENT_EXTRACTION_FAILED"
+    RENDER_FAILED = "RENDER_FAILED"
 
 
 class AIError(Exception):
@@ -51,6 +57,8 @@ class AIError(Exception):
         suggested_action: str = "",
         provider: str = "",
         raw_status: int | None = None,
+        failure_stage: str = "",
+        diagnostic: str = "",
     ):
         clean_msg = redact_secrets(message)
         clean_hint = redact_secrets(suggested_action)
@@ -60,10 +68,13 @@ class AIError(Exception):
         self.suggested_action = clean_hint
         self.provider = provider
         self.raw_status = raw_status
+        self.failure_stage = failure_stage or error_type.value
+        self.diagnostic = diagnostic
 
     def __str__(self) -> str:
         prov = f"[{self.provider.upper()}] " if self.provider else ""
-        return f"{prov}{self.error_type.value}: {self.message}"
+        stage = f"({self.failure_stage}) " if self.failure_stage else ""
+        return f"{prov}{stage}{self.error_type.value}: {self.message}"
 
 
 @dataclass
@@ -111,6 +122,10 @@ class AIResponse:
     cached: bool = False
     finish_reason: str = ""
     raw_metadata: dict[str, Any] = field(default_factory=dict)
+    failure_stage: str = ""
+    diagnostic: str = ""
+    provider_success: bool = True
+    application_success: bool = True
 
     @property
     def text(self) -> str:
@@ -249,6 +264,60 @@ class AIProvider(abc.ABC):
     def fetch_models(self) -> list[str]:
         """Backward-compatible helper returning list of model ID strings."""
         return [m.id for m in self.list_models()]
+
+    def normalize_response(
+        self,
+        raw_text: str,
+        resp_data: dict[str, Any],
+        model: str,
+        latency: float,
+        finish_reason: str = "",
+        request_id: str = "",
+    ) -> AIResponse:
+        """
+        Unified response normalization pipeline shared by validate_credentials,
+        ask, and all security reasoning tasks.
+        Validates content extraction, ensures non-empty output, and sets failure_stage.
+        """
+        cleaned = raw_text.strip()
+        if not cleaned:
+            stage = AIErrorType.RESPONSE_EMPTY.value if not resp_data else AIErrorType.CONTENT_EXTRACTION_FAILED.value
+            diag = f"Provider={self.name}, model={model}, finish_reason={finish_reason or 'UNKNOWN'}, response_keys={list(resp_data.keys())}"
+            reason_info = f" (finishReason: {finish_reason})" if finish_reason else ""
+            raise AIError(
+                AIErrorType.INVALID_RESPONSE,
+                f"Provider {self.name.upper()} returned a response, but content extraction yielded empty text{reason_info}.",
+                suggested_action=f"Verify model '{model}' generation parameters or check with 'settings models {self.name}'.",
+                provider=self.name,
+                failure_stage=stage,
+                diagnostic=diag,
+            )
+
+        usage = resp_data.get("usage", {}) or resp_data.get("usageMetadata", {})
+        prompt_tokens = usage.get("prompt_tokens") or usage.get("promptTokenCount") or usage.get("input_tokens", 0)
+        completion_tokens = usage.get("completion_tokens") or usage.get("candidatesTokenCount") or usage.get("output_tokens", 0)
+        reasoning_tokens = (
+            usage.get("reasoning_tokens")
+            or usage.get("thoughtsTokenCount")
+            or usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+        )
+        total_tokens = usage.get("total_tokens") or usage.get("totalTokenCount") or (prompt_tokens + completion_tokens)
+
+        return AIResponse(
+            content=cleaned,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            reasoning_tokens=reasoning_tokens,
+            total_tokens=total_tokens,
+            model=model,
+            provider=self.name,
+            latency=latency,
+            request_id=request_id,
+            finish_reason=finish_reason,
+            raw_metadata=resp_data,
+            provider_success=True,
+            application_success=True,
+        )
 
     @abc.abstractmethod
     def complete(

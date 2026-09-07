@@ -43,6 +43,10 @@ class AIManager:
             "anthropic": AnthropicProvider(self.settings),
             "google": GoogleProvider(self.settings),
         }
+        self.last_error: AIError | Exception | None = None
+        self.last_failure_stage: str = ""
+        self.last_diagnostic: str = ""
+        self.last_response: AIResponse | None = None
 
     @property
     def is_enabled(self) -> bool:
@@ -152,11 +156,21 @@ class AIManager:
         """
         Executes an AI task with caching, multi-provider fallback, and usage accounting.
         """
+        self.last_error = None
+        self.last_failure_stage = ""
+        self.last_diagnostic = ""
+        self.last_response = None
+
         if not self.is_enabled:
+            self.last_failure_stage = AIErrorType.CONFIGURATION_ERROR.value
+            self.last_diagnostic = "AI subsystem is disabled in settings. Enable with 'settings ai on'."
             return None
 
         primary = self.get_provider()
         if not primary or not primary.is_configured():
+            self.last_failure_stage = AIErrorType.CONFIGURATION_ERROR.value
+            prov_name = (primary.name if primary else self.settings.settings.default_provider).upper()
+            self.last_diagnostic = f"Primary AI provider '{prov_name}' is not configured with an API key."
             return None
 
         # Build fallback provider candidates
@@ -171,6 +185,7 @@ class AIManager:
         model = self.settings.get_model(primary.name)
         cached_resp = self.cache.get(primary.name, model, task_name, payload or prompt)
         if cached_resp:
+            self.last_response = cached_resp
             return cached_resp
 
         last_error = None
@@ -198,9 +213,13 @@ class AIManager:
                     # Record in cache & usage
                     self.cache.put(provider.name, curr_model, task_name, payload or prompt, resp)
                     self.cache.record_usage(resp)
+                    self.last_response = resp
                     return resp
             except AIError as err:
                 last_error = err
+                self.last_error = err
+                self.last_failure_stage = err.failure_stage or err.error_type.value
+                self.last_diagnostic = err.diagnostic or err.message
                 # Only fail over on transient errors (rate limit, timeout, provider down)
                 if err.error_type in (
                     AIErrorType.RATE_LIMITED,
@@ -214,7 +233,17 @@ class AIManager:
                     break
             except Exception as exc:
                 last_error = exc
+                self.last_error = exc
+                self.last_failure_stage = AIErrorType.REQUEST_FAILED.value
+                self.last_diagnostic = str(exc)
                 continue
+
+        if not self.last_failure_stage:
+            self.last_failure_stage = AIErrorType.RESPONSE_EMPTY.value
+            self.last_diagnostic = "Configured provider returned an empty response."
+
+        p_name = primary.name if primary else self.settings.settings.default_provider
+        self.cache.record_failure(p_name, model, self.last_failure_stage, self.last_diagnostic)
 
         return None
 

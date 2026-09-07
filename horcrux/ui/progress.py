@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from horcrux.core.operations import OperationState, OperationStatus
 from horcrux.ui.ascii import render_gradient_text
 
 
@@ -79,6 +80,11 @@ class ScanProgressManager:
         self.active_tool_start: Optional[float] = None
         self.total_tools_executed = 0
 
+        self.operation = OperationState(name="Reconnaissance Scan", target=target, total_items=len(self.stages))
+        self.aborted = False
+        self.failed = False
+        self.failure_reason = ""
+
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -106,7 +112,18 @@ class ScanProgressManager:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is KeyboardInterrupt:
+            self.cancel("Scan aborted by operator (SIGINT)")
+        elif exc_type is not None:
+            self.failed = True
+            self.failure_reason = str(exc_val)
         self.stop()
+
+    def cancel(self, reason: str = "Scan cancelled by operator") -> None:
+        with self._lock:
+            self.aborted = True
+            self.failure_reason = reason
+            self.operation.cancel(reason)
 
     def start(self) -> None:
         with self._lock:
@@ -114,6 +131,7 @@ class ScanProgressManager:
                 return
             self._running = True
             self.start_time = time.monotonic()
+            self.operation.start("Reconnaissance Scan", total_items=len(self.stages))
             self._live = Live(
                 console=self.console,
                 refresh_per_second=12,
@@ -140,6 +158,26 @@ class ScanProgressManager:
             except Exception:
                 pass
             self._live = None
+
+        elapsed = max(0.0, time.monotonic() - self.start_time)
+        completed_count = sum(1 for s in self.stages.values() if s.state == StageState.COMPLETED)
+        total_count = len(self.stages)
+        if self.aborted:
+            self.console.print(
+                f"[bold yellow]⚠ Scan aborted by operator[/bold yellow] "
+                f"[dim]— {completed_count}/{total_count} phases completed in {elapsed:.1f}s[/dim]"
+            )
+        elif self.failed:
+            self.console.print(
+                f"[bold red]✖ Scan finished with errors[/bold red] "
+                f"[dim]— {completed_count}/{total_count} phases completed in {elapsed:.1f}s[/dim]"
+            )
+        else:
+            self.operation.complete()
+            self.console.print(
+                f"[bold green]✔ Scan complete[/bold green] "
+                f"[dim]— {completed_count} phases completed in {elapsed:.1f}s[/dim]"
+            )
 
     def start_stage(self, key: str) -> None:
         with self._lock:
@@ -305,3 +343,141 @@ class ScanProgressManager:
             )
 
             return Group(panel)
+
+
+class AIProgressManager:
+    """
+    Operator-grade real-time generation feedback for AI operations.
+    Renders animated spinner, active phase, provider, model, and elapsed timing.
+    Collapses cleanly when complete without leaving transient visual artifacts.
+    """
+
+    DEFAULT_PHASES = [
+        "Preparing context & scope",
+        "Analyzing workspace evidence",
+        "Consulting provider",
+        "Normalizing response",
+    ]
+
+    def __init__(
+        self,
+        console: Console,
+        task_name: str = "HORCRUX AI Reasoning",
+        provider: str = "",
+        model: str = "",
+    ):
+        self.console = console
+        self.task_name = task_name
+        self.provider = provider.upper() if provider else "AI"
+        self.model = model
+        self.phase: str = "Preparing context & scope"
+        self.start_time = time.monotonic()
+        self.aborted = False
+        self.failed = False
+        self.failure_reason = ""
+
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._live: Optional[Live] = None
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx = 0
+
+    def __enter__(self) -> "AIProgressManager":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is KeyboardInterrupt:
+            self.cancel("Operation cancelled by operator (SIGINT)")
+        elif exc_type is not None:
+            self.fail(str(exc_val))
+        self.stop()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self.start_time = time.monotonic()
+            self._live = Live(
+                console=self.console,
+                refresh_per_second=10,
+                transient=True,
+                auto_refresh=False,
+            )
+            self._live.start()
+            self._thread = threading.Thread(target=self._render_loop, daemon=True)
+            self._thread.start()
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self.phase = phase
+
+    def cancel(self, reason: str = "AI query cancelled by operator") -> None:
+        with self._lock:
+            self.aborted = True
+            self.failure_reason = reason
+
+    def fail(self, reason: str = "") -> None:
+        with self._lock:
+            self.failed = True
+            self.failure_reason = reason
+
+    def stop(self) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+
+        if self._thread:
+            self._thread.join(timeout=0.8)
+            self._thread = None
+
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+
+        elapsed = max(0.0, time.monotonic() - self.start_time)
+        if self.aborted:
+            self.console.print(
+                f"[bold yellow]⚠ AI query aborted by operator[/bold yellow] [dim]({elapsed:.1f}s)[/dim]"
+            )
+        elif self.failed:
+            err = f": {self.failure_reason}" if self.failure_reason else ""
+            self.console.print(
+                f"[bold red]✖ AI operation failed[/bold red]{err} [dim]({elapsed:.1f}s)[/dim]"
+            )
+
+    def _render_loop(self) -> None:
+        while self._running:
+            try:
+                renderable = self._build_display()
+                if self._live:
+                    self._live.update(renderable, refresh=True)
+            except Exception:
+                pass
+            self._spinner_idx += 1
+            time.sleep(0.09)
+
+    def _build_display(self) -> Group:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.start_time
+            spinner = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
+
+            model_badge = f" [dim cyan]({self.model})[/dim cyan]" if self.model else ""
+            provider_tag = f"[bold bright_magenta]{self.provider}[/bold bright_magenta]{model_badge}"
+
+            line = Text.assemble(
+                (f"  {spinner} ", "bold bright_cyan"),
+                ("HORCRUX AI ", "bold bright_white"),
+                (f"• {self.phase}... ", "dim bright_white"),
+                (f"[{provider_tag}] ", ""),
+                (f"({elapsed:.1f}s)", "dim cyan"),
+            )
+            return Group(line)
+
