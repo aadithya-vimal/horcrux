@@ -81,3 +81,28 @@ def test_evidence_gating_for_searchsploit():
         confidence=0.95,
     )
     assert is_reliable_software_evidence(strong_software) is True
+
+
+def test_ai_progress_manager_display():
+    from horcrux.ui.progress import AIProgressManager
+
+    console = Console(record=True)
+    mgr = AIProgressManager(console, provider="Google", model="gemini-2.5-flash")
+    mgr.set_phase("Consulting Google")
+
+    display_group = mgr._build_display()
+    assert display_group is not None
+    # Check rendered text by rendering to console
+    console.print(display_group)
+    rendered_text = console.export_text()
+
+    # Verify no raw markup tags leaked
+    assert "[bold" not in rendered_text
+    assert "[dim" not in rendered_text
+    assert "[/bold" not in rendered_text
+    assert "[/dim" not in rendered_text
+
+    # Verify provider is not redundantly duplicated
+    assert "Consulting Google... (gemini-2.5-flash)" in rendered_text
+    assert "[Google" not in rendered_text
+

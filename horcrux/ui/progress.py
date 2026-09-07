@@ -469,15 +469,23 @@ class AIProgressManager:
             elapsed = now - self.start_time
             spinner = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
 
-            model_badge = f" [dim cyan]({self.model})[/dim cyan]" if self.model else ""
-            provider_tag = f"[bold bright_magenta]{self.provider}[/bold bright_magenta]{model_badge}"
-
-            line = Text.assemble(
+            parts = [
                 (f"  {spinner} ", "bold bright_cyan"),
-                ("HORCRUX AI ", "bold bright_white"),
-                (f"• {self.phase}... ", "dim bright_white"),
-                (f"[{provider_tag}] ", ""),
-                (f"({elapsed:.1f}s)", "dim cyan"),
-            )
-            return Group(line)
+                ("HORCRUX AI", "bold bright_white"),
+                (" • ", "bold bright_magenta"),
+                (f"{self.phase}...", "bright_white"),
+            ]
+
+            # Append model and provider tag cleanly without duplicating provider name
+            if self.model and self.provider:
+                if self.provider.lower() not in self.phase.lower():
+                    parts.append((f" [{self.provider} • {self.model}]", "dim cyan"))
+                else:
+                    parts.append((f" ({self.model})", "dim cyan"))
+            elif self.provider and self.provider.lower() not in self.phase.lower():
+                parts.append((f" [{self.provider}]", "dim cyan"))
+
+            parts.append((f" ({elapsed:.1f}s)", "dim cyan"))
+
+            return Group(Text.assemble(*parts))
 
