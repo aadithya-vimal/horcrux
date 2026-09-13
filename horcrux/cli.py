@@ -135,8 +135,55 @@ def ai_cli(ctx: typer.Context):
     ConsoleApp().ai_cmd(args)
 
 
+@app.command()
+def assess(
+    target: str = typer.Argument(..., help="Target workspace to assess"),
+    iterations: int = typer.Option(15, "--iterations", "-n", help="Max investigation loop iterations"),
+):
+    """Run agentic VAPT assessment loop against a target workspace."""
+    from horcrux.agents.coordinator import run_full_assessment
+    from horcrux.ui.ascii import fanfare
+
+    console = Console()
+    ws = Workspace(target)
+    state = ws.load()
+    console.print(f"\n[bold bright_magenta]⚡ ASSESSMENT:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]\n")
+
+    run_full_assessment(ws, max_iterations=iterations)
+
+    state = ws.load()
+    app = state.get_application_model()
+    coverage = state.get_security_coverage().percentage_complete()
+    agents = state.agent_states
+    investigations = state.get_investigations()
+
+    console.print("[bold]Application understanding[/bold]")
+    if app.endpoints:
+        console.print(f"  [green]✔[/green] {len(app.endpoints)} endpoints mapped")
+    if app.profile.app_type != "unknown":
+        console.print(f"  [green]✔[/green] {app.profile.app_type} detected ({app.profile.framework})")
+    if app.authentication:
+        console.print(f"  [green]✔[/green] {len(app.authentication)} authentication surface(s)")
+
+    console.print("\n[bold]Agents[/bold]")
+    for agent in agents[:6]:
+        color = {"RUNNING": "yellow", "READY": "green", "COMPLETE": "blue"}.get(agent.status, "dim")
+        console.print(f"  {agent.name:<22} [{color}]{agent.status}[/{color}]")
+
+    console.print("\n[bold]Investigations[/bold]")
+    for inv in investigations[:5]:
+        console.print(f"  {inv.objective[:50]:<50} {inv.state.value}")
+
+    console.print("\n[bold]Coverage[/bold]")
+    for domain, pct in coverage.items():
+        console.print(f"  {domain:<18} {pct:.0f}%")
+
+    console.print(f"\n[bold]Hypotheses:[/bold] {len(state.get_hypotheses())}  [bold]Findings:[/bold] {len(state.findings)}")
+    fanfare(console, f"ASSESSMENT CYCLE COMPLETE: {target}")
+
+
 KNOWN_COMMANDS = {
-    "scan", "doctor", "tools", "console", "gallery", "artifacts",
+    "scan", "assess", "doctor", "tools", "console", "gallery", "artifacts",
     "settings", "report", "ask", "ai",
     "--help", "-h", "--version", "-v",
 }

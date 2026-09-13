@@ -4,6 +4,67 @@ from horcrux.models import Action, SubsystemState, ValidationState, WorkspaceSta
 from horcrux.modules.web.scanner import WEB_PORTS
 
 
+def compute_investigation_actions(state: WorkspaceState) -> list[Action]:
+    """
+    Investigation-centric next actions derived from ApplicationModel, hypotheses,
+    and ranked investigations. Falls back to legacy scan actions when no agent state exists.
+    """
+    investigations = state.get_investigations()
+    hypotheses = state.get_hypotheses()
+    app = state.get_application_model()
+    actions: list[Action] = []
+
+    if investigations or hypotheses or app.endpoints:
+        for inv in investigations:
+            if inv.state.value not in {"READY", "PENDING", "RUNNING"}:
+                continue
+            gain_boost = 10.0 if inv.expected_information_gain == "high" else 5.0
+            actions.append(
+                Action(
+                    id=f"investigate_{inv.id[:12]}",
+                    title=inv.objective,
+                    reason=inv.reason,
+                    score=min(99.0, 70.0 + inv.priority * 20 + gain_boost),
+                    command=f"assess focus investigation {inv.id}",
+                )
+            )
+
+        for hyp in hypotheses:
+            if hyp.status.value not in {"OPEN", "INVESTIGATING"}:
+                continue
+            actions.append(
+                Action(
+                    id=f"hypothesis_{hyp.id[:12]}",
+                    title=f"Investigate: {hyp.title[:60]}",
+                    reason=f"Open hypothesis ({hyp.confidence:.0%} confidence). Missing: {', '.join(hyp.validation_requirements[:2])}",
+                    score=min(95.0, 60.0 + hyp.confidence * 30),
+                    command=f"assess focus hypothesis {hyp.id}",
+                )
+            )
+
+        from horcrux.intel.coverage import assessment_completeness
+        completeness = assessment_completeness(state)
+        if not completeness["authorization_investigated"] and app.endpoints:
+            actions.append(
+                Action(
+                    id="authz_coverage_gap",
+                    title="Authorization has not been systematically investigated",
+                    reason="Object references or endpoints exist but authorization coverage is insufficient.",
+                    score=88.0,
+                    command="assess",
+                )
+            )
+
+        if actions:
+            unique: dict[str, Action] = {}
+            for a in sorted(actions, key=lambda x: -x.score):
+                if a.id not in unique:
+                    unique[a.id] = a
+            return list(unique.values())
+
+    return compute_next_actions(state)
+
+
 def compute_next_actions(state: WorkspaceState) -> list[Action]:
     """
     Computes state-aware, dynamic Next Best Actions for the operator.

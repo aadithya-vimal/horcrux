@@ -242,8 +242,21 @@ class Orchestrator:
                         progress.skip_stage("intel", "Gated: requires explicit operator intel profile")
                 progress.complete_stage("intel")
 
-                # STAGE 7: State-Aware Synthesis & Action Planning
+                # STAGE 7: Application Model Ingestion & Agent Reassessment
                 progress.start_stage("synthesis")
+                try:
+                    from horcrux.agents.coordinator import on_recon_complete
+                    ai_mgr = None
+                    try:
+                        from horcrux.intel.ai.manager import AIManager
+                        ai_mgr = AIManager()
+                        if not (ai_mgr.is_enabled and ai_mgr.get_provider()):
+                            ai_mgr = None
+                    except Exception:
+                        pass
+                    on_recon_complete(self.workspace, ai_manager=ai_mgr)
+                except Exception as exc:
+                    self.workspace.write("raw/agent-ingestion-error.txt", str(exc))
                 self.derive_actions()
                 progress.complete_stage("synthesis")
                 self.workspace.set_subsystem_state("scan", SubsystemState.COMPLETE)
@@ -254,7 +267,8 @@ class Orchestrator:
             raise
 
     def derive_actions(self):
-        """Recompute state-aware next best actions without stale priorities."""
+        """Recompute investigation-centric next actions."""
+        from horcrux.core.actions import compute_investigation_actions
         state = self.workspace.load()
-        actions = compute_next_actions(state)
+        actions = compute_investigation_actions(state)
         self.workspace.set_actions(actions)

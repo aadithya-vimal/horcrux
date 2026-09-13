@@ -6,6 +6,11 @@ from typing import Any, Optional
 from horcrux.models import WorkspaceState
 from horcrux.intel.tasks.triage import build_compact_state
 
+try:
+    from horcrux.intel.reasoning import build_semantic_context
+except ImportError:
+    build_semantic_context = None
+
 
 def build_bounded_workspace_context(state: WorkspaceState, question: str, max_chars: int = 8000) -> dict[str, Any]:
     """
@@ -125,6 +130,15 @@ def build_bounded_workspace_context(state: WorkspaceState, question: str, max_ch
                 "recommended_next_action": f.recommended_next_action,
             }
             break
+
+    # Agentic application model summary (semantic, not raw scanner output)
+    if build_semantic_context and (state.application_model or state.hypotheses):
+        try:
+            ctx["application_intelligence"] = json.loads(
+                build_semantic_context(state)[:4000]
+            )
+        except Exception:
+            pass
 
     # Bound total size — trim collections proportionally
     serialized = json.dumps(ctx)
