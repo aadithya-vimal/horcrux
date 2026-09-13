@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from horcrux.core.settings import (
+    AVAILABLE_MODELS,
+    CredentialInfo,
+    SettingsManager,
+    normalize_provider_name,
+)
+from horcrux.intel.ai.anthropic import AnthropicProvider
+from horcrux.intel.ai.base import (
+    AIError,
+    AIErrorType,
+    AIProvider,
+    AIResponse,
+    HORCRUX_EVIDENCE_POLICY,
+    ModelInfo,
+)
+from horcrux.intel.ai.google import GoogleProvider
+from horcrux.intel.ai.groq import GroqProvider
+from horcrux.intel.ai.openai import OpenAIProvider
+from horcrux.intel.cache import AICacheManager
+from horcrux.models import Action, ExploitCandidate, WorkspaceState
+
+logger = logging.getLogger("horcrux.ai")
+
+
+class AIManager:
+    """
+    Central AI Manager for HORCRUX.
+    Orchestrates provider selection, dynamic model discovery, multi-provider fallback,
+    bounded token caching, usage tracking, and security reasoning tasks.
+    """
+
+    def __init__(self, settings_manager: SettingsManager | None = None):
+        self.settings = settings_manager or SettingsManager()
+        self.cache = AICacheManager(self.settings)
+        self.providers: dict[str, AIProvider] = {
+            "groq": GroqProvider(self.settings),
+            "openai": OpenAIProvider(self.settings),
+            "anthropic": AnthropicProvider(self.settings),
+            "google": GoogleProvider(self.settings),
+        }
+        self.last_error: AIError | Exception | None = None
+        self.last_failure_stage: str = ""
+        self.last_diagnostic: str = ""
+        self.last_response: AIResponse | None = None
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.settings.settings.enabled
+
+    def get_provider(self, name: str | None = None) -> AIProvider | None:
+        """Returns the requested provider if configured, or the default configured provider."""
+        raw_name = name or self.settings.settings.default_provider
+        target_name = normalize_provider_name(raw_name)
+        provider = self.providers.get(target_name)
+        if provider and provider.is_configured():
+            return provider
+
+        # Fallback to default provider instance if requested specifically
+        if name and target_name in self.providers:
+            return self.providers[target_name]
+
+        # Fallback to any configured provider
+        for p in self.providers.values():
+            if p.is_configured():
+                return p
+        return self.providers.get(self.settings.settings.default_provider)
+
+    def active_provider_name(self) -> str:
+        p = self.get_provider()
+        return p.name if p else "none"
+
+    def get_available_models(self, provider_name: str) -> list[ModelInfo]:
+        p_norm = normalize_provider_name(provider_name)
+        p = self.providers.get(p_norm)
+        if p:
+            return p.list_models()
+        return [ModelInfo(id=m, name=m) for m in AVAILABLE_MODELS.get(p_norm, [])]
+
+    @property
+    def stats(self):
+        summary = self.cache.get_summary()
+        class _Stats:
+            def __init__(self, s):
+                self.calls = s["total_calls"]
+                self.cached_calls = s["total_cached_calls"]
+                self.prompt_tokens = s["total_input_tokens"]
+                self.completion_tokens = s["total_output_tokens"]
+                self.reasoning_tokens = s["total_reasoning_tokens"]
+                self.total_tokens = s["total_tokens"]
+        return _Stats(summary)
+
+    @property
+    def _memory_cache(self) -> dict[str, Any]:
+        return self.cache._cache
+
+    def status(self) -> dict[str, Any]:
+        p = self.get_provider()
+        configured = p is not None and p.is_configured()
+        model = p.get_active_model() if p else "none"
+        name = p.name if p else self.settings.settings.default_provider
+
+        cred_info: CredentialInfo = (
+            p.get_credential_info()
+            if p
+            else CredentialInfo("none", "", "NOT CONFIGURED", "NONE", False)
+        )
+
+        status_label = "READY" if (configured and self.is_enabled) else ("DISABLED" if not self.is_enabled else "NOT CONFIGURED")
+        usage = self.cache.get_summary()
+        last_req = usage.get("last_request", {})
+
+        return {
+            "enabled": self.is_enabled,
+            "status": status_label,
+            "provider": name,
+            "model": model,
+            "credential_source": cred_info.source,
+            "credential_fingerprint": cred_info.fingerprint,
+            "calls": usage["total_calls"],
+            "cached_calls": usage["total_cached_calls"],
+            "total_tokens": usage["total_tokens"],
+            "input_tokens": usage["total_input_tokens"],
+            "output_tokens": usage["total_output_tokens"],
+            "reasoning_tokens": usage["total_reasoning_tokens"],
+            "last_request": last_req,
+        }
+
+    def clear_cache(self) -> None:
+        self.cache.clear()
+
+    def reset_stats(self) -> None:
+        if self.cache.usage_file.exists():
+            try:
+                self.cache.usage_file.write_text("{}", encoding="utf-8")
+            except Exception:
+                pass
+
+    def get_usage(self) -> dict[str, Any]:
+        return self.cache.get_summary()
+
+    def call_task(
+        self,
+        task_name: str,
+        prompt: str,
+        payload: Any = None,
+        system_prompt: str = "",
+        max_tokens: int | None = None,
+        temperature: float = 0.1,
+        structured: bool = True,
+    ) -> AIResponse | None:
+        """
+        Executes an AI task with caching, multi-provider fallback, and usage accounting.
+        """
+        self.last_error = None
+        self.last_failure_stage = ""
+        self.last_diagnostic = ""
+        self.last_response = None
+
+        if not self.is_enabled:
+            self.last_failure_stage = AIErrorType.CONFIGURATION_ERROR.value
+            self.last_diagnostic = "AI subsystem is disabled in settings. Enable with 'settings ai on'."
+            return None
+
+        primary = self.get_provider()
+        if not primary or not primary.is_configured():
+            self.last_failure_stage = AIErrorType.CONFIGURATION_ERROR.value
+            prov_name = (primary.name if primary else self.settings.settings.default_provider).upper()
+            self.last_diagnostic = f"Primary AI provider '{prov_name}' is not configured with an API key."
+            return None
+
+        # Build fallback provider candidates
+        configured_fallbacks = [
+            self.providers[p_name]
+            for p_name in self.settings.settings.fallback_sequence
+            if p_name in self.providers and p_name != primary.name and self.providers[p_name].is_configured()
+        ]
+        candidates = [primary] + configured_fallbacks
+
+        # 1. Check cache using primary provider & model
+        model = self.settings.get_model(primary.name)
+        cached_resp = self.cache.get(primary.name, model, task_name, payload or prompt)
+        if cached_resp:
+            self.last_response = cached_resp
+            return cached_resp
+
+        last_error = None
+        for idx, provider in enumerate(candidates):
+            curr_model = self.settings.get_model(provider.name)
+            try:
+                if idx > 0:
+                    logger.info(f"[AI] Falling back to provider: {provider.name}")
+
+                if structured:
+                    resp = provider.structured(
+                        prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    resp = provider.complete(
+                        prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                if resp and (resp.content or resp.structured):
+                    # Record in cache & usage
+                    self.cache.put(provider.name, curr_model, task_name, payload or prompt, resp)
+                    self.cache.record_usage(resp)
+                    self.last_response = resp
+                    return resp
+            except AIError as err:
+                last_error = err
+                self.last_error = err
+                self.last_failure_stage = err.failure_stage or err.error_type.value
+                self.last_diagnostic = err.diagnostic or err.message
+                # Only fail over on transient errors (rate limit, timeout, provider down)
+                if err.error_type in (
+                    AIErrorType.RATE_LIMITED,
+                    AIErrorType.TIMEOUT,
+                    AIErrorType.PROVIDER_UNAVAILABLE,
+                    AIErrorType.NETWORK_ERROR,
+                ):
+                    continue
+                else:
+                    # Configuration or authentication error; do not silently try other providers
+                    break
+            except Exception as exc:
+                last_error = exc
+                self.last_error = exc
+                self.last_failure_stage = AIErrorType.REQUEST_FAILED.value
+                self.last_diagnostic = str(exc)
+                continue
+
+        if not self.last_failure_stage:
+            self.last_failure_stage = AIErrorType.RESPONSE_EMPTY.value
+            self.last_diagnostic = "Configured provider returned an empty response."
+
+        p_name = primary.name if primary else self.settings.settings.default_provider
+        self.cache.record_failure(p_name, model, self.last_failure_stage, self.last_diagnostic)
+
+        return None
+
+    # -----------------------------------------------------------------------
+    # Delegated Security Analysis Tasks
+    # -----------------------------------------------------------------------
+    def triage_exploits(
+        self,
+        state: WorkspaceState,
+        candidates: list[ExploitCandidate],
+    ) -> list[ExploitCandidate]:
+        from horcrux.intel.tasks.triage import execute_exploit_triage
+        return execute_exploit_triage(self, state, candidates)
+
+    def rank_actions(
+        self,
+        state: WorkspaceState,
+        candidate_actions: list[Action],
+    ) -> list[Action]:
+        from horcrux.intel.tasks.actions import execute_action_reasoning
+        return execute_action_reasoning(self, state, candidate_actions)
+
+    def synthesize_attack_paths(
+        self,
+        state: WorkspaceState,
+    ) -> list[dict]:
+        from horcrux.intel.tasks.attack_path import execute_attack_path_synthesis
+        return execute_attack_path_synthesis(self, state)
+
+    def generate_executive_summary(
+        self,
+        state: WorkspaceState,
+    ) -> str:
+        from horcrux.intel.tasks.summarize import execute_executive_summary
+        return execute_executive_summary(self, state)
+
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        provider_name: str | None = None,
+        use_cache: bool = True,
+    ) -> AIResponse | None:
+        if not self.is_enabled:
+            return None
+        provider = self.get_provider(provider_name)
+        if not provider or not provider.is_configured():
+            return None
+        model = self.settings.get_model(provider.name)
+        if use_cache:
+            cached = self.cache.get(provider.name, model, "complete", prompt)
+            if cached:
+                return cached
+        try:
+            resp = provider.complete(prompt, system_prompt=system_prompt)
+            if use_cache:
+                self.cache.put(provider.name, model, "complete", prompt, resp)
+            self.cache.record_usage(resp)
+            return resp
+        except Exception:
+            return None
+
+    def ask(
+        self,
+        arg1: str | WorkspaceState | None = None,
+        arg2: WorkspaceState | str | None = None,
+    ) -> str:
+        """
+        Operator query entrypoint supporting flexible argument ordering:
+          ask(question: str, state: WorkspaceState | None)
+          ask(state: WorkspaceState, question: str)
+        """
+        if isinstance(arg1, WorkspaceState):
+            state = arg1
+            question = str(arg2 or "")
+        elif isinstance(arg2, WorkspaceState):
+            question = str(arg1 or "")
+            state = arg2
+        else:
+            question = str(arg1 or arg2 or "")
+            state = None
+
+        from horcrux.intel.tasks.ask import execute_operator_ask
+        return execute_operator_ask(self, question, state)

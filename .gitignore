@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+workspaces/
+.pytest_cache/
+
+horcrux.egg-info/
