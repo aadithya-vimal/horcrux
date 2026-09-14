@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from horcrux.intel.attack_paths import attack_paths_to_dict, build_attack_paths
 from horcrux.intel.coverage import assessment_completeness, calculate_coverage
@@ -111,7 +111,11 @@ def assessment_has_actionable_work(state: WorkspaceState) -> bool:
         return True
 
     completeness = assessment_completeness(state)
-    if completeness["sufficient"]:
+    verdict = completeness.get("verdict", "INCOMPLETE")
+    # Only stop when verdict is COMPLETE (not just "sufficient")
+    if (verdict == "COMPLETE" and completeness.get("sufficient", False)
+            and not completeness["open_hypotheses"]
+            and not completeness["pending_high_investigations"]):
         return False
 
     investigations = state.get_investigations()
@@ -165,7 +169,50 @@ def prepare_exploit_handoffs(state: WorkspaceState) -> list[ExploitHandoff]:
             relevant_tools=["http_probe", "authz_compare", "endpoint_validate"],
             risks=["Service disruption", "Account lockout", "Legal/scope violation if mis-scoped"],
             operator_approval_required=True,
+            # New Phase 9 fields
+            identity_required=_infer_identity_required(finding, state),
+            session_required=finding.severity.value in ("high", "critical"),
+            attack_path_id=_find_attack_path_for_finding(finding, state),
+            finding_validation_state=finding.validation_state.value if hasattr(finding.validation_state, 'value') else str(finding.validation_state),
+            what_was_tested=list(finding.evidence[:3]),
+            what_could_not_be_tested=_blocked_investigations_for_finding(finding, state),
+            why_not_tested=["Operator approval required for active exploitation"],
         )
         handoffs.append(handoff)
     state.exploit_handoffs = handoffs
     return handoffs
+
+
+def _infer_identity_required(finding: Any, state: Any) -> str:
+    try:
+        app = state.get_application_model()
+        if finding.severity.value in ("high", "critical") and app.identities:
+            auth_identities = [i for i in app.identities if i.role.value != "anonymous"]
+            return auth_identities[0].label if auth_identities else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _find_attack_path_for_finding(finding: Any, state: Any) -> str:
+    try:
+        for ap in (state.attack_paths or []):
+            if isinstance(ap, dict):
+                nodes = ap.get("nodes", [])
+                if any(finding.id in str(n) or finding.title[:20].lower() in str(n).lower() for n in nodes):
+                    return ap.get("id", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _blocked_investigations_for_finding(finding: Any, state: Any) -> list[str]:
+    try:
+        blocked = []
+        for inv in state.get_investigations():
+            if inv.state.value in ("BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE") and \
+                    any(r in inv.evidence_refs for r in finding.evidence[:3]):
+                blocked.append(inv.objective[:80])
+        return blocked[:3]
+    except Exception:
+        return []

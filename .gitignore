@@ -5,3 +5,4 @@ workspaces/
 .pytest_cache/
 
 horcrux.egg-info/
+regression_out/

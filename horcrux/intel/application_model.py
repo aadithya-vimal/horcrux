@@ -441,6 +441,10 @@ class ApplicationModel(BaseModel):
     sessions: list[SessionRecord] = Field(default_factory=list)
     security_boundaries: list[SecurityBoundary] = Field(default_factory=list)
     service_facts: list[ServiceFact] = Field(default_factory=list)
+    authorization_matrix: dict[str, Any] = Field(default_factory=dict)
+    app_classification_signals: dict[str, float] = Field(default_factory=dict)
+    sensitive_data_observations: list[dict[str, Any]] = Field(default_factory=list)
+    discovery_sources: list[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utcnow)
 
     def upsert_endpoint(self, endpoint: SemanticEndpoint) -> SemanticEndpoint:

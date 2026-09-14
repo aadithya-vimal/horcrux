@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from horcrux.intel.application_model import (
     ApplicationModel,
@@ -220,13 +220,14 @@ def _ingest_authentication_surfaces(state: WorkspaceState, app: ApplicationModel
             ep.authentication = "required" if "login" not in path_lower else "unknown"
 
 
-def _infer_auth_type(path: str, state: WorkspaceState) -> str:
+def _infer_auth_type(path: str, state) -> str:
     if "oauth" in path:
         return "oauth"
-    if any("jwt" in t.lower() for t in state.technologies):
-        return "jwt"
-    if any("jwt" in f.title.lower() for f in state.findings):
-        return "jwt"
+    if state is not None:
+        if any("jwt" in t.lower() for t in state.technologies):
+            return "jwt"
+        if any("jwt" in f.title.lower() for f in state.findings):
+            return "jwt"
     return "session"
 
 
@@ -892,3 +893,315 @@ def ingest_client_side(app: ApplicationModel, js_text: str,
         if not any(p.id == sem.id for p in app.parameters):
             app.parameters.append(sem)
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: Tier 2 ingestion additions (Parts 3, 4, 6, 7)
+# ---------------------------------------------------------------------------
+
+def classify_application_type(app: ApplicationModel) -> tuple[str, float]:
+    """Multi-signal application type classification (Part 3)."""
+    votes: dict[str, float] = {}
+
+    tech_names = {t.name.lower() for t in app.technologies}
+    if any(t in tech_names for t in ("angular", "react", "vue", "svelte", "ember")):
+        votes["SPA"] = votes.get("SPA", 0) + 0.6
+    if any(t in tech_names for t in ("wordpress", "drupal", "joomla", "magento")):
+        votes["CMS"] = votes.get("CMS", 0) + 0.5
+        votes["e_commerce"] = votes.get("e_commerce", 0) + 0.2
+    if any(t in tech_names for t in ("express", "fastapi", "flask", "django", "rails", "spring")):
+        votes["API_service"] = votes.get("API_service", 0) + 0.2
+    if "graphql" in tech_names:
+        votes["GraphQL_application"] = votes.get("GraphQL_application", 0) + 0.4
+
+    api_eps = [e for e in app.endpoints if e.path.startswith(("/api", "/rest", "/graphql"))]
+    if len(api_eps) > 5:
+        votes["API_service"] = votes.get("API_service", 0) + 0.3
+    if len(api_eps) > 10:
+        votes["API_service"] = votes.get("API_service", 0) + 0.2
+
+    ep_paths = [e.path.lower() for e in app.endpoints]
+    if any(k in p for p in ep_paths for k in ("checkout", "cart", "product", "order", "payment")):
+        votes["e_commerce"] = votes.get("e_commerce", 0) + 0.4
+    if any("/admin" in p for p in ep_paths):
+        votes["admin_portal"] = votes.get("admin_portal", 0) + 0.2
+    if any(k in p for p in ep_paths for k in ("tenant", "organization", "workspace")):
+        votes["multi_tenant"] = votes.get("multi_tenant", 0) + 0.4
+
+    auth_eps = [e for e in app.endpoints if any(
+        k in e.path.lower() for k in ("login", "register", "oauth", "saml", "auth")
+    )]
+    if len(auth_eps) > 3:
+        votes["authentication_service"] = votes.get("authentication_service", 0) + 0.3
+
+    if app.graphql_operations:
+        votes["GraphQL_application"] = votes.get("GraphQL_application", 0) + 0.4
+
+    if not app.endpoints or (len(app.endpoints) <= 2 and not api_eps):
+        if not any(t in tech_names for t in ("angular", "react", "vue", "svelte", "ember", "wordpress", "drupal")):
+            votes["static_site"] = votes.get("static_site", 0) + 0.5
+        else:
+            votes["static_site"] = votes.get("static_site", 0) + 0.1
+
+    js_eps = [e for e in app.endpoints if "javascript" in (e.sources or [])]
+    if len(js_eps) > 3:
+        votes["SPA"] = votes.get("SPA", 0) + 0.3
+
+    if app.profile.app_type and app.profile.app_type not in ("unknown", "UNKNOWN", ""):
+        type_map = {
+            "SPA": "SPA", "API": "API_service", "TRADITIONAL_WEB_APP": "traditional_web_app",
+            "STATIC_SITE": "static_site", "HYBRID": "SPA",
+        }
+        normalized = type_map.get(app.profile.app_type, app.profile.app_type.lower())
+        votes[normalized] = votes.get(normalized, 0) + 0.2
+
+    if not votes:
+        return "unknown", 0.3
+
+    best = max(votes, key=lambda k: votes[k])
+    confidence = min(0.95, votes[best])
+    return best, confidence
+
+
+def ingest_js_intelligence(
+    app: ApplicationModel,
+    js_content,
+    source: str = "javascript",
+) -> dict[str, int]:
+    """Semantic JS analysis — extract security-relevant observations (Part 6)."""
+    import re as _re
+    counts: dict[str, int] = {}
+
+    if isinstance(js_content, list):
+        content = "\n".join(str(x) for x in js_content)
+    else:
+        content = str(js_content or "")
+
+    api_patterns = [
+        _re.compile(r'["\'](\/(?:api|rest|v\d+|graphql)[/\w{}:.-]+)["\']', _re.I),
+        _re.compile(r'(?:fetch|axios|http|request)\(["\'](\/[\w/{}.:-]+)["\']', _re.I),
+        _re.compile(r'(?:baseURL?|apiUrl|endpoint|path)\s*[=:]+\s*["\'](\/[\w./-]+)["\']', _re.I),
+        _re.compile(r'\.(?:get|post|put|patch|delete)\(["\'](\/[\w/{}.:-]+)["\']', _re.I),
+    ]
+    found_paths: set[str] = set()
+    for pat in api_patterns:
+        for m in pat.finditer(content):
+            p = m.group(1)
+            if len(p) > 1 and not p.endswith(('.js', '.css', '.png', '.svg', '.ico')):
+                found_paths.add(p)
+
+    for path in found_paths:
+        ep = SemanticEndpoint(method="GET", path=path, sources=[source],
+                              evidence_refs=[f"js:{path}"])
+        _enrich_endpoint_from_path(ep, path)
+        app.upsert_endpoint(ep)
+        route = SemanticRoute(path=path, source=source, evidence_refs=[f"js:{path}"])
+        app.upsert_route(route)
+    counts["api_endpoints"] = len(found_paths)
+
+    method_pattern = _re.compile(r'method\s*[=:]+\s*["\']?(GET|POST|PUT|PATCH|DELETE|OPTIONS)["\']?', _re.I)
+    methods_found = set(m.group(1).upper() for m in method_pattern.finditer(content))
+    for path in list(found_paths)[:10]:
+        for method in methods_found:
+            if method != "GET":
+                ep = SemanticEndpoint(method=method, path=path, sources=[source],
+                                      evidence_refs=[f"js:{method}:{path}"])
+                _enrich_endpoint_from_path(ep, path)
+                app.upsert_endpoint(ep)
+    counts["http_methods"] = len(methods_found)
+
+    auth_pattern = _re.compile(
+        r'["\'](\/(?:login|register|signup|signin|auth|oauth|reset|logout|refresh)[\w/.-]*)["\']', _re.I
+    )
+    auth_paths = set(m.group(1) for m in auth_pattern.finditer(content))
+    for path in auth_paths:
+        mech = AuthenticationMechanism(
+            mechanism_type=_infer_auth_type(path.lower(), None),
+            login_endpoint=path if "login" in path.lower() or "signin" in path.lower() else "",
+            register_endpoint=path if "register" in path.lower() or "signup" in path.lower() else "",
+            reset_endpoint=path if "reset" in path.lower() else "",
+            evidence_refs=[f"js:auth:{path}"],
+        )
+        mech.ensure_id()
+        if not any(a.id == mech.id for a in app.authentication):
+            app.authentication.append(mech)
+    counts["auth_endpoints"] = len(auth_paths)
+
+    admin_pattern = _re.compile(
+        r'["\'](\/(?:admin|management|internal|privileged|dashboard)[\w/.-]*)["\']', _re.I
+    )
+    admin_paths = set(m.group(1) for m in admin_pattern.finditer(content))
+    for path in admin_paths:
+        ep = SemanticEndpoint(method="GET", path=path, sources=[source],
+                              evidence_refs=[f"js:admin:{path}"], authentication="required")
+        _enrich_endpoint_from_path(ep, path)
+        app.upsert_endpoint(ep)
+    counts["admin_refs"] = len(admin_paths)
+
+    upload_pattern = _re.compile(
+        r'["\'](\/[\w/.-]*(?:upload|file|attachment|avatar)[\w/.-]*)["\']', _re.I
+    )
+    upload_paths = set(m.group(1) for m in upload_pattern.finditer(content))
+    for path in upload_paths:
+        ep = SemanticEndpoint(method="POST", path=path, sources=[source],
+                              evidence_refs=[f"js:upload:{path}"], is_mutation=True)
+        app.upsert_endpoint(ep)
+    counts["upload_endpoints"] = len(upload_paths)
+
+    gql_pattern = _re.compile(r'(?:query|mutation|subscription)\s+(\w+)\s*[({]', _re.I)
+    for m in gql_pattern.finditer(content):
+        op_name = m.group(1)
+        kind = m.group(0).split()[0].lower()
+        try:
+            from horcrux.intel.application_model import GraphQLOperation
+            op = GraphQLOperation(kind=kind, name=op_name, endpoint="/graphql",
+                                  evidence_refs=[f"js:gql:{kind}:{op_name}"])
+            op.ensure_id()
+            app.upsert_graphql_operation(op)
+        except Exception:
+            pass
+    counts["graphql_ops"] = sum(1 for _ in gql_pattern.finditer(content))
+
+    url_param_pattern = _re.compile(
+        r'(?:(?:params|query|data|body)\.|\b)(url|target|callback|webhook|redirect|fetch|import)\s*[:=.]',
+        _re.I,
+    )
+    ssrf_params = set(m.group(1).lower() for m in url_param_pattern.finditer(content))
+    for pname in ssrf_params:
+        sem = SemanticParameter(name=pname, location="query", source=source,
+                                param_class="url_fetch", evidence_refs=[f"js:param:{pname}"])
+        sem.ensure_id()
+        if not any(p.id == sem.id for p in app.parameters):
+            app.parameters.append(sem)
+    counts["ssrf_params"] = len(ssrf_params)
+
+    role_pattern = _re.compile(
+        r'role\s*[=:]+\s*["\']?(admin|user|moderator|manager|operator|guest)["\']?', _re.I
+    )
+    counts["role_refs"] = sum(1 for _ in role_pattern.finditer(content))
+
+    if ".map" in content or "sourceMappingURL" in content:
+        counts["source_maps"] = 1
+
+    return counts
+
+
+def ingest_error_response(
+    app: ApplicationModel,
+    path: str,
+    status_code: int,
+    body: str = "",
+    headers: dict | None = None,
+    source: str = "http_probe",
+) -> dict[str, Any]:
+    """Analyze error responses for intelligence (Part 7)."""
+    import re as _re
+    intel: dict[str, Any] = {"path": path, "status": status_code, "findings": []}
+    body_lower = (body or "").lower()
+
+    stack_patterns = [
+        ("node_stack", r"at [^\n]+ \([^)]+\.js:\d+"),
+        ("python_traceback", r"Traceback \(most recent call last\)"),
+        ("java_exception", r"java\.\w+\.\w+Exception"),
+        ("php_error", r"(?:Fatal error|Warning|Notice):.+in /.+\.php"),
+        ("ruby_error", r"\(\w+Error\)"),
+        ("dotnet_error", r"System\.\w+\.\w+Exception"),
+    ]
+    for name, pattern in stack_patterns:
+        if _re.search(pattern, body, _re.I | _re.S):
+            intel["findings"].append({"type": "stack_trace", "language": name})
+
+
+    framework_sigs = [
+        ("django", "django"), ("rails", "rails"), ("express", "express"),
+        ("spring", "whitelabel error"), ("laravel", "laravel"), ("symfony", "symfony"),
+        ("flask", "werkzeug"),
+    ]
+    for fw, sig in framework_sigs:
+        if sig in body_lower:
+            intel["findings"].append({"type": "framework_disclosure", "framework": fw})
+            _add_technology(app, fw.capitalize(), "FRAMEWORK", "", source)
+
+    db_patterns = [
+        ("sql", r"(?:SQL|mysql|postgres|sqlite|oracle).{0,50}(?:error|syntax|exception)"),
+        ("mongodb", r"MongoDB.{0,50}(?:error|exception|failed)"),
+    ]
+    for db, pattern in db_patterns:
+        if _re.search(pattern, body, _re.I | _re.S):
+            intel["findings"].append({"type": "database_error", "db": db})
+
+    path_pats = [
+        _re.compile(r'(?:/home/\w+|/var/www|/usr/local|/app/)[^\s"\'>]+'),
+    ]
+    for pat in path_pats:
+        for m in pat.finditer(body):
+            intel["findings"].append({"type": "path_disclosure", "path": m.group()[:100]})
+            break
+
+    if intel["findings"]:
+        ep = SemanticEndpoint(
+            method="GET", path=path, sources=[source],
+            evidence_refs=[f"{source}:error:{path}"],
+        )
+        _enrich_endpoint_from_path(ep, path)
+        app.upsert_endpoint(ep)
+
+    return intel
+
+
+def correlate_discovery_sources(
+    app: ApplicationModel,
+    source_results: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Cross-source discovery correlation (Part 4)."""
+    all_paths: dict[str, set[str]] = {}
+    for source, paths in source_results.items():
+        all_paths[source] = {p for p in paths if p}
+
+    all_discovered: set[str] = set()
+    for paths in all_paths.values():
+        all_discovered.update(paths)
+
+    agreements: list[dict] = []
+    contradictions: list[dict] = []
+    path_sources: dict[str, list[str]] = {}
+    for path in all_discovered:
+        seeing = [src for src, paths in all_paths.items() if path in paths]
+        path_sources[path] = seeing
+        if len(seeing) > 1:
+            agreements.append({"path": path, "sources": seeing})
+
+    important_keywords = {"admin", "api", "rest", "internal", "config", "backup", "swagger", "graphql"}
+    for path, sources in path_sources.items():
+        if len(sources) == 1 and any(k in path.lower() for k in important_keywords):
+            contradictions.append({
+                "path": path, "source": sources[0],
+                "note": "Only one source discovered this important path",
+            })
+
+    for path in all_discovered:
+        seeing = path_sources.get(path, [])
+        ep = SemanticEndpoint(
+            method="GET", path=path,
+            sources=seeing,
+            evidence_refs=[f"{s}:{path}" for s in seeing],
+        )
+        _enrich_endpoint_from_path(ep, path)
+        app.upsert_endpoint(ep)
+
+    return {
+        "total_paths": len(all_discovered),
+        "agreements": len(agreements),
+        "contradictions": contradictions,
+        "source_counts": {s: len(p) for s, p in all_paths.items()},
+    }
+
+
+def _update_application_classification(app: ApplicationModel) -> None:
+    app_type, confidence = classify_application_type(app)
+    if confidence > app.profile.confidence or app.profile.app_type in ("unknown", "UNKNOWN", ""):
+        app.profile.app_type = app_type
+        app.profile.confidence = confidence
+        label = f"classification:{app_type}:{confidence:.2f}"
+        if label not in app.profile.evidence_refs:
+            app.profile.evidence_refs.append(label)

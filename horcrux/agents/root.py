@@ -319,7 +319,10 @@ class RootVAPTOrchestrator:
                    {"BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE", "FAILED"}]
         return {
             "sufficient": completeness["sufficient"],
+            "verdict": completeness.get("verdict", "INCOMPLETE"),
+            "blocking_reasons": completeness.get("blocking_reasons", []),
             "coverage": completeness["coverage_percentages"],
+            "property_summary": completeness.get("property_summary", {}),
             "open_hypotheses": completeness["open_hypotheses"],
             "pending_high": completeness["pending_high_investigations"],
             "blocked_investigations": [(i.id, i.state.value) for i in blocked],
@@ -347,8 +350,11 @@ class RootVAPTOrchestrator:
 
         from horcrux.intel.coverage import assessment_completeness
         completeness = assessment_completeness(state)
-        if completeness["sufficient"]:
+        verdict = completeness.get("verdict", "INCOMPLETE")
+        if verdict == "COMPLETE" and completeness.get("sufficient", False):
             state.assessment_phase = AssessmentPhase.COMPLETE.value
+        elif verdict in ("LIMITED", "BLOCKED"):
+            state.assessment_phase = "LIMITED"
         else:
             state.assessment_phase = AssessmentPhase.INVESTIGATION.value
 

@@ -407,6 +407,36 @@ def get_profile(name_or_profile: str | ScanProfile | None) -> ScanProfile:
     return PROFILES.get(name_or_profile.lower(), PROFILES["standard"])
 
 
+class EngagementMode(str, Enum):
+    """Assessment engagement mode (Part 34)."""
+    SYNTHETIC = "SYNTHETIC"
+    LOCAL = "LOCAL"
+    ENGAGEMENT = "ENGAGEMENT"
+
+
+class RateLimitProfile(str, Enum):
+    """Rate limiting profile for target requests (Part 32)."""
+    CONSERVATIVE = "conservative"
+    NORMAL = "normal"
+    AGGRESSIVE = "aggressive"
+
+
+class EngagementConfig(BaseModel):
+    """Pre-flight engagement configuration (Part 35)."""
+    mode: EngagementMode = EngagementMode.LOCAL
+    operator_reference: str = ""
+    target_scope: list[str] = Field(default_factory=list)
+    excluded_assets: list[str] = Field(default_factory=list)
+    allowed_methods: list[str] = Field(default_factory=lambda: [
+        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"
+    ])
+    test_identities_configured: bool = False
+    rate_limit_profile: RateLimitProfile = RateLimitProfile.NORMAL
+    assessment_profile: str = "standard"
+    destructive_action_policy: str = "never"
+    validated: bool = False
+
+
 class ExploitHandoff(BaseModel):
     """Exploitation-ready boundary — operator approval required.
 
@@ -434,6 +464,13 @@ class ExploitHandoff(BaseModel):
         "Exploitation carries operational, legal, and stability risk; "
         "operator must authorize scope, timing, and technique.")
     operator_approval_required: bool = True
+    identity_required: str = ""
+    session_required: bool = False
+    attack_path_id: str = ""
+    finding_validation_state: str = "POTENTIAL"
+    what_was_tested: list[str] = Field(default_factory=list)
+    what_could_not_be_tested: list[str] = Field(default_factory=list)
+    why_not_tested: list[str] = Field(default_factory=list)
     status: str = "pending"
 
 
@@ -448,6 +485,12 @@ class AssessmentPhase(str, Enum):
     COMPLETE = "COMPLETE"
     PAUSED = "PAUSED"
     STOPPED = "STOPPED"
+    LIMITED = "LIMITED"
+    BLOCKED = "BLOCKED"
+    AUTHENTICATION = "AUTHENTICATION"
+    CORRELATION = "CORRELATION"
+    ATTACK_PATH_ANALYSIS = "ATTACK_PATH_ANALYSIS"
+    HANDOFF = "HANDOFF"
 
 
 class OperatorFocus(BaseModel):
@@ -505,6 +548,11 @@ class WorkspaceState(BaseModel):
     # --- Phase 8 scheduler/concurrency state (Part 34) ---
     scheduler_state: dict[str, Any] = Field(default_factory=dict)
     assessment_run_id: str = ""
+    # --- Phase 9 engagement + quality ---
+    engagement_config: dict[str, Any] = Field(default_factory=dict)
+    execution_mode: str = "LOCAL"
+    false_negative_audit: dict[str, Any] = Field(default_factory=dict)
+    quality_metrics: dict[str, Any] = Field(default_factory=dict)
 
     def get_policy(self) -> Any:
         from horcrux.core.policy import EngagementPolicy
@@ -598,6 +646,17 @@ class WorkspaceState(BaseModel):
             self.security_coverage = model.model_dump()
         else:
             self.security_coverage = model
+
+    def get_engagement_config(self) -> "EngagementConfig":
+        if self.engagement_config:
+            return EngagementConfig.model_validate(self.engagement_config)
+        return EngagementConfig()
+
+    def set_engagement_config(self, config: Any) -> None:
+        if hasattr(config, 'model_dump'):
+            self.engagement_config = config.model_dump()
+        elif isinstance(config, dict):
+            self.engagement_config = config
 
     def get_assessment_phase(self) -> AssessmentPhase:
         try:
