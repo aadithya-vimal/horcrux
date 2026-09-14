@@ -210,7 +210,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Review exposed endpoints for sensitive data leakage",
             "capabilities": ["http"],
-            "tools": ["http_probe", "validator"],
+            "tools": ["http_probe", "endpoint_validate"],
             "gain": "medium",
             "specialist": "WebAgent",
             "impact": 0.6,
@@ -219,12 +219,275 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
 }
 
 
+def _gap_open(coverage_gaps: dict[str, str], *domains: str) -> bool:
+    """True when a coverage property still needs investigation.
+
+    Unknown/absent domains count as open (NOT_REVIEWED default); only an
+    explicitly reviewed/blocked domain suppresses regeneration, which keeps
+    Nikto-style coverage from being scheduled repeatedly.
+    """
+    if not domains:
+        return True
+    return any(coverage_gaps.get(d, "NOT_REVIEWED") == "NOT_REVIEWED"
+               for d in domains)
+
+
+def _gap_score(coverage_gaps: dict[str, str], *domains: str) -> float:
+    return 1.0 if _gap_open(coverage_gaps, *domains) else 0.4
+
+
+# Service inventory → enumeration capability (PART 10).
+# Matched on port first, then service name. HTTP is skipped: web
+# capabilities own that surface.
+SERVICE_CAPABILITY_MAP: list[dict[str, Any]] = [
+    {"ports": {139, 445}, "names": {"microsoft-ds", "netbios-ssn", "smb"},
+     "capability": "smb_enum", "label": "SMB"},
+    {"ports": {389, 636, 3268, 3269}, "names": {"ldap"},
+     "capability": "ldap_enum", "label": "LDAP"},
+    {"ports": {88}, "names": {"kerberos", "kdc"},
+     "capability": "kerberos_enum", "label": "Kerberos"},
+    {"ports": {22}, "names": {"ssh"},
+     "capability": "ssh_enum", "label": "SSH"},
+    {"ports": {21}, "names": {"ftp"},
+     "capability": "ftp_enum", "label": "FTP"},
+    {"ports": {25, 465, 587}, "names": {"smtp"},
+     "capability": "smtp_enum", "label": "SMTP"},
+    {"ports": {53}, "names": {"dns", "domain"},
+     "capability": "dns_enum", "label": "DNS"},
+    {"ports": {161}, "names": {"snmp"},
+     "capability": "snmp_enum", "label": "SNMP"},
+    {"ports": {3306, 5432, 1433, 6379, 27017},
+     "names": {"mysql", "postgresql", "postgres", "redis", "mongodb",
+               "mongo", "ms-sql-s", "mssql", "database"},
+     "capability": "database_enum", "label": "database"},
+    {"ports": {23, 111, 2049, 3389, 5900, 5985, 5986},
+     "names": {"telnet", "nfs", "rdp", "ms-wbt-server", "winrm", "vnc"},
+     "capability": "remote_enum", "label": "remote service"},
+]
+
+
+def _service_capability(service: Any) -> dict[str, Any] | None:
+    name = (service.service_name or service.service or "").lower()
+    for entry in SERVICE_CAPABILITY_MAP:
+        if service.port in entry["ports"] or \
+                any(n in name for n in entry["names"]):
+            return entry
+    return None
+
+
+_SUSPICIOUS_PATH_KEYWORDS = (
+    "admin", ".env", ".git", "phpinfo", "actuator", "swagger",
+    "console", "manager", "config", "backup", "debug",
+)
+
+
+def generate_gap_investigations(
+    app: ApplicationModel,
+    coverage_gaps: dict[str, str] | None = None,
+) -> list[Investigation]:
+    """Coverage-gap and service-driven investigations (PARTs 4-11).
+
+    Every entry defines prerequisites, target type, capability, required
+    inputs (via build_capability_inputs), expected evidence, coverage
+    property, and score factors. IDs are stable (objective-derived), so
+    reassessment never regenerates identical investigations (PART 12).
+    """
+    from horcrux.agents.tools.capabilities import canonical_tool_id
+    coverage_gaps = coverage_gaps or {}
+    investigations: list[Investigation] = []
+
+    def _make(objective: str, reason: str, specialist: str,
+              capabilities: list[str], tools: list[str],
+              gain: str, impact: float, cost: float,
+              prerequisites: list[str] | None = None,
+              vulnerability_classes: list[str] | None = None,
+              evidence_refs: list[str] | None = None,
+              gap_domains: tuple[str, ...] = ()) -> Investigation:
+        inv = Investigation(
+            objective=objective,
+            reason=reason,
+            evidence_refs=list(evidence_refs or []),
+            vulnerability_classes=list(vulnerability_classes or []),
+            required_capabilities=list(capabilities),
+            candidate_tools=[canonical_tool_id(t) for t in tools],
+            prerequisites=list(prerequisites or []),
+            expected_information_gain=gain,
+            hypothesis_id="",
+            specialist=specialist,
+            state=InvestigationState.READY,
+            score=InvestigationScore(
+                evidence_relevance=0.6,
+                expected_information_gain=0.9 if gain == "high" else 0.6,
+                impact_potential=impact,
+                coverage_gap=_gap_score(coverage_gaps, *gap_domains),
+                prerequisites_satisfied=1.0,
+                execution_cost=cost,
+            ),
+        )
+        inv.priority = inv.score.total
+        inv.ensure_id()
+        return inv
+
+    has_web = bool(app.web_targets)
+    open_surface = has_web and (len(app.endpoints) < 5 or
+                                _gap_open(coverage_gaps, "web_discovery"))
+
+    # WEB SURFACE INCOMPLETE → content discovery → content_discovery.
+    if open_surface:
+        investigations.append(_make(
+            "Discover web content and enumerate hidden routes via fuzzing",
+            "Application surface looks incomplete; wordlist-guided discovery "
+            "with baseline suppression may reveal hidden routes.",
+            "WebAgent", ["http"], ["content_discovery"], "high", 0.75, 0.5,
+            prerequisites=["web_target"],
+            vulnerability_classes=["information_disclosure"],
+            evidence_refs=[e.id for e in app.endpoints[:3]],
+            gap_domains=("web_discovery",),
+        ))
+
+    # WEB TECHNOLOGY UNKNOWN → fingerprint → web_fingerprint.
+    if has_web and not app.technologies and _gap_open(coverage_gaps, "web_discovery"):
+        investigations.append(_make(
+            "Fingerprint web technologies and framework stack",
+            "No technology evidence; fingerprinting enriches the model and "
+            "drives framework-specific hypotheses and capability selection.",
+            "WebAgent", ["http"], ["web_fingerprint"], "high", 0.6, 0.2,
+            prerequisites=["web_target"],
+            vulnerability_classes=["information_disclosure"],
+            gap_domains=("web_discovery",),
+        ))
+
+    # SUSPICIOUS ENDPOINT → endpoint validation → endpoint_validate.
+    if _gap_open(coverage_gaps, "information_disclosure", "configuration"):
+        for ep in app.endpoints:
+            path_lower = ep.path.lower()
+            if not any(k in path_lower for k in _SUSPICIOUS_PATH_KEYWORDS):
+                continue
+            if any("validator" in (s or "") for s in ep.sources):
+                continue
+            investigations.append(_make(
+                f"Validate suspicious endpoint {ep.path}",
+                f"Path matches a sensitive-surface pattern; baseline-aware "
+                f"validation produces structured evidence.",
+                "WebAgent", ["http"], ["endpoint_validate"], "high", 0.75, 0.2,
+                prerequisites=["web_target"],
+                vulnerability_classes=["information_disclosure"],
+                evidence_refs=[ep.id],
+                gap_domains=("information_disclosure",),
+            ))
+            if len([i for i in investigations
+                    if i.candidate_tools == ["endpoint_validate"]]) >= 5:
+                break
+
+    # WEB SERVER REVIEW REQUIRED → server audit → nikto_audit (once per gap).
+    if has_web and len(app.endpoints) >= 3 and \
+            _gap_open(coverage_gaps, "configuration", "client_side_security"):
+        investigations.append(_make(
+            "Audit web server configuration and legacy surfaces",
+            "Server misconfiguration review; scheduled once per open "
+            "configuration gap to avoid redundant rescans.",
+            "WebAgent", ["http"], ["nikto_audit"], "medium", 0.6, 0.6,
+            prerequisites=["web_target"],
+            vulnerability_classes=["information_disclosure"],
+            evidence_refs=[e.id for e in app.endpoints[:3]],
+            gap_domains=("configuration",),
+        ))
+
+    # TARGETED TEMPLATE VALIDATION → nuclei validation → nuclei_scan.
+    if has_web and (app.technologies or len(app.endpoints) >= 5) and \
+            _gap_open(coverage_gaps, "api_security", "web_discovery",
+                      "information_disclosure"):
+        investigations.append(_make(
+            "Validate web findings with targeted Nuclei templates",
+            "Technology/endpoints mapped; template validation confirms or "
+            "refutes candidate exposures with structured evidence.",
+            "WebAgent", ["http"], ["nuclei_scan"], "high", 0.8, 0.5,
+            prerequisites=["web_target"],
+            vulnerability_classes=["information_disclosure"],
+            evidence_refs=[e.id for e in app.endpoints[:5]],
+            gap_domains=("api_security",),
+        ))
+
+    # JS ROUTES/PARAMETERS PRESENT → JS analysis → js_analyze.
+    js_eps = [e for e in app.endpoints if "javascript" in (e.sources or [])]
+    if js_eps and _gap_open(coverage_gaps, "api_security",
+                            "information_disclosure", "client_side_security"):
+        investigations.append(_make(
+            "Analyze client-side routes, APIs, and parameters",
+            "JavaScript-derived surface present; analysis feeds routes, "
+            "APIs, parameters, auth surfaces, and workflow hints.",
+            "WebAgent", ["http", "javascript"], ["js_analyze"], "high",
+            0.7, 0.2,
+            prerequisites=["web_target"],
+            vulnerability_classes=["information_disclosure"],
+            evidence_refs=[e.id for e in js_eps[:5]],
+            gap_domains=("api_security",),
+        ))
+
+    # AUTHENTICATED SURFACE → browser walkthrough → browser_automate.
+    login_eps = [e for e in app.endpoints if "login" in e.path.lower()]
+    if login_eps and app.forms and _gap_open(coverage_gaps, "web_discovery",
+                                             "authentication"):
+        investigations.append(_make(
+            "Walk authenticated surface via browser automation",
+            "Login surface and forms discovered; automated walkthrough "
+            "correlates browser traffic with APIs and workflows.",
+            "WebAgent", ["http", "browser"], ["browser_automate"], "high",
+            0.75, 0.5,
+            prerequisites=["authenticated_api"],
+            vulnerability_classes=["information_disclosure"],
+            evidence_refs=[e.id for e in login_eps[:3]],
+            gap_domains=("web_discovery",),
+        ))
+
+    # SERVICE-DRIVEN enumeration → protocol capabilities.
+    for svc in app.services:
+        if svc.is_web:
+            continue
+        entry = _service_capability(svc)
+        if entry is None:
+            continue
+        investigations.append(_make(
+            f"Enumerate {entry['label']} service on port {svc.port}",
+            f"{entry['label']} service discovered; protocol enumeration "
+            f"produces identities, shares, and configuration evidence.",
+            "NetworkAgent", ["service"], [entry["capability"]], "high",
+            0.8, 0.3,
+            prerequisites=[],
+            vulnerability_classes=["infrastructure"],
+            evidence_refs=[svc.id],
+            gap_domains=("infrastructure",),
+        ))
+
+    # EXPLOIT INTELLIGENCE → SearchSploit correlation → searchsploit_intel.
+    # Gated on versioned product evidence at model level (mirrors the
+    # reliability gate used by direct exploit-intelligence commands).
+    versioned = [s for s in app.services
+                 if (s.product or "").strip() and (s.version or "").strip()]
+    if versioned:
+        svc = versioned[0]
+        investigations.append(_make(
+            f"Correlate exploit intelligence for {svc.product} {svc.version}",
+            "Reliable versioned software evidence exists; SearchSploit "
+            "correlation produces candidate intelligence with relevance.",
+            "ExploitIntelAgent", ["service"], ["searchsploit_intel"],
+            "medium", 0.6, 0.2,
+            prerequisites=[],
+            vulnerability_classes=["infrastructure"],
+            evidence_refs=[svc.id],
+            gap_domains=("infrastructure",),
+        ))
+
+    return investigations
+
+
 def generate_investigations(
     app: ApplicationModel,
     hypotheses: list[Hypothesis],
     coverage_gaps: dict[str, str] | None = None,
 ) -> list[Investigation]:
     """Generate candidate investigations from hypotheses and application state."""
+    from horcrux.agents.tools.capabilities import canonical_tool_id
     coverage_gaps = coverage_gaps or {}
     investigations: list[Investigation] = []
     seen_objectives: set[str] = set()
@@ -248,7 +511,7 @@ def generate_investigations(
                 evidence_refs=hyp.evidence_refs[:8],
                 vulnerability_classes=[hyp.hypothesis_class.value],
                 required_capabilities=tmpl["capabilities"],
-                candidate_tools=tmpl["tools"],
+                candidate_tools=[canonical_tool_id(t) for t in tmpl["tools"]],
                 prerequisites=list(tmpl.get("prerequisites", [])),
                 expected_information_gain=tmpl["gain"],
                 hypothesis_id=hyp.id,
@@ -265,6 +528,12 @@ def generate_investigations(
             )
             inv.priority = inv.score.total
             inv.ensure_id()
+            investigations.append(inv)
+
+    # Coverage-gap and service-driven investigations for orphaned capabilities.
+    for inv in generate_gap_investigations(app, coverage_gaps):
+        if inv.objective.lower() not in seen_objectives:
+            seen_objectives.add(inv.objective.lower())
             investigations.append(inv)
 
     # Baseline investigations when app has structure but no hypotheses yet
@@ -296,7 +565,7 @@ def generate_investigations(
                 evidence_refs=[e.id for e in app.endpoints[:5]],
                 vulnerability_classes=["information_disclosure"],
                 required_capabilities=["http", "javascript"],
-                candidate_tools=["js_analyzer", "http_probe"],
+                candidate_tools=["js_analyze", "http_probe"],
                 expected_information_gain="high",
                 specialist="WebAgent",
                 state=InvestigationState.READY,
@@ -338,6 +607,11 @@ def rank_investigations(investigations: list[Investigation]) -> list[Investigati
         objective = (inv.objective or "").lower()
         if any(pat in objective for pat in LOW_VALUE_OBJECTIVE_PATTERNS):
             inv.priority = max(0.0, inv.priority - 0.35)
+        # Hypothesis-less cosmetic parameter work must not outrank semantic
+        # investigations: a bare parameter observation with no linked
+        # hypothesis and no high-value class is demoted.
+        if not inv.hypothesis_id and "parameter" in objective:
+            inv.priority = max(0.0, inv.priority - 0.25)
         # High-impact classes dominate.
         high_value = {"idor_bola", "privilege_escalation", "authentication",
                       "business_logic", "ssrf", "graphql", "file_upload"}

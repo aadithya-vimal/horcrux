@@ -43,9 +43,14 @@ _FAILURE_TO_STATE = {
 
 
 def resolve_capability(investigation: Investigation, registry: CapabilityRegistry) -> str | None:
-    """Resolve the best available capability for an investigation."""
+    """Resolve the best available capability for an investigation.
+
+    Legacy tool IDs are canonicalized explicitly (js_analyzer → js_analyze,
+    validator → endpoint_validate); the family map is a last resort.
+    """
+    from horcrux.agents.tools.capabilities import canonical_tool_id
     for tool in investigation.candidate_tools or []:
-        cap = registry.get(tool)
+        cap = registry.get(canonical_tool_id(tool))
         if cap is not None:
             return cap.capability_id
     # Fall back: map required capability families to concrete adapters.

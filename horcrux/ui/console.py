@@ -720,14 +720,19 @@ class ConsoleApp:
                 "[bold cyan]AGENTS:[/bold cyan] " +
                 ", ".join(f"{a.name}({a.status})" for a in agents))
         try:
-            from horcrux.agents.tools.capabilities import CapabilityRegistry
-            rep = CapabilityRegistry(runner=None).availability_report()
-            live = sum(1 for v in rep.values() if v.get("mode") == "live")
-            synth = sum(1 for v in rep.values() if v.get("mode") == "synthesis")
-            missing = [k for k, v in rep.items() if v.get("status") == "MISSING"]
-            cap_line = f"[bold cyan]CAPABILITIES:[/bold cyan] {live} live, {synth} synthesis"
+            from horcrux.agents.tools.capabilities import environment_availability_report
+            rep = environment_availability_report()
+            live = sorted(k for k, v in rep.items() if v.get("mode") == "live")
+            avail = sum(1 for v in rep.values() if v.get("available"))
+            missing = sorted(k for k, v in rep.items() if v.get("status") in {"MISSING"})
+            unavailable = sorted(k for k, v in rep.items()
+                                 if v.get("status") not in {"AVAILABLE", "MISSING"})
+            cap_line = (f"[bold cyan]CAPABILITIES:[/bold cyan] {len(live)} live / "
+                        f"{avail} available")
             if missing:
                 cap_line += f" — missing: {', '.join(missing[:5])}"
+            if unavailable:
+                cap_line += f" — degraded: {', '.join(unavailable[:5])}"
             try:
                 from horcrux.intel.browser import browser_backend_status
                 bw = browser_backend_status()

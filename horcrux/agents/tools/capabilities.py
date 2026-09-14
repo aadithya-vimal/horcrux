@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import secrets
+import shutil
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -67,6 +69,91 @@ class CapabilityResult:
     tool: str = ""
 
 
+class ExecutionMode(str, Enum):
+    LIVE = "live"  # real tool/network execution in this environment
+    SYNTHETIC = "synthetic"  # model-derived offline synthesis (fixtures/tests)
+    NONE = "none"  # cannot execute here
+
+
+class Availability(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DISABLED = "disabled"
+    BROKEN = "broken"
+
+
+@dataclass
+class CapabilityHealth:
+    """Canonical capability health contract (single source of truth).
+
+    Consumed by status UI, reports, ToolRegistry, and the scheduler.
+    ``availability`` answers "can this produce evidence at all here";
+    ``execution_mode`` answers "how would it execute" — never conflated.
+    """
+
+    capability_id: str
+    availability: Availability = Availability.AVAILABLE
+    execution_mode: ExecutionMode = ExecutionMode.SYNTHETIC
+    reason: str = ""
+    dependency: str = ""  # binary / package / runtime this verdict rests on
+    provenance: str = ""
+    target_support: bool | None = None  # None = not evaluated for a target
+    diagnostic: str = ""
+
+    def to_status_dict(self) -> dict[str, Any]:
+        # Human-facing status vocabulary (no misleading "synthesis" synonym
+        # for missing tooling; SYNTHETIC is an honest execution mode).
+        status = {
+            Availability.AVAILABLE: "AVAILABLE",
+            Availability.UNAVAILABLE: "MISSING",
+            Availability.DISABLED: "DISABLED",
+            Availability.BROKEN: "BROKEN",
+        }[self.availability]
+        return {
+            "status": status,
+            "mode": self.execution_mode.value,
+            "available": self.availability == Availability.AVAILABLE,
+            "reason": self.reason,
+            "dependency": self.dependency,
+            "diagnostic": self.diagnostic,
+        }
+
+
+# Legacy capability IDs mapped to canonical production IDs.
+# Backwards compatibility is explicit (never accidental family-map rescue).
+TOOL_ALIASES: dict[str, str] = {
+    "js_analyzer": "js_analyze",
+    "validator": "endpoint_validate",
+}
+
+
+def canonical_tool_id(tool_id: str) -> str:
+    """Resolve a legacy tool alias to its canonical capability ID."""
+    return TOOL_ALIASES.get(str(tool_id or ""), str(tool_id or ""))
+
+
+# Capabilities with an offline synthesis branch (fixture-grade fallback when
+# the backing binary is absent). Used only to label execution_mode honestly.
+_SYNTHETIC_FALLBACK_CAPS = frozenset({
+    "http_probe", "web_fingerprint", "content_discovery", "js_analyze",
+    "endpoint_validate", "graphql_probe", "param_fuzz", "jwt_analyze",
+    "identity_switch", "authz_compare", "browser_navigate", "browser_automate",
+    "identity_compare", "ssh_enum", "ftp_enum", "smtp_enum", "database_enum",
+    "remote_enum", "nuclei_scan", "nikto_audit", "smb_enum", "ldap_enum",
+    "kerberos_enum", "dns_enum", "snmp_enum", "searchsploit_intel", "nmap_discovery",
+})
+
+# Deterministic local analyzers: no external dependency, operate on real
+# workspace data, and execute live wherever that data exists.
+_LOCAL_LIVE_CAPS = frozenset({
+    "http_probe", "graphql_probe", "authz_compare", "jwt_analyze",
+    "identity_compare", "param_fuzz", "endpoint_validate", "js_analyze",
+})
+
+# Local-live capabilities that still require the httpx runtime library.
+_HTTPX_DEPENDENT_CAPS = frozenset({"http_probe", "graphql_probe", "authz_compare"})
+
+
 @dataclass
 class Capability:
     capability_id: str
@@ -103,6 +190,113 @@ def is_synthetic_target(target: str) -> bool:
         or t.startswith("198.51.100.")
         or t.startswith("203.0.113.")
     )
+
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _target_host(target: str) -> str:
+    text = (target or "").strip().lower()
+    if "://" in text:
+        try:
+            from urllib.parse import urlparse
+            return (urlparse(text).hostname or "").lower()
+        except Exception:
+            return text
+    return text.split(":")[0].split("/")[0]
+
+
+def _live_local_enabled(ctx: dict | None = None) -> bool:
+    """Explicit opt-in for live execution against loopback (local validation).
+
+    Default off, so automated tests can never touch the network. Enabled via
+    ``ctx["live_local"]`` (registry ``live_local=True``) or the
+    ``HORCRUX_LIVE_LOCAL=1`` environment variable for operator-run checks.
+    """
+    if ctx and ctx.get("live_local"):
+        return True
+    return os.environ.get("HORCRUX_LIVE_LOCAL") == "1"
+
+
+def _use_offline(target: str, ctx: dict | None = None) -> bool:
+    """True when the adapter must take the offline synthesis branch.
+
+    Non-synthetic targets always execute live. Synthetic fixtures always
+    synthesize. Loopback synthesizes too — unless live-local execution was
+    explicitly opted in (local validation only).
+    """
+    if not is_synthetic_target(target):
+        return False
+    if _target_host(target) in _LOOPBACK_HOSTS and _live_local_enabled(ctx):
+        return False
+    return True
+
+
+class _EnvProbe:
+    """Display-only PATH probe: answers 'does this tool exist' with no
+    workspace, no runner, and no tool invocation."""
+
+    @staticmethod
+    def which(binary: str) -> str | None:
+        try:
+            return shutil.which(binary)
+        except Exception:
+            return None
+
+
+def _playwright_probe() -> dict[str, Any]:
+    """Real browser dependency check (import + executable + adapter init).
+
+    Never launches a browser; safe for status rendering.
+    """
+    try:
+        __import__("playwright")
+    except ImportError:
+        return {"ok": False, "reason": "playwright package not installed",
+                "chromium": None}
+    chromium = None
+    for candidate in ("chromium", "chromium-browser", "google-chrome",
+                      "google-chrome-stable", "chrome", "msedge"):
+        found = shutil.which(candidate)
+        if found:
+            chromium = found
+            break
+    if chromium is None:
+        try:
+            from pathlib import Path
+            pw_dir = Path.home() / ".cache" / "ms-playwright"
+            if pw_dir.is_dir():
+                for child in sorted(pw_dir.iterdir()):
+                    exe = child / "chrome-linux" / "chrome"
+                    if exe.exists():
+                        chromium = str(exe)
+                        break
+                    exe = child / "chrome-linux" / "headless_shell"
+                    if exe.exists():
+                        chromium = str(exe)
+                        break
+        except Exception:
+            pass
+    if chromium is None:
+        return {"ok": False, "reason": "no supported browser executable found",
+                "chromium": None}
+    try:
+        from horcrux.intel.browser import PlaywrightBrowserAdapter
+        PlaywrightBrowserAdapter()  # init must not raise; no launch here
+    except Exception as exc:
+        return {"ok": False, "reason": f"adapter init failed: {exc}",
+                "chromium": chromium}
+    return {"ok": True, "reason": "Playwright + browser executable available",
+            "chromium": chromium}
+
+
+def _playwright_availability() -> Callable[[Any], bool]:
+    """Availability check for browser automation (dependency, not shell binary)."""
+    def _check(runner: Any) -> bool:
+        return _playwright_probe()["ok"]
+    _check._binary = "playwright"  # type: ignore[attr-defined]
+    _check._kind = "python"  # type: ignore[attr-defined]
+    return _check
 
 
 def _runner_available(runner: Any, binary: str) -> bool:
@@ -167,7 +361,7 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
             if e.path == path or e.path.replace("{id}", "1") == path.replace("{id}", "1"):
                 known = e
                 break
-    if is_synthetic_target(target):
+    if _use_offline(target, ctx):
         if identity == "anonymous" and (privileged or (known and known.authentication == "required")):
             status = 401
         elif identity == "anonymous" and object_bearing:
@@ -259,7 +453,7 @@ def _adapter_content_discovery(ctx: dict) -> CapabilityResult:
     target = ctx.get("target", "")
     port = int(ctx.get("port", 80))
     # Prefer the real fuzzer only for non-synthetic targets with a runner.
-    if workspace is not None and runner is not None and not is_synthetic_target(target):
+    if workspace is not None and runner is not None and not _use_offline(target, ctx):
         try:
             from horcrux.modules.web.fuzzer import run_fuzzer
             paths = run_fuzzer(workspace, runner, target, port,
@@ -337,7 +531,7 @@ def _adapter_fingerprint(ctx: dict) -> CapabilityResult:
     workspace = ctx.get("workspace")
     target = ctx.get("target", "")
     port = int(ctx.get("port", 80))
-    if workspace is not None and runner is not None and not is_synthetic_target(target):
+    if workspace is not None and runner is not None and not _use_offline(target, ctx):
         try:
             from horcrux.modules.web.fingerprint import run_fingerprinting
             techs, _sw = run_fingerprinting(workspace, runner, target, port)
@@ -371,7 +565,7 @@ def _adapter_nuclei(ctx: dict) -> CapabilityResult:
     runner = ctx.get("runner")
     workspace = ctx.get("workspace")
     url = ctx.get("url", ctx.get("base_url", ""))
-    if workspace is not None and runner is not None and url and not is_synthetic_target(ctx.get("target", "")):
+    if workspace is not None and runner is not None and url and not _use_offline(ctx.get("target", ""), ctx):
         if not _runner_available(runner, "nuclei"):
             return _fail("nuclei_scan", FailureClass.UNAVAILABLE, "nuclei binary not installed")
         try:
@@ -401,7 +595,7 @@ def _adapter_nikto(ctx: dict) -> CapabilityResult:
     workspace = ctx.get("workspace")
     target = ctx.get("target", "")
     port = int(ctx.get("port", 80))
-    if workspace is not None and runner is not None and not is_synthetic_target(target):
+    if workspace is not None and runner is not None and not _use_offline(target, ctx):
         if not _runner_available(runner, "nikto"):
             return _fail("nikto_audit", FailureClass.UNAVAILABLE, "nikto binary not installed")
         try:
@@ -423,7 +617,7 @@ def _adapter_graphql_probe(ctx: dict) -> CapabilityResult:
     path = ctx.get("path", "/graphql")
     app = ctx.get("application_model")
     has_graphql = any("graphql" in e.path.lower() for e in getattr(app, "endpoints", [])) if app else False
-    if is_synthetic_target(target):
+    if _use_offline(target, ctx):
         introspection = has_graphql and bool(ctx.get("assume_introspection", has_graphql))
         return _ok("graphql_probe", {
             "path": path, "graphql_present": has_graphql,
@@ -530,7 +724,7 @@ def _make_service_adapter(module_name: str, fn_name: str, cap_id: str,
         workspace = ctx.get("workspace")
         target = ctx.get("target", "")
         port = int(ctx.get("port", 0))
-        if workspace is not None and runner is not None and not is_synthetic_target(target):
+        if workspace is not None and runner is not None and not _use_offline(target, ctx):
             try:
                 mod = __import__(f"horcrux.modules.services.{module_name}",
                                  fromlist=[fn_name])
@@ -640,7 +834,7 @@ def _adapter_browser_automate(ctx: dict) -> CapabilityResult:
         except Exception:
             scope_check = None
     backend = ctx.get("backend", "auto")
-    if is_synthetic_target(target) and backend == "auto":
+    if _use_offline(target, ctx) and backend == "auto":
         backend = "scripted"
     try:
         adapter = get_browser_adapter(backend, pages=ctx.get("pages"),
@@ -746,7 +940,7 @@ def _adapter_nmap(ctx: dict) -> CapabilityResult:
     runner = ctx.get("runner")
     workspace = ctx.get("workspace")
     target = ctx.get("target", "")
-    if workspace is not None and runner is not None and not is_synthetic_target(target):
+    if workspace is not None and runner is not None and not _use_offline(target, ctx):
         if not _runner_available(runner, "nmap"):
             return _fail("nmap_discovery", FailureClass.UNAVAILABLE, "nmap binary not installed")
         try:
@@ -861,7 +1055,7 @@ def build_production_capabilities() -> list[Capability]:
                    CapabilityCategory.BROWSER,
                    ["web_service"], ["target"], ["endpoint_observation", "route_discovery",
                                                  "identity_context", "form_observation"],
-                   SafetyClass.MEDIUM, _adapter_browser_automate, _availability("none"),
+                   SafetyClass.MEDIUM, _adapter_browser_automate, _playwright_availability(),
                    300, "horcrux.intel.browser", "horcrux.intel.browser",
                    "Replaceable Playwright/scripted automation; scope-gated"),
         Capability("identity_compare", "Multi-identity access comparison", CapabilityCategory.VALIDATION,
@@ -938,19 +1132,29 @@ class CapabilityRegistry:
     BROKEN_THRESHOLD = 3
 
     def __init__(self, workspace: Any = None, runner: Any = None,
-                 state: Any = None, scope_check: Callable[[str], bool] | None = None):
+                 state: Any = None, scope_check: Callable[[str], bool] | None = None,
+                 live_local: bool = False):
         self.workspace = workspace
         self.runner = runner
         self.state = state
         self.scope_check = scope_check
+        self.live_local = live_local
         self._caps: dict[str, Capability] = {}
         for cap in build_production_capabilities():
             self._caps[cap.capability_id] = cap
         self._disabled: set[str] = set()
         self._failures: dict[str, int] = {}
 
+    @classmethod
+    def for_display(cls) -> CapabilityRegistry:
+        """Display-only registry: truthful PATH/dependency checks with no
+        workspace, no CommandRunner, and no tool invocation."""
+        return cls(workspace=None, runner=_EnvProbe(), state=None,
+                   scope_check=None)
+
     def get(self, capability_id: str) -> Capability | None:
-        return self._caps.get(capability_id)
+        # Explicit legacy-alias resolution (backward compatible).
+        return self._caps.get(canonical_tool_id(capability_id))
 
     def list(self, category: CapabilityCategory | None = None) -> list[Capability]:
         if category:
@@ -964,39 +1168,97 @@ class CapabilityRegistry:
         self._disabled.discard(capability_id)
         self._failures.pop(capability_id, None)
 
-    def capability_status(self, capability_id: str) -> dict[str, Any]:
-        """AVAILABLE / MISSING / BROKEN / DISABLED / BLOCKED (Part 27)."""
-        cap = self._caps.get(capability_id)
+    def health(self, capability_id: str) -> CapabilityHealth:
+        """Canonical health evaluation (shared by status UI, reports, scheduler)."""
+        cap = self._caps.get(canonical_tool_id(capability_id))
         if cap is None:
-            return {"status": "MISSING", "mode": "none", "reason": "not registered"}
-        if capability_id in self._disabled:
-            return {"status": "DISABLED", "mode": "none",
-                    "reason": "disabled by operator/policy"}
-        if self._failures.get(capability_id, 0) >= self.BROKEN_THRESHOLD:
-            return {"status": "BROKEN", "mode": "none",
-                    "reason": f"{self._failures[capability_id]} consecutive failures"}
-        binary = getattr(cap.availability_check, "_binary", "") or ""
-        live = bool(binary) and binary != "none" and _runner_available(self.runner, binary)
-        offline_ok = getattr(cap.availability_check, "__name__", "") == "_check" and \
-            (not binary or binary in ("none", "httpx", "ssh", "showmount"))
-        # _availability() adapters always have an offline synthesis path.
-        synthesis = cap.capability_id in {
-            "http_probe", "web_fingerprint", "content_discovery", "js_analyze",
-            "endpoint_validate", "graphql_probe", "param_fuzz", "jwt_analyze",
-            "identity_switch", "authz_compare", "browser_navigate", "browser_automate",
-            "identity_compare", "ssh_enum", "ftp_enum", "smtp_enum", "database_enum",
-            "remote_enum", "nuclei_scan", "nikto_audit", "smb_enum", "ldap_enum",
-            "kerberos_enum", "dns_enum", "snmp_enum", "searchsploit_intel", "nmap_discovery"}
-        if live:
-            return {"status": "AVAILABLE", "mode": "live", "reason": f"binary '{binary}' present",
-                    "safety": cap.safety.value, "timeout": cap.timeout}
-        if synthesis or offline_ok:
-            return {"status": "AVAILABLE", "mode": "synthesis",
-                    "reason": "offline synthesis path" if not binary or binary == "none"
-                    else f"binary '{binary}' absent; synthesis fallback",
-                    "safety": cap.safety.value, "timeout": cap.timeout}
-        return {"status": "MISSING", "mode": "none",
-                "reason": f"binary '{binary}' not installed and no fallback"}
+            return CapabilityHealth(
+                capability_id=capability_id, availability=Availability.UNAVAILABLE,
+                execution_mode=ExecutionMode.NONE, reason="not registered",
+                diagnostic=f"unknown capability '{capability_id}'")
+        if capability_id in self._disabled or cap.capability_id in self._disabled:
+            return CapabilityHealth(
+                capability_id=cap.capability_id, availability=Availability.DISABLED,
+                execution_mode=ExecutionMode.NONE, reason="disabled by operator/policy",
+                provenance=cap.provenance)
+        if self._failures.get(cap.capability_id, 0) >= self.BROKEN_THRESHOLD:
+            return CapabilityHealth(
+                capability_id=cap.capability_id, availability=Availability.BROKEN,
+                execution_mode=ExecutionMode.NONE,
+                reason=f"{self._failures[cap.capability_id]} consecutive failures",
+                provenance=cap.provenance,
+                diagnostic="re-enable explicitly after fixing the underlying tool")
+        check = cap.availability_check
+        kind = getattr(check, "_kind", "binary")
+        binary = getattr(check, "_binary", "") or ""
+        # Deterministic local analyzers first: they do not need a shell
+        # binary, so the binary branch below must not shadow them.
+        if cap.capability_id in _LOCAL_LIVE_CAPS:
+            if cap.capability_id in _HTTPX_DEPENDENT_CAPS:
+                try:
+                    __import__("httpx")
+                except ImportError:
+                    return CapabilityHealth(
+                        capability_id=cap.capability_id,
+                        availability=Availability.UNAVAILABLE,
+                        execution_mode=ExecutionMode.NONE,
+                        reason="httpx library not installed",
+                        dependency="httpx", provenance=cap.provenance,
+                        diagnostic="pip install httpx for live HTTP probing")
+            return CapabilityHealth(
+                capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+                execution_mode=ExecutionMode.LIVE,
+                reason="deterministic local analysis; no external dependency",
+                dependency="none", provenance=cap.provenance)
+        if kind == "python" and cap.capability_id == "browser_automate":
+            probe = _playwright_probe()
+            if probe["ok"]:
+                return CapabilityHealth(
+                    capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+                    execution_mode=ExecutionMode.LIVE,
+                    reason="Playwright + browser executable available",
+                    dependency=f"playwright ({probe['chromium']})",
+                    provenance=cap.provenance)
+            return CapabilityHealth(
+                capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+                execution_mode=ExecutionMode.SYNTHETIC,
+                reason=f"{probe['reason']}; scripted fallback",
+                dependency="playwright", provenance=cap.provenance,
+                diagnostic=probe["reason"])
+        if binary and binary != "none":
+            if _runner_available(self.runner, binary):
+                return CapabilityHealth(
+                    capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+                    execution_mode=ExecutionMode.LIVE,
+                    reason=f"'{binary}' found on PATH",
+                    dependency=binary, provenance=cap.provenance)
+            if cap.capability_id in _SYNTHETIC_FALLBACK_CAPS:
+                return CapabilityHealth(
+                    capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+                    execution_mode=ExecutionMode.SYNTHETIC,
+                    reason=f"'{binary}' not found; offline synthesis fallback",
+                    dependency=binary, provenance=cap.provenance,
+                    diagnostic=f"install '{binary}' for live execution")
+            return CapabilityHealth(
+                capability_id=cap.capability_id, availability=Availability.UNAVAILABLE,
+                execution_mode=ExecutionMode.NONE,
+                reason=f"'{binary}' not found and no fallback",
+                dependency=binary, provenance=cap.provenance)
+        return CapabilityHealth(
+            capability_id=cap.capability_id, availability=Availability.AVAILABLE,
+            execution_mode=ExecutionMode.SYNTHETIC,
+            reason="offline synthesis path",
+            dependency="none", provenance=cap.provenance)
+
+    def capability_status(self, capability_id: str) -> dict[str, Any]:
+        """Human-facing status derived from the canonical health contract."""
+        health = self.health(capability_id)
+        out = health.to_status_dict()
+        cap = self._caps.get(canonical_tool_id(capability_id))
+        if cap is not None:
+            out["safety"] = cap.safety.value
+            out["timeout"] = cap.timeout
+        return out
 
     def _scope_gate(self, capability_id: str, inputs: dict[str, Any],
                     target: str) -> CapabilityResult | None:
@@ -1055,6 +1317,7 @@ class CapabilityRegistry:
     def execute(self, capability_id: str, inputs: dict[str, Any] | None = None,
                 request_id: str | None = None) -> CapabilityResult:
         inputs = dict(inputs or {})
+        capability_id = canonical_tool_id(capability_id)
         cap = self._caps.get(capability_id)
         if cap is None or cap.execute_fn is None:
             return _fail(capability_id, FailureClass.UNAVAILABLE,
@@ -1099,6 +1362,7 @@ class CapabilityRegistry:
         ctx["workspace"] = self.workspace
         ctx["runner"] = self.runner
         ctx["state"] = self.state
+        ctx["live_local"] = self.live_local
         if self.state is not None:
             try:
                 ctx.setdefault("application_model", self.state.get_application_model())
@@ -1137,3 +1401,25 @@ class CapabilityRegistry:
             return _fail(capability_id, FailureClass.TIMEOUT, str(exc))
         except Exception as exc:
             return _fail(capability_id, FailureClass.TOOL_FAILED, f"{capability_id} failed: {exc}")
+
+
+def environment_availability_report() -> dict[str, dict[str, Any]]:
+    """Shared display/diagnostic report: truthful PATH + dependency checks.
+
+    Uses an environment probe — no workspace, no CommandRunner, no tool
+    invocation. Consumed by status UI, reports, and explainers so doctor,
+    status, and the registry share one availability semantic.
+    """
+    return CapabilityRegistry.for_display().availability_report()
+
+
+def capability_binaries() -> dict[str, str]:
+    """Canonical capability → dependency map shared with doctor-style checks.
+
+    Values are shell binaries, except ``playwright`` (Python package +
+    browser executable) and ``""`` (no external dependency).
+    """
+    out: dict[str, str] = {}
+    for cap in build_production_capabilities():
+        out[cap.capability_id] = getattr(cap.availability_check, "_binary", "") or ""
+    return out

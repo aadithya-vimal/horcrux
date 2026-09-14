@@ -243,14 +243,24 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
         )
 
     # 9. Discovered Parameters (STRICTLY GATED BY ACTUAL PARAMETER EVIDENCE)
+    # Scored by semantic class: object IDs, URL-fetchers, auth credentials,
+    # and file inputs compete at the top; cosmetic query flags do not.
     if state.parameters:
         sample_param = state.parameters[0]
+        try:
+            app_params = {p.name.lower(): p.param_class
+                          for p in state.get_application_model().parameters}
+            param_class = app_params.get(sample_param.name.lower(), "general")
+        except Exception:
+            param_class = "general"
+        high_value_param = param_class in {"object_id", "url_fetch",
+                                           "auth_credential", "file"}
         actions.append(
             Action(
                 id="param_audit",
                 title=f"Audit input parameter '{sample_param.name}' ({sample_param.location})",
                 reason=f"Parameter evidence identified from {sample_param.source} on {sample_param.endpoint or 'web target'}; test input validation.",
-                score=91.5,
+                score=91.5 if high_value_param else 62.0,
             )
         )
 

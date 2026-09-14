@@ -142,7 +142,7 @@ class SpecialistExecutor:
         app = state.get_application_model()
         data = result.structured_data
 
-        if result.tool == "js_analyzer" and data.get("routes"):
+        if result.tool in ("js_analyzer", "js_analyze") and data.get("routes"):
             ingest_javascript_routes(app, data["routes"], data.get("parameters", []))
 
         if result.tool == "http_probe" and data.get("endpoint"):

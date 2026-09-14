@@ -509,14 +509,35 @@ def get_browser_adapter(preferred: str = "auto", **kwargs: Any) -> BrowserAdapte
 
 
 def browser_backend_status() -> dict[str, Any]:
-    """Availability intelligence for browser backends (Part 27)."""
+    """Browser state: playwright / chromium / scripted, separately reported.
+
+    Answers whether HORCRUX can actually instantiate the configured adapter:
+    package importable, supported browser executable present, adapter init
+    possible. Never launches a browser (safe for status rendering).
+    """
     try:
-        __import__("playwright")
-        pw = {"backend": "playwright", "available": True,
-              "reason": "playwright package importable"}
-    except ImportError:
-        pw = {"backend": "playwright", "available": False,
-              "reason": "playwright package not installed"}
-    return {"playwright": pw,
-            "scripted": {"backend": "scripted", "available": True,
-                         "reason": "deterministic fallback; no runtime required"}}
+        from horcrux.agents.tools.capabilities import _playwright_probe
+        probe = _playwright_probe()
+    except Exception as exc:
+        probe = {"ok": False, "reason": f"probe failed: {exc}", "chromium": None}
+    try:
+        PlaywrightBrowserAdapter()
+        init_ok, init_reason = True, "adapter initializes"
+    except Exception as exc:
+        init_ok, init_reason = False, f"adapter init failed: {exc}"
+    available = bool(probe["ok"] and init_ok)
+    return {
+        "playwright": {
+            "backend": "playwright",
+            "available": available,
+            "reason": probe["reason"] if available else
+                      (probe["reason"] if not probe["ok"] else init_reason),
+        },
+        "chromium": {
+            "backend": "chromium",
+            "available": probe.get("chromium") is not None,
+            "reason": probe["chromium"] or "no supported browser executable found",
+        },
+        "scripted": {"backend": "scripted", "available": True,
+                     "reason": "deterministic fallback; no runtime required"},
+    }

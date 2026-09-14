@@ -178,6 +178,10 @@ class ToolRegistry:
         return [t for t in specs if t]
 
     def execute(self, name: str, **kwargs: Any) -> ToolResult:
+        # Canonicalize legacy IDs first so production handlers win over
+        # test-only mock handlers (js_analyzer → js_analyze, etc.).
+        from horcrux.agents.tools.capabilities import canonical_tool_id
+        name = canonical_tool_id(name)
         # Prefer production capability path (existing modules + CommandRunner).
         try:
             cap = self.capabilities.get(name)

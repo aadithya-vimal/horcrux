@@ -305,14 +305,15 @@ def markdown(ws, output: Path | None = None) -> Path:
     # 16. Tool availability
     lines += ["## 16. Tool Availability", ""]
     try:
-        from horcrux.agents.tools.capabilities import CapabilityRegistry
-        report = CapabilityRegistry().availability_report()
-        live = [k for k, v in report.items() if v.get("mode") == "live"]
-        synth = [k for k, v in report.items() if v.get("mode") == "synthesis"]
-        missing = [k for k, v in report.items() if v.get("status") == "MISSING"]
+        from horcrux.agents.tools.capabilities import environment_availability_report
+        report = environment_availability_report()
+        live = sorted(k for k, v in report.items() if v.get("mode") == "live")
+        degraded = sorted(k for k, v in report.items()
+                          if v.get("status") not in {"AVAILABLE", "MISSING"})
+        missing = sorted(k for k, v in report.items() if v.get("status") == "MISSING")
         lines.append(f"- **Live backends**: {', '.join(f'`{k}`' for k in live) or 'none'}")
-        lines.append(f"- **Synthesis fallback**: {', '.join(f'`{k}`' for k in synth[:12])}"
-                     + (f" (+{len(synth) - 12} more)" if len(synth) > 12 else ""))
+        if degraded:
+            lines.append(f"- **Degraded**: {', '.join(f'`{k}`' for k in degraded[:12])}")
         if missing:
             lines.append(f"- **Missing**: {', '.join(f'`{k}`' for k in missing)}")
         try:

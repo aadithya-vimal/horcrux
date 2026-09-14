@@ -1,25 +1,37 @@
 from horcrux.agents.tools.capabilities import (
+    Availability,
     Capability,
     CapabilityCategory,
+    CapabilityHealth,
     CapabilityRegistry,
     CapabilityResult,
+    ExecutionMode,
     FailureClass,
     SafetyClass,
     build_production_capabilities,
+    canonical_tool_id,
+    capability_binaries,
+    environment_availability_report,
     is_synthetic_target,
 )
 from horcrux.agents.tools.registry import ToolRegistry, ToolResult, create_default_registry
 
 __all__ = [
+    "Availability",
     "Capability",
     "CapabilityCategory",
+    "CapabilityHealth",
     "CapabilityRegistry",
     "CapabilityResult",
+    "ExecutionMode",
     "FailureClass",
     "SafetyClass",
     "ToolRegistry",
     "ToolResult",
     "build_production_capabilities",
+    "canonical_tool_id",
+    "capability_binaries",
     "create_default_registry",
+    "environment_availability_report",
     "is_synthetic_target",
 ]

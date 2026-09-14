@@ -158,8 +158,8 @@ def explain_investigation(state: Any, ref: str) -> str:
     except Exception:
         pass
     try:
-        from horcrux.agents.tools.capabilities import CapabilityRegistry
-        rep = CapabilityRegistry().availability_report()
+        from horcrux.agents.tools.capabilities import environment_availability_report
+        rep = environment_availability_report()
         for tool in (inv.candidate_tools or [])[:3]:
             info = rep.get(tool, {})
             lines.append(f"- capability {tool}: {info.get('status', '?')} ({info.get('mode', '?')})")
