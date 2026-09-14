@@ -61,6 +61,7 @@ class ScanProgressManager:
         ("enumeration", "Service-specific enumeration"),
         ("validation", "Evidence validation"),
         ("intel", "Vulnerability / CVE correlation"),
+        ("engines", "External vulnerability engines"),
         ("synthesis", "Attack surface synthesis"),
     ]
 

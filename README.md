@@ -135,28 +135,39 @@ pip install -e .
 
 ---
 
-### 2. Basic Usage
+### 2. Autonomous Client-Grade VAPT Assessment
 
 ```bash
-# Launch interactive operator console
+# Full autonomous assessment — single-command orchestrates reconnaissance,
+# application modeling, sessions, auth/authz testing, API analysis,
+# external engines (Tenable, Qualys, Rapid7, Greenbone, MS Defender),
+# validation, attack paths, and client report:
+horcrux scan 10.10.10.10 --profile full
+
+# Assessment Profiles:
+# --profile quick     : Fast network & web surface mapping (no intrusive checks)
+# --profile standard  : Balanced discovery, baseline validation & guided investigations
+# --profile deep      : Comprehensive service enumeration, JS routing & hypothesis testing
+# --profile full      : Autonomous agentic investigation loop, multi-identity authz,
+#                       external engine correlation & markdown reporting
+
+# External Vulnerability Engines:
+horcrux scan 10.10.10.10 --profile full --engines tenable,qualys
+horcrux scan 10.10.10.10 --profile full --skip-engines
+
+# Launch interactive operator console:
 horcrux
 
-# One-shot reconnaissance against a target
-horcrux 10.10.10.10
-
-# Deep port scanning and aggressive enumeration
-horcrux 10.10.10.10 --deep
-
-# Check installed tools, wordlists, and AI configuration
+# Check installed tools, external engines, wordlists & health:
 horcrux doctor
 
-# Configure AI provider key securely
+# Configure AI provider key securely:
 horcrux settings provider groq <your-api-key>
 
-# Ask AI security analyst with target context
-horcrux ask "What is the primary attack vector?" --target 10.10.10.10
+# Ask deterministic-first analyst over workspace evidence:
+horcrux ask "Why is coverage LIMITED?" --target 10.10.10.10
 
-# Generate Markdown engagement report
+# Generate Markdown engagement report:
 horcrux report 10.10.10.10
 ```
 

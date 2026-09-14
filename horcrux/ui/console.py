@@ -126,6 +126,25 @@ def get_exploit_decision_badge(relevance: str, decision: str = "") -> str:
     return f"[dim cyan]{tag}[/dim cyan]"
 
 
+def _parse_engines_flag(args: list[str]) -> list[str] | None:
+    """Parse --engines a,b from console scan args (operator override)."""
+    for i, tok in enumerate(args):
+        if tok == "--engines" and i + 1 < len(args):
+            return [e.strip() for e in args[i + 1].split(",") if e.strip()]
+        if tok.startswith("--engines="):
+            return [e.strip() for e in tok.split("=", 1)[1].split(",") if e.strip()]
+    return None
+
+
+def _parse_engine_mode(args: list[str]) -> str:
+    for i, tok in enumerate(args):
+        if tok == "--engine-mode" and i + 1 < len(args):
+            return args[i + 1].strip().lower() or "best"
+        if tok.startswith("--engine-mode="):
+            return tok.split("=", 1)[1].strip().lower() or "best"
+    return "best"
+
+
 class ConsoleApp:
     def __init__(self, console: Console | None = None):
         self.console = console or Console()
@@ -200,7 +219,10 @@ class ConsoleApp:
                     ("benchmark [fixture|all]", "Run the synthetic benchmark suite (offline)"),
                     ("ai [status|enable|disable|usage|clear-cache]", "Manage AI engine, model, and cache"),
                     ("settings", "Interactive settings & provider configuration"),
-                    ("doctor / tools", "Audit installed tools, wordlists, and AI"),
+                    ("settings vulnerability ...", "External vulnerability engines (test, endpoint, keys)"),
+                    ("engines [status|test|info]", "Vulnerability engine readiness & health"),
+                    ("import <file> [--provider X]", "Import scanner results as IMPORTED_RESULT"),
+                    ("doctor / tools", "Audit installed tools, wordlists, AI, and engines"),
                     ("source <artifact> / raw <module>", "Inspect raw tool output or response body"),
                     ("report", "Generate structured Markdown engagement report"),
                     ("artifacts / gallery", "View the Horcrux ASCII art gallery"),
@@ -284,6 +306,8 @@ class ConsoleApp:
             "ai",
             "scan",
             "ask",
+            "engines",
+            "import",
         }
 
         # Clean leading colons or slashes and filter empty arguments
@@ -338,6 +362,14 @@ class ConsoleApp:
             self.ask_cmd(args)
             return
 
+        if command == "engines":
+            self.engines_cmd(args)
+            return
+
+        if command == "import":
+            self.import_cmd(args)
+            return
+
         if command == "assess":
             if self.workspace is None:
                 raise ValueError("no workspace loaded; run 'scan <target>' first")
@@ -383,6 +415,9 @@ class ConsoleApp:
                 self.workspace,
                 self.console,
                 profile=profile_name,
+                engines=_parse_engines_flag(args),
+                skip_engines=("--skip-engines" in args[2:]),
+                engine_mode=_parse_engine_mode(args),
             ).scan(
                 deep=deep,
                 verify=verify,
@@ -513,6 +548,7 @@ class ConsoleApp:
                 "local", "ask", "ai", "settings", "doctor", "tools", "help",
                 "artifacts", "gallery", "art", "version", "clear",
                 "focus", "pause", "resume", "skip", "prioritize", "why",
+                "engines", "import",
             ]
             close = difflib.get_close_matches(command, _ALL_COMMANDS, n=1, cutoff=0.6)
             hint = f" — did you mean '[bold bright_cyan]{close[0]}[/bold bright_cyan]'?" if close else " — type 'help' for command reference"
@@ -1649,7 +1685,8 @@ class ConsoleApp:
                 + "  settings default <provider>             (set default AI provider)\n"
                 + "  settings test [provider]                (verify connection & text generation)\n"
                 + "  settings remove <provider>              (remove provider credential)\n"
-                + "  settings reset-model <provider>         (reset provider model to default)[/dim white]"
+                + "  settings reset-model <provider>         (reset provider model to default)\n"
+                + "  settings vulnerability                  (external vulnerability engines)[/dim white]"
             )
 
             self.console.print()
@@ -1666,6 +1703,10 @@ class ConsoleApp:
             return
 
         sub = args[1].lower()
+
+        if sub in {"vulnerability", "vuln", "vulns", "engines"}:
+            self.vuln_settings_cmd(["vulnerability"] + args[2:])
+            return
 
         if sub == "status":
             st = mgr.settings
@@ -1902,6 +1943,259 @@ class ConsoleApp:
 
         else:
             raise ValueError(f"unknown settings command: '{sub}' — run 'settings' for help")
+
+    # ── Vulnerability engine fabric UX (settings → VULNERABILITY ENGINES) ──
+    def vuln_settings_cmd(self, args: list[str]):
+        """Manage external vulnerability engines: settings vulnerability ..."""
+        from horcrux.core.settings import (
+            VULN_CREDENTIAL_FIELDS,
+            VULN_ENGINE_IDS,
+            VULN_ENGINE_LABELS,
+            normalize_vuln_engine_id,
+        )
+        mgr = SettingsManager()
+        rest = list(args[1:])
+
+        if not rest or rest[0].lower() in {"status", "list"}:
+            try:
+                from horcrux.intel.vuln_engines.orchestrator import readiness_audit
+                audit = readiness_audit(mgr, check_health=False)
+            except Exception:
+                audit = []
+            by_id = {r.provider_id: r for r in audit}
+            lines = ["[bold bright_magenta]VULNERABILITY ENGINES[/bold bright_magenta]\n"]
+            for pid in VULN_ENGINE_IDS:
+                label = VULN_ENGINE_LABELS.get(pid, pid)
+                r = by_id.get(pid)
+                cfg = mgr.settings.vulnerability_engines.get(pid)
+                configured = mgr.is_vuln_configured(pid)
+                status_icon = "[bold green]● CONFIGURED[/bold green]" if configured else "[dim]○ NOT CONFIGURED[/dim]"
+                health = (r.health.value if r else "NOT_CONFIGURED")
+                last = (cfg.last_status if cfg and cfg.last_status else "NOT TESTED")
+                last_str = "[dim green]Last Test: PASSED[/dim green]" if last in ("READY", "HEALTHY", "PASSED", "OK") else (
+                    f"[dim red]Last Test: {last}[/dim red]" if last != "NOT TESTED" else "[dim]Last Test: NOT TESTED[/dim]")
+                endpoint = (cfg.endpoint if cfg and cfg.endpoint else "-")
+                state = getattr(cfg, "enabled", True)
+                en_str = "[green]enabled[/green]" if state else "[yellow]disabled[/yellow]"
+                caps = ", ".join((r.capabilities[:3] if r and r.capabilities else ["-"]))
+                lines.append(f"  [bold bright_white]{label}[/bold bright_white] {status_icon}")
+                lines.append(f"     [dim]Health: {health} | {last_str} | {en_str}[/dim]")
+                lines.append(f"     [dim]Endpoint: {endpoint} | Capabilities: {caps}[/dim]\n")
+            lines.append("[dim white]Commands:\n"
+                         "  settings vulnerability status              (this overview)\n"
+                         "  settings vulnerability test <engine>       (connection test)\n"
+                         "  settings vulnerability enable <engine>     (enable engine)\n"
+                         "  settings vulnerability disable <engine>    (disable engine)\n"
+                         "  settings vulnerability endpoint <engine> <url>  (set endpoint/region)\n"
+                         "  settings vulnerability configure <engine>  (store credentials)\n"
+                         "  settings vulnerability remove <engine>     (remove configuration)[/dim white]")
+            self.console.print()
+            self.console.print(Panel("\n".join(lines),
+                                     title="[bold bright_magenta]✦ VULNERABILITY ENGINES ✦[/bold bright_magenta]",
+                                     box=box.ROUNDED, border_style="bright_magenta", padding=(1, 2)))
+            self.console.print()
+            return
+
+        sub = rest[0].lower()
+        if sub == "test":
+            target = normalize_vuln_engine_id(rest[1]) if len(rest) >= 2 else ""
+            if not target:
+                raise ValueError("usage: settings vulnerability test <tenable|qualys|rapid7|greenbone|msdefender>")
+            self.engines_test(target)
+            return
+        if sub in {"enable", "disable"}:
+            if len(rest) < 2:
+                raise ValueError(f"usage: settings vulnerability {sub} <engine>")
+            pid = normalize_vuln_engine_id(rest[1])
+            mgr.set_vuln_enabled(pid, sub == "enable")
+            self.console.print(f"[bold green]✔ Engine '{pid}' {sub}d.[/bold green]")
+            return
+        if sub == "endpoint":
+            if len(rest) < 3:
+                raise ValueError("usage: settings vulnerability endpoint <engine> <url>")
+            pid = normalize_vuln_engine_id(rest[1])
+            mgr.set_vuln_endpoint(pid, " ".join(rest[2:]))
+            self.console.print(f"[bold green]✔ Endpoint for '{pid}' updated.[/bold green]")
+            return
+        if sub in {"configure", "provider", "key", "creds", "credentials"}:
+            if len(rest) < 2:
+                raise ValueError("usage: settings vulnerability configure <engine>")
+            pid = normalize_vuln_engine_id(rest[1])
+            fields = VULN_CREDENTIAL_FIELDS.get(pid, ["api_key"])
+            supplied: dict[str, str] = {}
+            # allow key=value pairs on the CLI to avoid interactive prompts in scripts
+            for token in rest[2:]:
+                if "=" in token:
+                    k, _, v = token.partition("=")
+                    if k.strip() in fields and v.strip():
+                        supplied[k.strip()] = v.strip()
+            for fname in fields:
+                if fname not in supplied:
+                    try:
+                        val = Prompt.ask(f"[bold bright_cyan]Enter {fname} for {pid.upper()}[/bold bright_cyan]",
+                                         password=True).strip()
+                    except Exception:
+                        val = ""
+                    if val:
+                        supplied[fname] = val
+            if not supplied:
+                self.console.print("[yellow]No credentials provided. Configuration unchanged.[/yellow]")
+                return
+            mgr.set_vuln_credentials(pid, supplied)
+            self.console.print(f"[bold green]✔ Credentials stored securely for engine '{pid}'.[/bold green]")
+            return
+        if sub in {"remove", "delete", "clear"}:
+            if len(rest) < 2:
+                raise ValueError("usage: settings vulnerability remove <engine>")
+            pid = normalize_vuln_engine_id(rest[1])
+            mgr.remove_vuln_config(pid)
+            self.console.print(f"[bold yellow]✔ Removed configuration for '{pid}'.[/bold yellow]")
+            return
+        if sub == "info":
+            target = normalize_vuln_engine_id(rest[1]) if len(rest) >= 2 else ""
+            self.engines_info(target)
+            return
+        raise ValueError(f"unknown vulnerability command: '{sub}' — run 'settings vulnerability' for help")
+
+    def engines_cmd(self, args: list[str]):
+        rest = [a for a in args[1:]]
+        if not rest or rest[0].lower() == "status":
+            self.engines_status()
+        elif rest[0].lower() == "test":
+            self.engines_test(rest[1] if len(rest) > 1 else "")
+        elif rest[0].lower() == "info":
+            self.engines_info(rest[1] if len(rest) > 1 else "")
+        else:
+            raise ValueError(f"unknown engines command: '{rest[0]}' — use status, test, or info")
+
+    def engines_status(self):
+        from horcrux.core.settings import VULN_ENGINE_IDS, VULN_ENGINE_LABELS
+        mgr = SettingsManager()
+        try:
+            from horcrux.intel.vuln_engines.orchestrator import readiness_audit
+            audit = readiness_audit(mgr, check_health=False)
+        except Exception:
+            audit = []
+        by_id = {r.provider_id: r for r in audit}
+        table = Table(title="[bold bright_magenta]✦ VULNERABILITY ENGINE READINESS ✦[/bold bright_magenta]",
+                      box=box.ROUNDED, border_style="magenta", header_style="bold bright_cyan", expand=True)
+        table.add_column("Engine", style="bold bright_white")
+        table.add_column("Configured", justify="center")
+        table.add_column("Health", justify="center")
+        table.add_column("Last Test", justify="center")
+        table.add_column("Capabilities", style="dim cyan")
+        for pid in VULN_ENGINE_IDS:
+            label = VULN_ENGINE_LABELS.get(pid, pid)
+            r = by_id.get(pid)
+            configured = mgr.is_vuln_configured(pid)
+            conf_badge = "[bold green]YES[/bold green]" if configured else "[dim]NO[/dim]"
+            health = (r.health.value if r else "NOT_CONFIGURED")
+            if health in ("HEALTHY", "CONFIGURED"):
+                h_badge = f"[bold green]{health}[/bold green]"
+            elif health == "NOT_CONFIGURED":
+                h_badge = "[dim]NOT_CONFIGURED[/dim]"
+            else:
+                h_badge = f"[yellow]{health}[/yellow]"
+            cfg = mgr.settings.vulnerability_engines.get(pid)
+            last = (cfg.last_status if cfg and cfg.last_status else "NOT TESTED")
+            caps = ", ".join((r.capabilities[:2] if r and r.capabilities else ["-"]))
+            table.add_row(label, conf_badge, h_badge, last, caps)
+        self.console.print()
+        self.console.print(table)
+        self.console.print()
+
+    def engines_test(self, provider: str):
+        from horcrux.core.settings import normalize_vuln_engine_id
+        pid = normalize_vuln_engine_id(provider or "")
+        if not pid:
+            raise ValueError("usage: engines test <tenable|qualys|rapid7|greenbone|msdefender>")
+        mgr = SettingsManager()
+        try:
+            from horcrux.intel.vuln_engines.registry import get_engine
+            engine = get_engine(pid, config=mgr.get_vuln_engine_config(pid),
+                                credentials=mgr.get_vuln_credentials(pid))
+        except Exception as exc:
+            self.console.print(f"[bold red]✖ Unknown engine '{provider}': {exc}[/bold red]")
+            return
+        self.console.print(f"\n[bold bright_cyan]✔ Testing connection to {engine.product}[/bold bright_cyan]")
+        try:
+            health = engine.health_check()
+        except Exception as exc:
+            health = "BROKEN"
+            self.console.print(f"[bold red]✖ Health check error: {exc}[/bold red]")
+        from horcrux.intel.vuln_engines.types import EngineHealth as _EH
+        ok = health in (_EH.HEALTHY, _EH.CONFIGURED)
+        try:
+            mgr.set_vuln_validation(pid, "READY" if ok else str(getattr(health, 'value', health)))
+        except Exception:
+            pass
+        if ok:
+            self.console.print("[bold green]✔ Connection successful[/bold green]")
+            self.console.print(f"[bold green]✔ Health: {getattr(health, 'value', health)}[/bold green]\n")
+        else:
+            self.console.print(f"[bold red]✖ Engine not healthy: {getattr(health, 'value', health)}[/bold red]\n")
+
+    def engines_info(self, provider: str):
+        from horcrux.core.settings import VULN_ENGINE_IDS, normalize_vuln_engine_id
+        mgr = SettingsManager()
+        targets = [normalize_vuln_engine_id(provider)] if (provider or "").strip() else list(VULN_ENGINE_IDS)
+        try:
+            from horcrux.intel.vuln_engines.registry import get_engine
+        except Exception as exc:
+            self.console.print(f"[bold red]✖ Engine registry unavailable: {exc}[/bold red]")
+            return
+        for pid in targets:
+            try:
+                engine = get_engine(pid, config=mgr.get_vuln_engine_config(pid),
+                                    credentials=mgr.get_vuln_credentials(pid))
+                info = engine.describe()
+            except Exception as exc:
+                self.console.print(f"[bold red]✖ {pid}: {exc}[/bold red]")
+                continue
+            body = (
+                f"[bold bright_yellow]Product:[/bold bright_yellow] {info['product']}\n"
+                f"[bold bright_yellow]API:[/bold bright_yellow] {info['api_version']}\n"
+                f"[bold bright_yellow]Docs verified:[/bold bright_yellow] {info['docs_verified']}\n"
+                f"[bold bright_yellow]Deployment:[/bold bright_yellow] {info['deployment_type']}\n"
+                f"[bold bright_yellow]Endpoint:[/bold bright_yellow] {info['endpoint'] or '-'}\n"
+                f"[bold bright_yellow]Auth:[/bold bright_yellow] {info['authentication_type']}\n"
+                f"[bold bright_yellow]Capabilities:[/bold bright_yellow] {', '.join(info['capabilities']) or '-'}\n"
+                f"[bold bright_yellow]Asset types:[/bold bright_yellow] {', '.join(info['supported_asset_types']) or '-'}\n"
+                f"[bold bright_yellow]Result formats:[/bold bright_yellow] {', '.join(info['supported_result_formats']) or '-'}\n"
+                f"[bold bright_yellow]Limitations:[/bold bright_yellow]\n"
+                + "\n".join(f"  • {lim}" for lim in info['known_limitations'][:5]))
+            self.console.print()
+            self.console.print(Panel(body, title=f"[bold bright_magenta]✦ {pid.upper()} ✦[/bold bright_magenta]",
+                                     box=box.ROUNDED, border_style="magenta", padding=(0, 2)))
+        self.console.print()
+
+    def import_cmd(self, args: list[str]):
+        """Import external scanner results: import <path> [--provider tenable]."""
+        self.require_workspace()
+        if len(args) < 2:
+            raise ValueError("usage: import <result-file> [--provider tenable|qualys|rapid7|greenbone]")
+        path = args[1]
+        provider = "auto"
+        for i, tok in enumerate(args[2:], start=2):
+            if tok == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+        from pathlib import Path as _Path
+        if not _Path(path).exists():
+            raise ValueError(f"result file not found: {path}")
+        try:
+            from horcrux.intel.vuln_engines.importers import import_results, summarize_import
+            from horcrux.intel.vuln_engines.orchestrator import correlate_and_store, persist_runs
+        except Exception as exc:
+            raise ValueError(f"import subsystem unavailable: {exc}")
+        findings = import_results(path, provider=provider)
+        state = self.workspace.load()
+        entities = correlate_and_store(self.workspace, state, findings)
+        summary = summarize_import(findings)
+        persist_runs(self.workspace, {f"import:{summary['provenance'][0] if summary['provenance'] else path}": {
+            "status": "COMPLETE", "reason": "imported result (IMPORTED_RESULT)",
+            "results": len(findings), "imported": True}})
+        self.console.print(f"[bold green]✔ Imported {len(findings)} observations "
+                           f"({len(entities)} deduplicated entities) as IMPORTED_RESULT.[/bold green]")
 
     def ai_cmd(self, args: list[str]):
         mgr = self.ai_manager.settings
@@ -2212,6 +2506,43 @@ class ConsoleApp:
         self.console.print()
         self.console.print(ai_table)
 
+        # External vulnerability engine audit (no secrets exposed)
+        try:
+            from horcrux.core.settings import VULN_ENGINE_IDS, VULN_ENGINE_LABELS
+            from horcrux.intel.vuln_engines.orchestrator import readiness_audit
+            eng_audit = readiness_audit(mgr, check_health=False)
+            eng_by_id = {r.provider_id: r for r in eng_audit}
+            eng_table = Table(
+                title="[bold bright_magenta]✦ EXTERNAL VULNERABILITY ENGINES ✦[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                header_style="bold bright_cyan",
+                expand=True,
+            )
+            eng_table.add_column("Engine", style="bold bright_white")
+            eng_table.add_column("Configured", justify="center", no_wrap=True)
+            eng_table.add_column("Health", justify="center", no_wrap=True)
+            eng_table.add_column("Capabilities", style="dim cyan")
+            eng_table.add_column("Last Test", justify="center", style="dim white")
+            for pid in VULN_ENGINE_IDS:
+                r = eng_by_id.get(pid)
+                configured = mgr.is_vuln_configured(pid)
+                conf_badge = "[bold green]YES[/bold green]" if configured else "[dim]NO[/dim]"
+                health = (r.health.value if r else "NOT_CONFIGURED")
+                if health in ("HEALTHY", "CONFIGURED"):
+                    h_badge = f"[bold green]{health}[/bold green]"
+                elif health == "NOT_CONFIGURED":
+                    h_badge = "[dim]NOT_CONFIGURED[/dim]"
+                else:
+                    h_badge = f"[yellow]{health}[/yellow]"
+                caps = ", ".join((r.capabilities[:2] if r and r.capabilities else ["-"]))
+                cfg = mgr.settings.vulnerability_engines.get(pid)
+                last = (cfg.last_status if cfg and cfg.last_status else "-")
+                eng_table.add_row(VULN_ENGINE_LABELS.get(pid, pid), conf_badge, h_badge, caps, last)
+            self.console.print()
+            self.console.print(eng_table)
+        except Exception:
+            pass
 
         words = Table(
             title="[bold bright_yellow]✦ WORDLIST DISCOVERY AUDIT ✦[/bold bright_yellow]",

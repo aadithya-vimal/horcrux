@@ -25,11 +25,17 @@ from horcrux.ui.progress import ScanProgressManager
 
 
 class Orchestrator:
-    def __init__(self, target: str, workspace: Workspace, console: Console, profile: str | ScanProfile | None = None):
+    def __init__(self, target: str, workspace: Workspace, console: Console, profile: str | ScanProfile | None = None,
+                 engines: list[str] | None = None, skip_engines: bool = False,
+                 engine_mode: str = "best", settings_manager=None):
         self.target = target
         self.workspace = workspace
         self.console = console
         self.profile = get_profile(profile)
+        self.engines = engines
+        self.skip_engines = skip_engines
+        self.engine_mode = engine_mode
+        self._settings_manager = settings_manager
 
     def scan(self, deep: bool = False, verify: bool = False):
         profile = self.profile
@@ -242,7 +248,15 @@ class Orchestrator:
                         progress.skip_stage("intel", "Gated: requires explicit operator intel profile")
                 progress.complete_stage("intel")
 
-                # STAGE 7: Application Model Ingestion & Agent Reassessment
+                # STAGE 7: External Vulnerability Engines (profile-driven, never fatal)
+                progress.start_stage("engines")
+                try:
+                    self._run_external_engines(profile)
+                except Exception as exc:
+                    self.workspace.write("raw/vuln-engines-error.txt", str(exc)[:2000])
+                progress.complete_stage("engines")
+
+                # STAGE 8: Application Model Ingestion, Agentic Investigation & Reporting
                 progress.start_stage("synthesis")
                 try:
                     from horcrux.agents.coordinator import on_recon_complete
@@ -255,9 +269,23 @@ class Orchestrator:
                     except Exception:
                         pass
                     on_recon_complete(self.workspace, ai_manager=ai_mgr)
+
+                    # Autonomous agent investigation loop for standard / deep / full profiles
+                    if profile.name in ("full", "deep", "standard"):
+                        from horcrux.agents.coordinator import run_full_assessment
+                        max_iter = 15 if profile.name == "full" else (10 if profile.name == "deep" else 5)
+                        run_full_assessment(self.workspace, ai_manager=ai_mgr, max_iterations=max_iter)
                 except Exception as exc:
                     self.workspace.write("raw/agent-ingestion-error.txt", str(exc))
                 self.derive_actions()
+
+                # Generate client-grade markdown report
+                try:
+                    from horcrux.reporting.reports import markdown
+                    markdown(self.workspace)
+                except Exception as exc:
+                    self.workspace.write("raw/report-error.txt", str(exc))
+
                 progress.complete_stage("synthesis")
                 self.workspace.set_subsystem_state("scan", SubsystemState.COMPLETE)
         except KeyboardInterrupt:
@@ -265,6 +293,85 @@ class Orchestrator:
         except Exception:
             self.workspace.set_subsystem_state("scan", SubsystemState.FAILED)
             raise
+
+    def _run_external_engines(self, profile) -> None:
+        """Profile-driven external engine orchestration (spec §8-§9).
+
+        quick/local: native only. standard: intelligence only. deep/full/
+        network/web/service/intel: configured engines via best-available set.
+        Operator flags (--engines/--skip-engines/--engine-mode) persist and
+        are reported as OPERATOR_EXCLUDED, never NOT_CONFIGURED.
+        """
+        from horcrux.intel.vuln_engines.orchestrator import (
+            coverage_warning_text,
+            readiness_audit,
+            readiness_text,
+            run_external_engines,
+        )
+
+        mgr = self._settings_manager
+        if mgr is None:
+            try:
+                from horcrux.core.settings import SettingsManager
+                mgr = SettingsManager()
+            except Exception:
+                mgr = None
+
+        state = self.workspace.load()
+        exclusions: list[str] = list(getattr(state, "engine_operator_exclusions", []) or [])
+        include = list(self.engines) if self.engines else None
+        exclude = list(exclusions)
+        if self.skip_engines:
+            try:
+                from horcrux.intel.vuln_engines.registry import provider_ids
+                exclude = sorted(set(exclude) | set(provider_ids()))
+            except Exception:
+                pass
+        try:
+            audit = readiness_audit(mgr, operator_exclude=exclude, check_health=False)
+        except Exception:
+            return
+
+        # Pre-scan readiness: compact, impossible to miss, not annoying.
+        try:
+            self.console.print()
+            self.console.print(readiness_text(audit))
+            warning = coverage_warning_text(audit)
+            if warning and profile.name in ("deep", "full", "standard"):
+                self.console.print(f"[bold yellow]{warning}[/bold yellow]")
+        except Exception:
+            pass
+
+        if include:
+            norm = []
+            try:
+                from horcrux.intel.vuln_engines.registry import normalize_engine_id
+                norm = [normalize_engine_id(e) for e in include]
+            except Exception:
+                norm = list(include)
+        else:
+            norm = None
+        try:
+            result = run_external_engines(
+                self.workspace, self.target, profile=profile.name,
+                settings_manager=mgr, operator_include=norm,
+                operator_exclude=exclude, engine_mode=self.engine_mode,
+                console=self.console)
+            # persist operator decision
+            try:
+                fresh = self.workspace.load()
+                fresh.engine_operator_exclusions = sorted(set(exclude))
+                self.workspace.save(fresh)
+            except Exception:
+                pass
+            executed = [pid for pid, run in (result.get("runs") or {}).items()
+                        if str(run.get("status", "")).upper() == "COMPLETE"]
+            self.workspace.set_subsystem_state(
+                "vulnerability_engines",
+                SubsystemState.COMPLETE if executed else SubsystemState.COMPLETE_NO_CANDIDATES)
+        except Exception as exc:
+            self.workspace.write("raw/vuln-engines-error.txt", str(exc)[:2000])
+            self.workspace.set_subsystem_state("vulnerability_engines", SubsystemState.FAILED)
 
     def derive_actions(self):
         """Recompute investigation-centric next actions."""

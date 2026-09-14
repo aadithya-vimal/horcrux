@@ -67,6 +67,12 @@ class WebApplicationType(str, Enum):
     TRADITIONAL_WEB_APP = "TRADITIONAL_WEB_APP"
     SPA = "SPA"
     API = "API"
+    API_SERVICE = "API_SERVICE"
+    GRAPHQL_APP = "GRAPHQL_APP"
+    ECOMMERCE = "ECOMMERCE"
+    CMS = "CMS"
+    ADMIN_PORTAL = "ADMIN_PORTAL"
+    MULTI_TENANT = "MULTI_TENANT"
     HYBRID = "HYBRID"
     UNKNOWN = "UNKNOWN"
 
@@ -396,6 +402,19 @@ PROFILES: dict[str, ScanProfile] = {
         cve_correlation=False,
         command_timeout=180,
     ),
+    "full": ScanProfile(
+        name="full",
+        description="Complete assessment: native engines + configured external engines + browser/application testing",
+        port_spec="full",
+        include_udp=True,
+        udp_port_count=100,
+        enabled_modules=["network", "web_probe", "web_discovery", "service_enum"],
+        expensive_checks=True,
+        cve_correlation=True,
+        wordlist_strategy="medium",
+        command_timeout=900,
+        global_timeout=3600,
+    ),
 }
 
 
@@ -553,6 +572,12 @@ class WorkspaceState(BaseModel):
     execution_mode: str = "LOCAL"
     false_negative_audit: dict[str, Any] = Field(default_factory=dict)
     quality_metrics: dict[str, Any] = Field(default_factory=dict)
+    # --- External vulnerability engine fabric ---
+    # provider_id -> run record {status, provider_scan_id, results, reason, ...}
+    # CONFIGURED vs AVAILABLE vs EXECUTED is preserved here, not collapsed.
+    external_engine_runs: dict[str, Any] = Field(default_factory=dict)
+    correlated_vulnerabilities: list[dict[str, Any]] = Field(default_factory=list)
+    engine_operator_exclusions: list[str] = Field(default_factory=list)
 
     def get_policy(self) -> Any:
         from horcrux.core.policy import EngagementPolicy

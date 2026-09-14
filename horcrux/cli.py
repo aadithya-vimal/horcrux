@@ -40,13 +40,17 @@ def root(
 @app.command()
 def scan(
     target: str = typer.Argument(..., help="Target IP, hostname, or CIDR range"),
-    profile: str = typer.Option("standard", "--profile", "-p", help="Scan profile: quick, standard, deep, network, web, service, intel, local"),
+    profile: str = typer.Option("standard", "--profile", "-p", help="Scan profile: quick, standard, deep, full, network, web, service, intel, local"),
     deep: bool = typer.Option(False, "--deep", help="Run deep port scanning and enumeration"),
     verify: bool = typer.Option(False, "--verify", help="Execute non-destructive verification checks"),
+    engines: str = typer.Option("", "--engines", help="Comma-separated vulnerability engines to use (tenable,qualys,rapid7,greenbone,msdefender)"),
+    skip_engines: bool = typer.Option(False, "--skip-engines", help="Skip all external vulnerability engines (native only)"),
+    engine_mode: str = typer.Option("best", "--engine-mode", help="Engine strategy: best (dedupe redundant) or all"),
 ):
     """Run full automated attack surface reconnaissance against a target."""
     console = Console()
     selected_profile = "deep" if deep else profile
+    engine_list = [e.strip() for e in engines.split(",") if e.strip()] or None
     console.print(f"\n[bold bright_magenta]⚡ SCANNING:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]  [dim]profile={selected_profile}[/dim]\n")
     ws = Workspace(target)
     Orchestrator(
@@ -54,9 +58,29 @@ def scan(
         ws,
         console,
         profile=selected_profile,
+        engines=engine_list,
+        skip_engines=skip_engines,
+        engine_mode=engine_mode,
     ).scan(deep=deep, verify=verify)
     from horcrux.ui.ascii import fanfare
     fanfare(console, f"TARGET SYNTHESIS COMPLETE: {target}")
+
+
+@app.command()
+def engines(
+    action: str = typer.Argument("status", help="status, test, or info"),
+    provider: str = typer.Argument("", help="Engine id: tenable, qualys, rapid7, greenbone, msdefender"),
+):
+    """Inspect external vulnerability engine readiness, health, and capabilities."""
+    app_inst = ConsoleApp()
+    if action.lower() == "status":
+        app_inst.engines_status()
+    elif action.lower() == "test":
+        app_inst.engines_test(provider)
+    elif action.lower() == "info":
+        app_inst.engines_info(provider)
+    else:
+        Console().print(f"[bold red]Unknown engines action '{action}'.[/bold red] Use status, test, or info.")
 
 
 @app.command()
@@ -245,7 +269,7 @@ def assess(
 KNOWN_COMMANDS = {
     "scan", "assess", "doctor", "tools", "console", "gallery", "artifacts",
     "settings", "report", "ask", "ai", "status", "replay", "benchmark",
-    "--help", "-h", "--version", "-v",
+    "engines", "--help", "-h", "--version", "-v",
 }
 
 

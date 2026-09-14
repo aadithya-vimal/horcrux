@@ -364,13 +364,53 @@ def _assess_hypothesis_outcome(state: Any, investigation: Investigation,
             _set_hyp(HypothesisStatus.REFUTED)
             return {"state": InvestigationState.REFUTED,
                     "summary": "Identity comparison shows no access divergence"}
+    # param_fuzz signal.
+    if result.capability_id == "param_fuzz":
+        interesting = data.get("interesting", [])
+        if interesting and hyp is not None and getattr(hyp, "hypothesis_class", None) and hyp.hypothesis_class.value in ("injection", "sql_injection", "ssrf", "parameter_tampering"):
+            _set_hyp(HypothesisStatus.SUPPORTED)
+            fid = _record_injection_finding(state, investigation, data)
+            return {"state": InvestigationState.SUPPORTED,
+                    "summary": f"Triage identified sensitive parameter(s): {', '.join(interesting[:3])}",
+                    "finding_id": fid}
+
+    # graphql_probe signal.
+    if result.capability_id == "graphql_probe":
+        if data.get("introspection"):
+            _set_hyp(HypothesisStatus.SUPPORTED)
+            fid = _record_graphql_finding(state, investigation, data)
+            return {"state": InvestigationState.SUPPORTED,
+                    "summary": "GraphQL schema introspection enabled",
+                    "finding_id": fid}
+
+    # jwt_analyze signal.
+    if result.capability_id == "jwt_analyze":
+        if data.get("none_alg"):
+            _set_hyp(HypothesisStatus.SUPPORTED)
+            fid = _record_jwt_finding(state, investigation, data)
+            return {"state": InvestigationState.SUPPORTED,
+                    "summary": "JWT insecure algorithm 'none' accepted or configured",
+                    "finding_id": fid}
+
+    # endpoint_validate signal.
+    if result.capability_id == "endpoint_validate":
+        path = str(data.get("path") or data.get("endpoint") or "")
+        if any(k in path.lower() for k in ("admin", "actuator", ".env", "swagger", "internal")):
+            _set_hyp(HypothesisStatus.SUPPORTED)
+            fid = _record_endpoint_finding(state, investigation, data)
+            return {"state": InvestigationState.SUPPORTED,
+                    "summary": f"Sensitive endpoint verified accessible: {path}",
+                    "finding_id": fid}
+
     # http_probe gap signal.
     if result.capability_id == "http_probe":
         if data.get("status_code") == 200 and data.get("object_bearing") \
                 and data.get("identity") == "anonymous":
             _set_hyp(HypothesisStatus.SUPPORTED)
+            fid = _record_anonymous_access_finding(state, investigation, data)
             return {"state": InvestigationState.SUPPORTED,
-                    "summary": "Object endpoint anonymously reachable; authorization review required"}
+                    "summary": "Object endpoint anonymously reachable; authorization review required",
+                    "finding_id": fid}
     if ingested == 0 and not result.evidence:
         return {"state": InvestigationState.INSUFFICIENT_EVIDENCE,
                 "summary": "Capability executed but returned no useful evidence"}
@@ -423,4 +463,98 @@ def _record_authz_finding(state: Any, investigation: Investigation, data: dict) 
                       "Compare response for unauthorized access"],
         why_it_matters="Object access may not be bound to authenticated identity",
         recommended_next_action="Manual validation with distinct user accounts"))
+    return fid
+
+
+def _record_injection_finding(state: Any, investigation: Investigation, data: dict) -> str:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+    fid = f"inject-{investigation.id[:8]}-{secrets.token_hex(3)}"
+    if any(f.id == fid for f in state.findings):
+        return fid
+    params = data.get("interesting", [])
+    ep = data.get("endpoint", "/")
+    state.findings.append(Finding(
+        id=fid, title=f"Untrusted parameter input candidate ({', '.join(params[:2])})",
+        category="injection", severity=Severity.medium, confidence=0.7,
+        status=FindingStatus.suspected, validation_state=ValidationState.likely,
+        target=state.target, affected_asset=ep,
+        evidence=[f"param_fuzz:{ep}:params={','.join(params)}"],
+        reproduction=[f"Probe parameter(s) {params} on {ep}",
+                      "Check for SQL/command/template reflection or execution"],
+        why_it_matters="Parameters may be directly interpolated into backend queries or commands",
+        recommended_next_action="Perform automated or manual fuzzing within authorized scope"))
+    return fid
+
+
+def _record_graphql_finding(state: Any, investigation: Investigation, data: dict) -> str:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+    fid = f"gql-intro-{investigation.id[:8]}-{secrets.token_hex(3)}"
+    if any(f.id == fid for f in state.findings):
+        return fid
+    path = data.get("path", "/graphql")
+    state.findings.append(Finding(
+        id=fid, title="GraphQL Schema Introspection Enabled",
+        category="api_security", severity=Severity.low, confidence=0.85,
+        status=FindingStatus.confirmed, validation_state=ValidationState.verified,
+        target=state.target, affected_asset=path,
+        evidence=[f"graphql_probe:{path}:introspection_enabled"],
+        reproduction=[f"Send introspection query to {path}",
+                      "Confirm full schema definition returned"],
+        why_it_matters="Attackers can map the entire backend data graph and all available queries",
+        recommended_next_action="Disable GraphQL introspection in production environments"))
+    return fid
+
+
+def _record_jwt_finding(state: Any, investigation: Investigation, data: dict) -> str:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+    fid = f"jwt-none-{investigation.id[:8]}-{secrets.token_hex(3)}"
+    if any(f.id == fid for f in state.findings):
+        return fid
+    state.findings.append(Finding(
+        id=fid, title="Insecure JWT Algorithm ('none') Configuration",
+        category="authentication", severity=Severity.high, confidence=0.8,
+        status=FindingStatus.suspected, validation_state=ValidationState.likely,
+        target=state.target, affected_asset="JWT Authentication",
+        evidence=["jwt_analyze:alg=none"],
+        reproduction=["Forge token with alg 'none' and arbitrary subject claim",
+                      "Present token to authenticated endpoints"],
+        why_it_matters="May permit authentication bypass through unsigned tokens",
+        recommended_next_action="Enforce strict signature verification with asymmetric algorithms"))
+    return fid
+
+
+def _record_endpoint_finding(state: Any, investigation: Investigation, data: dict) -> str:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+    fid = f"endpoint-disc-{investigation.id[:8]}-{secrets.token_hex(3)}"
+    if any(f.id == fid for f in state.findings):
+        return fid
+    path = str(data.get("path") or data.get("endpoint") or "/")
+    state.findings.append(Finding(
+        id=fid, title=f"Exposed Sensitive Endpoint ({path})",
+        category="configuration", severity=Severity.medium, confidence=0.8,
+        status=FindingStatus.suspected, validation_state=ValidationState.likely,
+        target=state.target, affected_asset=path,
+        evidence=[f"endpoint_validate:{path}:accessible"],
+        reproduction=[f"Request {path}", "Verify access control or configuration disclosure"],
+        why_it_matters="Sensitive administrative or configuration interfaces exposed to unauthorized clients",
+        recommended_next_action="Restrict endpoint access or remove sensitive file from public root"))
+    return fid
+
+
+def _record_anonymous_access_finding(state: Any, investigation: Investigation, data: dict) -> str:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+    fid = f"anon-obj-{investigation.id[:8]}-{secrets.token_hex(3)}"
+    if any(f.id == fid for f in state.findings):
+        return fid
+    ep = str(data.get("endpoint") or data.get("path") or "/")
+    state.findings.append(Finding(
+        id=fid, title="Object Endpoint Anonymously Reachable",
+        category="authorization", severity=Severity.medium, confidence=0.7,
+        status=FindingStatus.suspected, validation_state=ValidationState.likely,
+        target=state.target, affected_asset=ep,
+        evidence=[f"http_probe:{ep}:status=200:anon=True"],
+        reproduction=[f"Send unauthenticated GET request to {ep}",
+                      "Confirm successful 200 response with object payload"],
+        why_it_matters="Object data may be accessible without proper authentication/authorization",
+        recommended_next_action="Require authentication and verify object ownership"))
     return fid

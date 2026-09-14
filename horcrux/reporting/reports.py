@@ -156,6 +156,50 @@ def markdown(ws, output: Path | None = None) -> Path:
         lines.append("- *Coverage unavailable.*")
     lines += [""]
 
+    confirmed = [f for f in state.findings if f.validation_state == ValidationState.confirmed]
+    likely = [f for f in state.findings if f.validation_state == ValidationState.likely]
+    potential = [f for f in state.findings if f.validation_state == ValidationState.potential]
+
+    # 8b. Vulnerability engine coverage (external fabric — spec §32).
+    lines += ["## Vulnerability Engine Coverage", ""]
+    try:
+        runs = dict(getattr(state, "external_engine_runs", {}) or {})
+        cov = state.get_security_coverage()
+        eng_verdict = cov.engine_coverage_verdict() if hasattr(cov, "engine_coverage_verdict") else "NOT_ASSESSED"
+        lines.append("- **Native HORCRUX**: Executed")
+        for pid in ("tenable", "qualys", "rapid7", "greenbone", "msdefender"):
+            run = runs.get(pid)
+            if run and str(run.get("status", "")).upper() == "COMPLETE":
+                detail = f"Executed ({run.get('results', '?')} observations)"
+                if run.get("imported"):
+                    detail = "Imported (IMPORTED_RESULT — not executed by HORCRUX)"
+                lines.append(f"- **{pid.title()}**: {detail}")
+            elif run and str(run.get("status", "")).upper() == "OPERATOR_EXCLUDED":
+                lines.append(f"- **{pid.title()}**: Operator excluded")
+            elif run:
+                lines.append(f"- **{pid.title()}**: {str(run.get('status', 'FAILED')).title()} — "
+                             f"{str(run.get('reason', ''))[:100]}")
+            else:
+                lines.append(f"- **{pid.title()}**: Not configured")
+        lines.append("")
+        lines.append(f"- **External vulnerability coverage**: {eng_verdict}")
+        lines.append("- *Results from unavailable engines are not represented as negative evidence.*")
+        missing = [pid for pid in ("tenable", "qualys", "rapid7", "greenbone")
+                   if pid not in runs or str(runs[pid].get("status", "")).upper() != "COMPLETE"]
+        correlated = list(getattr(state, "correlated_vulnerabilities", []) or [])
+        if correlated:
+            lines.append(f"- **Deduplicated external entities**: {len(correlated)} "
+                         f"(sources: {', '.join(sorted({s for e in correlated for s in e.get('sources', [])})) or 'n/a'})")
+        if missing and not (confirmed or likely):
+            lines.append("")
+            lines.append("> **Assessment limited: external vulnerability intelligence "
+                         f"{', '.join(missing)} did not contribute results.**")
+            lines.append("> Potential vulnerabilities identifiable by this unavailable assessment "
+                         "source may not be represented in this report.")
+    except Exception:
+        lines.append("- *Engine coverage unavailable.*")
+    lines += [""]
+
     # 9. Investigations performed
     lines += ["## 9. Investigations Performed", ""]
     invs = state.get_investigations()
@@ -357,6 +401,14 @@ def markdown(ws, output: Path | None = None) -> Path:
         lines.append(f"- **High-value surfaces**: {comp['high_value_surfaces']}")
         lines.append(f"- **Open hypotheses**: {comp['open_hypotheses']}")
         lines.append(f"- **Pending high-value investigations**: {comp['pending_high_investigations']}")
+        if comp.get("external_engine_verdict") and comp["external_engine_verdict"] != "NOT_ASSESSED":
+            lines.append(f"- **External engine verdict**: `{comp['external_engine_verdict']}` "
+                         f"(executed: {', '.join(comp.get('external_engines_executed', [])) or 'none'}; "
+                         f"failed: {', '.join(comp.get('external_engines_failed', [])) or 'none'}; "
+                         f"not configured: {', '.join(comp.get('external_engines_not_configured', [])) or 'none'})")
+        if comp.get("external_engine_verdict") in ("LIMITED", "PARTIAL"):
+            lines.append("- **Assessment status**: `LIMITED` — external vulnerability intelligence incomplete. "
+                         "Potential vulnerabilities identifiable by unavailable engines may not be represented.")
         if not (confirmed or likely):
             lines.append("")
             lines.append(_clean_narrative(state, comp))
@@ -381,7 +433,12 @@ def _deterministic_summary(state, app, summary) -> str:
 
 
 def _clean_narrative(state, comp: dict) -> str:
-    """A clean result explains coverage — never just 'no vulns found' (P29)."""
+    """A clean result explains coverage — never just 'no vulns found' (P29).
+
+    Client-grade rule: 'No vulnerabilities found' is only valid when
+    completeness criteria are satisfied. Otherwise qualify scope/coverage
+    and name the unavailable engines explicitly.
+    """
     try:
         coverage = state.get_security_coverage()
         coverage.ensure_domains()
@@ -393,7 +450,10 @@ def _clean_narrative(state, comp: dict) -> str:
                    if dc.status.value == "NOT_REVIEWED"]
     except Exception:
         reviewed, blocked, unknown = [], [], []
-    parts = ["> **No confirmed vulnerabilities.** This means: sufficient security "
+    missing_engines = list(comp.get("external_engines_not_configured", []) or [])
+    failed_engines = list(comp.get("external_engines_failed", []) or [])
+    parts = ["> **No confirmed vulnerabilities identified within the assessed scope "
+             "and completed coverage.** This means: sufficient security "
              "properties were investigated without producing validated findings — "
              "not that scanning was skipped."]
     parts.append(f"> Investigated properties: {', '.join(reviewed) or 'none yet'}.")
@@ -401,6 +461,11 @@ def _clean_narrative(state, comp: dict) -> str:
         parts.append(f"> Remaining unknown: {', '.join(unknown)}.")
     if blocked:
         parts.append(f"> Blocked: {', '.join(blocked)} (see §15).")
+    if missing_engines or failed_engines:
+        absent = ", ".join(missing_engines + [f"{e} (failed)" for e in failed_engines])
+        parts.append(f"> Assessment limited: external vulnerability intelligence ({absent}) "
+                     "did not contribute results. Potential vulnerabilities identifiable by "
+                     "this unavailable assessment source may not be represented in this report.")
     parts.append(f"> Completion criteria satisfied: `{comp['sufficient']}` "
                  f"({comp['high_value_surfaces']} high-value surfaces, "
                  f"{comp['pending_high_investigations']} pending high-value investigations).")

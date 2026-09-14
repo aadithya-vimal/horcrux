@@ -25,6 +25,8 @@ ROLE_PRIVILEGE = {"anonymous": 0, "user": 1, "privileged": 2, "admin": 3}
 class TestIdentity:
     """Researcher-configured test account. Secrets resolved at runtime."""
 
+    __test__ = False
+
     label: str
     role: str = "user"
     login_path: str = "/login"

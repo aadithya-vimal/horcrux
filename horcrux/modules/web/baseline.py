@@ -73,12 +73,18 @@ def detect_baseline(
     # Check 1: Normal 404 (All probes return 404)
     if all(s == 404 for s in statuses):
         # Determine web app type from root
-        app_type = WebApplicationType.STATIC_SITE
+        app_type = WebApplicationType.UNKNOWN
         if root_fp:
             if root_fp.is_spa_fallback or "api" in root_fp.content_type:
                 app_type = WebApplicationType.API if "json" in root_fp.content_type else WebApplicationType.SPA
             elif root_fp.is_html and ("form" in root_fp.structural_signature or "input" in root_fp.structural_signature):
                 app_type = WebApplicationType.TRADITIONAL_WEB_APP
+            elif root_fp.is_html and any(kw in getattr(root_fp, "raw_body", "").lower() or kw in getattr(root_fp, "structural_signature", "").lower() for kw in ("<app-root", "ng-app", "react", "id=\"root\"", "id=\"app\"", "main.js", "runtime.js", "bundle.js", "webpack")):
+                app_type = WebApplicationType.SPA
+            elif root_fp.is_html:
+                app_type = WebApplicationType.TRADITIONAL_WEB_APP
+            else:
+                app_type = WebApplicationType.STATIC_SITE
         return BaselineClassification.NORMAL_404, probe_fps, app_type
 
     # Check 2: Redirect Catch-All (All probes return 301/302/307/308)

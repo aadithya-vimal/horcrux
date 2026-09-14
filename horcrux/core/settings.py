@@ -95,6 +95,77 @@ PROVIDER_ALIASES: dict[str, str] = {
     "google_ai": "google",
 }
 
+VULN_ENGINE_IDS: tuple[str, ...] = ("tenable", "qualys", "rapid7", "greenbone", "msdefender")
+
+VULN_ENGINE_LABELS: dict[str, str] = {
+    "tenable": "Tenable One Vulnerability Management",
+    "qualys": "Qualys VMDR",
+    "rapid7": "Rapid7 InsightVM",
+    "greenbone": "Greenbone / OpenVAS",
+    "msdefender": "Microsoft Defender Vulnerability Management",
+}
+
+VULN_ENGINE_ALIASES: dict[str, str] = {
+    "nessus": "tenable",
+    "tenable_vm": "tenable",
+    "tenable_one": "tenable",
+    "insightvm": "rapid7",
+    "nexpose": "rapid7",
+    "openvas": "greenbone",
+    "gvm": "greenbone",
+    "defender": "msdefender",
+    "microsoft": "msdefender",
+}
+
+VULN_CREDENTIAL_FIELDS: dict[str, list[str]] = {
+    "tenable": ["access_key", "secret_key"],
+    "qualys": ["username", "password"],
+    "rapid7": ["username", "password", "api_key"],
+    "greenbone": ["username", "password"],
+    "msdefender": ["tenant_id", "client_id", "client_secret", "bearer_token"],
+}
+
+VULN_ENV_VARS: dict[str, dict[str, list[str]]] = {
+    "tenable": {
+        "access_key": ["TENABLE_ACCESS_KEY", "TENABLE_ACCESS_KEY_ID"],
+        "secret_key": ["TENABLE_SECRET_KEY"],
+    },
+    "qualys": {
+        "username": ["QUALYS_USERNAME", "QUALYS_USER"],
+        "password": ["QUALYS_PASSWORD", "QUALYS_PASSWD"],
+    },
+    "rapid7": {
+        "username": ["RAPID7_USERNAME", "INSIGHTVM_USERNAME"],
+        "password": ["RAPID7_PASSWORD", "INSIGHTVM_PASSWORD"],
+        "api_key": ["RAPID7_API_KEY", "INSIGHTVM_API_KEY"],
+    },
+    "greenbone": {
+        "username": ["GREENBONE_USERNAME", "GVM_USERNAME", "OPENVAS_USERNAME"],
+        "password": ["GREENBONE_PASSWORD", "GVM_PASSWORD", "OPENVAS_PASSWORD"],
+    },
+    "msdefender": {
+        "tenant_id": ["AZURE_TENANT_ID", "MSDEFENDER_TENANT_ID"],
+        "client_id": ["AZURE_CLIENT_ID", "MSDEFENDER_CLIENT_ID"],
+        "client_secret": ["AZURE_CLIENT_SECRET", "MSDEFENDER_CLIENT_SECRET"],
+        "bearer_token": ["MSDEFENDER_TOKEN"],
+    },
+}
+
+VULN_DEFAULT_ENDPOINTS: dict[str, str] = {
+    "tenable": "https://cloud.tenable.com",
+    "qualys": "https://qualysapi.qualys.com",
+    "rapid7": "https://console:3780",
+    "greenbone": "https://127.0.0.1:9390",
+    "msdefender": "https://api.security.microsoft.com",
+}
+
+
+def normalize_vuln_engine_id(name: str) -> str:
+    if not name:
+        return ""
+    n = name.strip().lower().replace("-", "_")
+    return VULN_ENGINE_ALIASES.get(n, n)
+
 
 def normalize_provider_name(name: str) -> str:
     """Normalize user-supplied provider names and aliases."""
@@ -128,6 +199,18 @@ class ProviderConfig:
 
 
 @dataclass
+class VulnEngineConfig:
+    """Configuration for one external vulnerability engine (no secrets here)."""
+
+    provider_id: str
+    enabled: bool = True
+    endpoint: str = ""
+    last_test: Optional[str] = None
+    last_status: Optional[str] = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class HorcruxSettings:
     enabled: bool = True
     default_provider: str = "groq"
@@ -135,6 +218,8 @@ class HorcruxSettings:
     fallback_sequence: list[str] = field(default_factory=lambda: ["google", "openai"])
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     _keys_file_fallback: dict[str, str] = field(default_factory=dict)
+    vulnerability_engines: dict[str, VulnEngineConfig] = field(default_factory=dict)
+    _vuln_keys_file_fallback: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def default(cls) -> "HorcruxSettings":
@@ -145,17 +230,24 @@ class HorcruxSettings:
             )
             for name in ("groq", "openai", "anthropic", "google")
         }
+        vuln_engines = {
+            pid: VulnEngineConfig(provider_id=pid, enabled=True,
+                                  endpoint=VULN_DEFAULT_ENDPOINTS.get(pid, ""))
+            for pid in VULN_ENGINE_IDS
+        }
         return cls(
             enabled=True,
             default_provider="groq",
             call_budget=50,
             fallback_sequence=["google", "openai"],
             providers=providers,
+            vulnerability_engines=vuln_engines,
         )
 
 
 class SettingsManager:
     SERVICE_NAME = "horcrux_ai_keys"
+    VULN_SERVICE_NAME = "horcrux_vuln_keys"
 
     def __init__(self, config_dir: Path | None = None, use_keyring: bool = True):
         self.config_dir = config_dir or get_config_dir()
@@ -164,6 +256,7 @@ class SettingsManager:
         self.usage_file = self.config_dir / "ai_usage.json"
         self.use_keyring = use_keyring
         self._runtime_overrides: dict[str, str] = {}
+        self._vuln_runtime_overrides: dict[str, dict[str, str]] = {}
         self.settings = self.load()
 
 
@@ -196,6 +289,26 @@ class SettingsManager:
             if default_prov not in ("groq", "openai", "anthropic", "google"):
                 default_prov = "groq"
 
+            vuln_engines: dict[str, VulnEngineConfig] = {}
+            for pid, v_data in (raw.get("vulnerability_engines", {}) or {}).items():
+                norm = normalize_vuln_engine_id(pid)
+                if not norm:
+                    continue
+                vuln_engines[norm] = VulnEngineConfig(
+                    provider_id=norm,
+                    enabled=v_data.get("enabled", True),
+                    endpoint=v_data.get("endpoint", VULN_DEFAULT_ENDPOINTS.get(norm, "")),
+                    last_test=v_data.get("last_test"),
+                    last_status=v_data.get("last_status"),
+                    extra={k: v for k, v in v_data.items()
+                           if k not in ("provider_id", "enabled", "endpoint", "last_test", "last_status")},
+                )
+            for pid in VULN_ENGINE_IDS:
+                if pid not in vuln_engines:
+                    vuln_engines[pid] = VulnEngineConfig(
+                        provider_id=pid, enabled=True,
+                        endpoint=VULN_DEFAULT_ENDPOINTS.get(pid, ""))
+
             return HorcruxSettings(
                 enabled=raw.get("enabled", True),
                 default_provider=default_prov,
@@ -203,6 +316,8 @@ class SettingsManager:
                 fallback_sequence=[normalize_provider_name(s) for s in raw.get("fallback_sequence", ["google", "openai"])],
                 providers=providers,
                 _keys_file_fallback=raw.get("_keys_fallback", {}),
+                vulnerability_engines=vuln_engines,
+                _vuln_keys_file_fallback=raw.get("_vuln_keys_fallback", {}),
             )
         except Exception:
             return HorcruxSettings.default()
@@ -221,6 +336,13 @@ class SettingsManager:
                 name: asdict(p) for name, p in self.settings.providers.items()
             },
             "_keys_fallback": self.settings._keys_file_fallback,
+            "vulnerability_engines": {
+                pid: {"provider_id": cfg.provider_id, "enabled": cfg.enabled,
+                      "endpoint": cfg.endpoint, "last_test": cfg.last_test,
+                      "last_status": cfg.last_status, **cfg.extra}
+                for pid, cfg in self.settings.vulnerability_engines.items()
+            },
+            "_vuln_keys_fallback": self.settings._vuln_keys_file_fallback,
         }
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -432,3 +554,167 @@ class SettingsManager:
     def set_enabled(self, enabled: bool) -> None:
         self.settings.enabled = enabled
         self.save()
+
+    # ── Vulnerability engines (settings → VULNERABILITY ENGINES) ──────────
+    def _vuln_cfg(self, provider: str) -> VulnEngineConfig:
+        pid = normalize_vuln_engine_id(provider)
+        if pid not in self.settings.vulnerability_engines:
+            self.settings.vulnerability_engines[pid] = VulnEngineConfig(
+                provider_id=pid, endpoint=VULN_DEFAULT_ENDPOINTS.get(pid, ""))
+        return self.settings.vulnerability_engines[pid]
+
+    def get_vuln_engine_config(self, provider: str) -> dict[str, Any]:
+        """Config dict for engine adapters (endpoint/enabled/extra, no secrets)."""
+        cfg = self._vuln_cfg(provider)
+        out: dict[str, Any] = {"endpoint": cfg.endpoint, "enabled": cfg.enabled,
+                               "last_test": cfg.last_test, "last_status": cfg.last_status}
+        out.update(cfg.extra or {})
+        return out
+
+    def set_vuln_engine_fields(self, provider: str, fields: dict[str, Any]) -> None:
+        cfg = self._vuln_cfg(provider)
+        for key, value in (fields or {}).items():
+            if key == "endpoint":
+                cfg.endpoint = str(value)
+            elif key == "enabled":
+                cfg.enabled = bool(value) if not isinstance(value, str) else value.lower() in ("1", "true", "yes")
+            elif key in ("last_test", "last_status"):
+                setattr(cfg, key, value)
+            else:
+                cfg.extra[key] = value
+        self.save()
+
+    def set_vuln_enabled(self, provider: str, enabled: bool) -> None:
+        self.set_vuln_engine_fields(provider, {"enabled": enabled})
+
+    def set_vuln_endpoint(self, provider: str, endpoint: str) -> None:
+        self.set_vuln_engine_fields(provider, {"endpoint": endpoint.strip()})
+
+    def set_vuln_validation(self, provider: str, status: str) -> None:
+        import datetime
+        self.set_vuln_engine_fields(provider, {
+            "last_test": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "last_status": status,
+        })
+
+    def set_vuln_runtime_credentials(self, provider: str, fields: dict[str, str]) -> None:
+        pid = normalize_vuln_engine_id(provider)
+        cleaned = {k: v.strip() for k, v in (fields or {}).items() if v and str(v).strip()}
+        if cleaned:
+            self._vuln_runtime_overrides[pid] = cleaned
+        else:
+            self._vuln_runtime_overrides.pop(pid, None)
+
+    def get_vuln_credentials(self, provider: str) -> dict[str, str]:
+        """Resolve engine credentials: runtime > keyring/file persisted > environment."""
+        import json as _json
+
+        pid = normalize_vuln_engine_id(provider)
+        fields = VULN_CREDENTIAL_FIELDS.get(pid, ["api_key"])
+        resolved: dict[str, str] = {}
+
+        persisted: dict[str, str] = {}
+        if self.use_keyring and keyring is not None:
+            try:
+                stored = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
+                if stored:
+                    try:
+                        persisted = {k: str(v) for k, v in _json.loads(stored).items()}
+                    except Exception:
+                        persisted = {}
+            except Exception:
+                pass
+        if not persisted:
+            fallback = self.settings._vuln_keys_file_fallback.get(pid, {})
+            if isinstance(fallback, dict):
+                persisted = {k: str(v) for k, v in fallback.items()}
+
+        env_map = VULN_ENV_VARS.get(pid, {})
+        for fname in fields:
+            # 1. runtime override
+            runtime = self._vuln_runtime_overrides.get(pid, {}).get(fname, "")
+            if runtime and runtime.strip():
+                resolved[fname] = runtime.strip()
+                continue
+            # 2. persisted
+            if persisted.get(fname, "").strip():
+                resolved[fname] = persisted[fname].strip()
+                continue
+            # 3. environment
+            for env_var in env_map.get(fname, []):
+                val = os.environ.get(env_var, "")
+                if val and val.strip():
+                    resolved[fname] = val.strip()
+                    break
+        return resolved
+
+    def get_vuln_credential_source(self, provider: str, fname: str) -> str:
+        pid = normalize_vuln_engine_id(provider)
+        if self._vuln_runtime_overrides.get(pid, {}).get(fname):
+            return "runtime"
+        if self.use_keyring and keyring is not None:
+            try:
+                import json as _json
+                stored = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
+                if stored and _json.loads(stored).get(fname):
+                    return "persisted"
+            except Exception:
+                pass
+        if self.settings._vuln_keys_file_fallback.get(pid, {}).get(fname):
+            return "persisted"
+        env_map = VULN_ENV_VARS.get(pid, {}).get(fname, [])
+        for env_var in env_map:
+            if os.environ.get(env_var):
+                return f"environment (${env_var})"
+        return "none"
+
+    def is_vuln_configured(self, provider: str) -> bool:
+        pid = normalize_vuln_engine_id(provider)
+        creds = self.get_vuln_credentials(pid)
+        if pid == "msdefender":
+            return bool(creds.get("bearer_token") or (
+                creds.get("tenant_id") and creds.get("client_id") and creds.get("client_secret")))
+        if pid == "rapid7":
+            return bool(creds.get("api_key") or (creds.get("username") and creds.get("password")))
+        fields = VULN_CREDENTIAL_FIELDS.get(pid, [])
+        required = [f for f in fields if f != "bearer_token"]
+        return all(creds.get(f) for f in required)
+
+    def set_vuln_credentials(self, provider: str, fields: dict[str, str]) -> None:
+        import json as _json
+
+        pid = normalize_vuln_engine_id(provider)
+        cleaned = {k: str(v).strip() for k, v in (fields or {}).items() if str(v or "").strip()}
+        if not cleaned:
+            raise ValueError(f"No credential fields supplied for engine '{pid}'.")
+        stored_in_keyring = False
+        if self.use_keyring and keyring is not None:
+            try:
+                keyring.set_password(self.VULN_SERVICE_NAME, f"vuln:{pid}", _json.dumps(cleaned))
+                stored_in_keyring = True
+            except Exception:
+                stored_in_keyring = False
+        if not stored_in_keyring:
+            self.settings._vuln_keys_file_fallback[pid] = cleaned
+        else:
+            self.settings._vuln_keys_file_fallback.pop(pid, None)
+        self.save()
+
+    def remove_vuln_config(self, provider: str) -> None:
+        pid = normalize_vuln_engine_id(provider)
+        if self.use_keyring and keyring is not None:
+            try:
+                keyring.delete_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
+            except Exception:
+                pass
+        self.settings._vuln_keys_file_fallback.pop(pid, None)
+        self._vuln_runtime_overrides.pop(pid, None)
+        if pid in self.settings.vulnerability_engines:
+            cfg = self.settings.vulnerability_engines[pid]
+            cfg.last_status = None
+            cfg.last_test = None
+        self.save()
+
+    def masked_vuln_credentials(self, provider: str) -> dict[str, str]:
+        creds = self.get_vuln_credentials(provider)
+        return {k: (mask_key(v) if v else "NOT CONFIGURED") for k, v in creds.items()}

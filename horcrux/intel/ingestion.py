@@ -20,6 +20,7 @@ from horcrux.intel.application_model import (
     SemanticService,
     SemanticTechnology,
     SemanticWebTarget,
+    SessionRecord,
     ObjectType,
     ObjectReference,
     Workflow,
@@ -32,10 +33,57 @@ if TYPE_CHECKING:
     from horcrux.models import WorkspaceState
 
 OBJECT_ID_PATTERNS = [
-    re.compile(r"/(\w+)/\{(\w+)\}", re.I),
-    re.compile(r"/(\w+)/:(\w+)", re.I),
-    re.compile(r"/rest/(\w+)/\{(\w+)\}", re.I),
+    re.compile(r"/([a-zA-Z_-]+)/\{([a-zA-Z0-9_-]+)\}", re.I),
+    re.compile(r"/([a-zA-Z_-]+)/:([a-zA-Z0-9_-]+)", re.I),
+    re.compile(r"/rest/([a-zA-Z_-]+)/\{([a-zA-Z0-9_-]+)\}", re.I),
+    re.compile(r"/(?:api/|rest/)?([a-zA-Z_-]+)/(\d+)(?:[/?#]|$)", re.I),
+    re.compile(r"/(?:api/|rest/)?([a-zA-Z_-]+)/([0-9a-fA-F-]{36})(?:[/?#]|$)", re.I),
+    re.compile(r"/(?:api/|rest/)?([a-zA-Z_-]+)/([0-9a-fA-F]{16,32})(?:[/?#]|$)", re.I),
+    re.compile(r"/track-order/(\d+)", re.I),
+    re.compile(r"/memories/(\d+)", re.I),
 ]
+
+
+def _singularize_resource_name(name: str) -> str:
+    n = name.strip().lower()
+    if n in ("users", "user"):
+        return "User"
+    if n in ("baskets", "basket"):
+        return "Basket"
+    if n in ("products", "product"):
+        return "Product"
+    if n in ("orders", "order", "track-order", "track_order"):
+        return "Order"
+    if n in ("feedbacks", "feedback"):
+        return "Feedback"
+    if n in ("addresses", "address"):
+        return "Address"
+    if n in ("wallets", "wallet"):
+        return "Wallet"
+    if n in ("memories", "memory"):
+        return "Memory"
+    if n in ("challenges", "challenge"):
+        return "Challenge"
+    if n in ("reviews", "review"):
+        return "Review"
+    if n in ("cards", "card"):
+        return "Card"
+    if n in ("items", "item"):
+        return "Item"
+    if n in ("accounts", "account"):
+        return "Account"
+    if n.endswith("ies") and len(n) > 3:
+        singular = n[:-3] + "y"
+    elif n.endswith("sses") and len(n) > 4:
+        singular = n[:-2]
+    elif n.endswith("ss"):
+        singular = n
+    elif n.endswith("s") and len(n) > 2:
+        singular = n[:-1]
+    else:
+        singular = n
+    return singular.replace("-", "_").capitalize()
+
 
 PRIVILEGED_PATH_KEYWORDS = {"admin", "management", "privileged", "roles", "system", "internal"}
 AUTH_PATH_KEYWORDS = {"login", "register", "signin", "signup", "auth", "oauth", "reset", "logout"}
@@ -60,6 +108,7 @@ def ingest_workspace_state(state: WorkspaceState) -> ApplicationModel:
     ingest_object_lifecycles(app)
     ingest_workflow_transitions(app)
     ingest_api_operations(app)
+    _update_application_classification(app, state)
 
     from datetime import datetime, timezone
     app.updated_at = datetime.now(timezone.utc)
@@ -234,14 +283,63 @@ def _infer_auth_type(path: str, state) -> str:
 def _ingest_identities(state: WorkspaceState, app: ApplicationModel) -> None:
     app.upsert_identity(SemanticIdentity(role=IdentityRole.ANONYMOUS, label="anonymous"))
     if state.credentials:
-        app.upsert_identity(SemanticIdentity(role=IdentityRole.USER, label="authenticated_user"))
+        for idx, cred in enumerate(state.credentials):
+            username = cred.username or f"user_{idx + 1}"
+            role_val = IdentityRole.ADMIN if "admin" in username.lower() or "admin" in (cred.kind or "").lower() else IdentityRole.USER
+            priv_level = 3 if role_val == IdentityRole.ADMIN else 1
+            sem_id = SemanticIdentity(
+                role=role_val,
+                label=username,
+                privilege_level=priv_level,
+                session_evidence=[f"credential:{username}"],
+                auth_mechanism="session",
+            )
+            app.upsert_identity(sem_id)
+            sess = SessionRecord(
+                identity_label=username,
+                role=role_val,
+                cookie_hashes=[f"hash:{username}"],
+                login_endpoint="/rest/user/login" if any("login" in e.path for e in app.endpoints) else "",
+                evidence_refs=[f"credential:{username}"],
+                provenance=["workspace_credentials"],
+            )
+            sess.ensure_id()
+            if not any(s.identity_label == username for s in app.sessions):
+                app.sessions.append(sess)
+
+    try:
+        cfg = {}
+        if hasattr(state, "get_engagement_config"):
+            eng_cfg = state.get_engagement_config()
+            cfg = eng_cfg.model_dump() if hasattr(eng_cfg, "model_dump") else {}
+        from horcrux.intel.sessions import load_test_identities, register_test_identity
+        for t_id in load_test_identities(cfg):
+            register_test_identity(app, t_id)
+            if t_id.has_credentials() or t_id.username:
+                sess = SessionRecord(
+                    identity_label=t_id.label,
+                    role=IdentityRole(t_id.role) if t_id.role in ("user", "admin") else IdentityRole.USER,
+                    cookie_hashes=[f"hash:{t_id.label}"],
+                    login_endpoint=t_id.login_path or "",
+                    evidence_refs=[f"test_identity:{t_id.label}"],
+                    provenance=["test_identities"],
+                )
+                sess.ensure_id()
+                if not any(s.identity_label == t_id.label for s in app.sessions):
+                    app.sessions.append(sess)
+    except Exception:
+        pass
+
     for ep in app.endpoints:
         if "admin" in ep.path.lower():
-            ep.observed_identities.append(IdentityRole.ADMIN.value)
+            if IdentityRole.ADMIN.value not in ep.observed_identities:
+                ep.observed_identities.append(IdentityRole.ADMIN.value)
         elif ep.authentication == "required":
-            ep.observed_identities.append(IdentityRole.USER.value)
+            if IdentityRole.USER.value not in ep.observed_identities:
+                ep.observed_identities.append(IdentityRole.USER.value)
         else:
-            ep.observed_identities.append(IdentityRole.ANONYMOUS.value)
+            if IdentityRole.ANONYMOUS.value not in ep.observed_identities:
+                ep.observed_identities.append(IdentityRole.ANONYMOUS.value)
 
 
 MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -277,12 +375,29 @@ def _enrich_endpoint_from_path(endpoint: SemanticEndpoint, path: str) -> None:
     for pattern in OBJECT_ID_PATTERNS:
         m = pattern.search(path)
         if m:
-            obj_name = m.group(1).rstrip("s").capitalize()
+            raw_resource = m.group(1)
+            obj_name = _singularize_resource_name(raw_resource)
             endpoint.object_type = obj_name
-            param = m.group(2)
-            if param not in endpoint.parameters:
-                endpoint.parameters.append(param)
+            raw_param = m.group(2)
+            if raw_param.isdigit() or len(raw_param) == 36 or len(raw_param) in (16, 24, 32):
+                param_name = f"{raw_resource.rstrip('s').lower()}_id"
+                if param_name not in endpoint.parameters:
+                    endpoint.parameters.append(param_name)
+                if "id" not in endpoint.parameters:
+                    endpoint.parameters.append("id")
+            else:
+                clean_param = raw_param.strip("{}:")
+                if clean_param not in endpoint.parameters:
+                    endpoint.parameters.append(clean_param)
             break
+
+    if not endpoint.object_type:
+        coll_match = re.match(r"^/(?:api|rest)/([a-zA-Z_-]+)(?:/|$)", path, re.I)
+        if coll_match:
+            cand = coll_match.group(1).lower()
+            if cand not in {"login", "logout", "search", "admin", "config", "health", "status", "version", "docs", "swagger", "openapi"}:
+                endpoint.object_type = _singularize_resource_name(cand)
+
     if any(k in path_lower for k in PRIVILEGED_PATH_KEYWORDS):
         endpoint.authentication = "required"
     if any(k in path_lower for k in AUTH_PATH_KEYWORDS):
@@ -309,7 +424,7 @@ def _infer_object_types(app: ApplicationModel) -> None:
             ref = ObjectReference(
                 object_type=ep.object_type,
                 endpoint_id=ep.id,
-                parameter=ep.parameters[0] if ep.parameters else "",
+                parameter=ep.parameters[0] if ep.parameters else "id",
                 evidence_refs=ep.evidence_refs,
             )
             ref.ensure_id()
@@ -318,26 +433,38 @@ def _infer_object_types(app: ApplicationModel) -> None:
 
 
 def _infer_workflows(app: ApplicationModel) -> None:
-    auth_eps = [e for e in app.endpoints if any(k in e.path.lower() for k in AUTH_PATH_KEYWORDS)]
-    if not auth_eps:
-        return
-    steps: list[WorkflowStep] = []
-    for ep in sorted(auth_eps, key=lambda e: e.path):
-        step_name = ep.path.split("/")[-1] or ep.path
-        steps.append(
-            WorkflowStep(
-                name=step_name,
-                method=ep.method,
-                path=ep.path,
-                identity="anonymous",
-                evidence_refs=ep.evidence_refs,
-            )
-        )
-    if len(steps) >= 2:
-        wf = Workflow(name="Authentication Flow", steps=steps)
-        wf.ensure_id()
-        if not any(w.name == wf.name for w in app.workflows):
-            app.workflows.append(wf)
+    workflow_specs = [
+        ("Authentication Flow", ["login", "signin", "logout", "whoami", "profile", "authentication-details", "token"]),
+        ("Registration Flow", ["register", "signup", "security-question", "captcha"]),
+        ("Checkout Flow", ["basket", "cart", "address", "payment", "delivery", "checkout", "quantity"]),
+        ("Order Flow", ["order", "track-order", "invoice", "history"]),
+        ("File Upload Flow", ["upload", "file", "avatar", "document", "attachment"]),
+        ("Admin Flow", ["admin", "users", "roles", "system", "metrics", "audit"]),
+        ("Feedback Flow", ["feedback", "contact", "support", "complaint", "review"]),
+    ]
+
+    for wf_name, keywords in workflow_specs:
+        matching_eps = [
+            e for e in app.endpoints
+            if any(k in e.path.lower() for k in keywords)
+        ]
+        if len(matching_eps) >= 2 or (matching_eps and any(e.is_mutation for e in matching_eps)):
+            steps: list[WorkflowStep] = []
+            for ep in sorted(matching_eps, key=lambda e: e.path):
+                step_name = ep.path.split("/")[-1] or ep.path
+                steps.append(
+                    WorkflowStep(
+                        name=step_name,
+                        method=ep.method,
+                        path=ep.path,
+                        identity=(ep.observed_identities or ["anonymous"])[0],
+                        evidence_refs=ep.evidence_refs,
+                    )
+                )
+            wf = Workflow(name=wf_name, steps=steps)
+            wf.ensure_id()
+            if not any(w.name == wf.name for w in app.workflows):
+                app.workflows.append(wf)
 
 
 def ingest_javascript_routes(
@@ -1197,11 +1324,26 @@ def correlate_discovery_sources(
     }
 
 
-def _update_application_classification(app: ApplicationModel) -> None:
+def _update_application_classification(app: ApplicationModel, state: WorkspaceState | None = None) -> None:
     app_type, confidence = classify_application_type(app)
-    if confidence > app.profile.confidence or app.profile.app_type in ("unknown", "UNKNOWN", ""):
+    if confidence > app.profile.confidence or app.profile.app_type in ("unknown", "UNKNOWN", "", "STATIC_SITE"):
         app.profile.app_type = app_type
         app.profile.confidence = confidence
         label = f"classification:{app_type}:{confidence:.2f}"
         if label not in app.profile.evidence_refs:
             app.profile.evidence_refs.append(label)
+    if state:
+        for wt in state.web_targets:
+            wt_type_str = wt.application_type.value if hasattr(wt.application_type, "value") else str(wt.application_type)
+            if wt_type_str in ("UNKNOWN", "STATIC_SITE") and app.profile.app_type not in ("unknown", "UNKNOWN", "", "STATIC_SITE"):
+                try:
+                    wt.application_type = WebApplicationType(app.profile.app_type)
+                except ValueError:
+                    if "SPA" in app.profile.app_type:
+                        wt.application_type = WebApplicationType.SPA
+                    elif "API" in app.profile.app_type:
+                        wt.application_type = WebApplicationType.API_SERVICE
+                    elif "CMS" in app.profile.app_type:
+                        wt.application_type = WebApplicationType.CMS
+                    else:
+                        wt.application_type = WebApplicationType.TRADITIONAL_WEB_APP

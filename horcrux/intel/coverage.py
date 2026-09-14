@@ -137,6 +137,15 @@ SECURITY_PROPERTIES: list[dict[str, Any]] = [
     {"id": "infra.smb", "name": "SMB Exposure", "group": "infrastructure", "critical": False},
     {"id": "infra.database_exposure", "name": "Database Exposure", "group": "infrastructure", "critical": False},
     {"id": "infra.remote_admin", "name": "Remote Administration", "group": "infrastructure", "critical": False},
+    # external_vulnerability — external engine fabric dimensions (non-critical by
+    # design: missing engines yield LIMITED/INCOMPLETE engine verdicts, while the
+    # core verdict math for native properties is unchanged).
+    {"id": "vuln.external_intel", "name": "External Vulnerability Intelligence", "group": "external_vulnerability", "critical": False},
+    {"id": "vuln.network_scanning", "name": "Network Vulnerability Scanning", "group": "external_vulnerability", "critical": False},
+    {"id": "vuln.host_assessment", "name": "Host Vulnerability Assessment", "group": "external_vulnerability", "critical": False},
+    {"id": "vuln.config_assessment", "name": "Configuration Assessment", "group": "external_vulnerability", "critical": False},
+    {"id": "vuln.credentialed_assessment", "name": "Credentialed Assessment", "group": "external_vulnerability", "critical": False},
+    {"id": "vuln.web_scanning", "name": "External Web Vulnerability Scanning", "group": "external_vulnerability", "critical": False},
 ]
 
 SECURITY_DOMAINS = [
@@ -189,6 +198,49 @@ class DomainCoverage(BaseModel):
 class SecurityCoverageModel(BaseModel):
     domains: dict[str, DomainCoverage] = Field(default_factory=dict)
     properties: dict[str, SecurityProperty] = Field(default_factory=dict)
+    # External-engine availability per provider:
+    # AVAILABLE | NOT_CONFIGURED | UNAVAILABLE | RUNNING | COMPLETE |
+    # FAILED | PARTIAL | NOT_APPLICABLE | OPERATOR_EXCLUDED
+    external_engines: dict[str, str] = Field(default_factory=dict)
+
+    def set_engine_state(self, provider_id: str, state: str) -> None:
+        self.external_engines[str(provider_id)] = str(state)
+
+    def get_engine_state(self, provider_id: str, default: str = "NOT_CONFIGURED") -> str:
+        return self.external_engines.get(str(provider_id), default)
+
+    def engine_coverage_verdict(self) -> str:
+        """LIMITED when applicable engine coverage is missing; never boolean."""
+        if not self.external_engines:
+            return "NOT_ASSESSED"
+        states = set(self.external_engines.values())
+        if states and all(s in ("NOT_CONFIGURED",) for s in states):
+            return "LIMITED"
+        if "COMPLETE" in states:
+            # executed some, but other sources missing/failed → PARTIAL, never
+            # full credit while vulnerability evidence sources are absent.
+            remainder = states - {"COMPLETE"}
+            if remainder:
+                return "PARTIAL"
+            return "COMPLETE"
+        if "RUNNING" in states:
+            return "RUNNING"
+        if states & {"FAILED", "PARTIAL"}:
+            return "PARTIAL"
+        if states <= {"NOT_APPLICABLE"}:
+            return "NOT_APPLICABLE"
+        if states == {"OPERATOR_EXCLUDED"} or states <= {"OPERATOR_EXCLUDED", "NOT_APPLICABLE"}:
+            return "OPERATOR_EXCLUDED"
+        return "LIMITED"
+
+    def engine_coverage_summary(self) -> dict[str, Any]:
+        return {
+            "verdict": self.engine_coverage_verdict(),
+            "engines": dict(self.external_engines),
+            "executed": sum(1 for s in self.external_engines.values() if s == "COMPLETE"),
+            "failed": sum(1 for s in self.external_engines.values() if s == "FAILED"),
+            "not_configured": sum(1 for s in self.external_engines.values() if s == "NOT_CONFIGURED"),
+        }
 
     def ensure_domains(self) -> None:
         for domain in SECURITY_DOMAINS:
@@ -693,6 +745,28 @@ def assessment_completeness(state: "WorkspaceState") -> dict:
         sufficient = False
         blocking.append("Authentication properties UNKNOWN despite auth surface discovered")
 
+    # External-engine fabric: report which intelligence participated (additive —
+    # never silently implies comprehensive coverage when engines are missing).
+    engine_runs = dict(getattr(state, "external_engine_runs", {}) or {})
+    engine_summary = coverage.engine_coverage_summary() if hasattr(coverage, "engine_coverage_summary") else {}
+    external_verdict = engine_summary.get("verdict", "NOT_ASSESSED") if engine_summary else "NOT_ASSESSED"
+    executed = [pid for pid, run in engine_runs.items()
+                if str((run or {}).get("status", "")).upper() == "COMPLETE"]
+    failed = [pid for pid, run in engine_runs.items()
+              if str((run or {}).get("status", "")).upper() in (
+                  "FAILED", "AUTH_FAILED", "RESULT_RETRIEVAL_FAILED", "SCAN_FAILED",
+                  "UNAVAILABLE", "RATE_LIMITED")]
+    not_configured = [pid for pid in ("tenable", "qualys", "rapid7", "greenbone", "msdefender")
+                      if pid not in engine_runs
+                      or str((engine_runs[pid] or {}).get("status", "")).upper() == "NOT_CONFIGURED"]
+    if failed:
+        blocking.append(f"External vulnerability engines failed: {', '.join(sorted(failed))} "
+                        "— relevant vulnerability evidence incomplete (PARTIAL)")
+    if executed and (failed or not_configured):
+        blocking.append("External vulnerability coverage PARTIAL: only "
+                        f"{', '.join(sorted(executed))} contributed results; "
+                        "results from unavailable engines are not negative evidence")
+
     return {
         "sufficient": sufficient,
         "verdict": verdict,
@@ -706,6 +780,11 @@ def assessment_completeness(state: "WorkspaceState") -> dict:
             CoverageStatus.NOT_REVIEWED, CoverageStatus.NOT_RELEVANT,
         ),
         "property_summary": coverage.property_summary(),
+        "external_engine_verdict": external_verdict,
+        "external_engine_summary": engine_summary,
+        "external_engines_executed": sorted(executed),
+        "external_engines_failed": sorted(failed),
+        "external_engines_not_configured": sorted(not_configured),
     }
 
 
