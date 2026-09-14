@@ -212,6 +212,7 @@ class VulnEngineConfig:
 
 @dataclass
 class HorcruxSettings:
+    schema_version: int = 2
     enabled: bool = True
     default_provider: str = "groq"
     call_budget: int = 50
@@ -220,6 +221,8 @@ class HorcruxSettings:
     _keys_file_fallback: dict[str, str] = field(default_factory=dict)
     vulnerability_engines: dict[str, VulnEngineConfig] = field(default_factory=dict)
     _vuln_keys_file_fallback: dict[str, dict[str, str]] = field(default_factory=dict)
+    integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _integration_credentials_fallback: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def default(cls) -> "HorcruxSettings":
@@ -235,19 +238,49 @@ class HorcruxSettings:
                                   endpoint=VULN_DEFAULT_ENDPOINTS.get(pid, ""))
             for pid in VULN_ENGINE_IDS
         }
+        integrations: dict[str, dict[str, Any]] = {}
+        for name, p in providers.items():
+            integrations[name] = {
+                "enabled": True,
+                "model": p.model,
+                "custom_endpoint": p.custom_endpoint,
+                "timeout": p.timeout,
+                "max_tokens": p.max_tokens,
+                "temperature": p.temperature,
+            }
+        for pid, v in vuln_engines.items():
+            integrations[pid] = {
+                "enabled": v.enabled,
+                "endpoint": v.endpoint,
+            }
+        integrations["playwright"] = {
+            "enabled": True,
+            "browser_type": "chromium",
+            "headless": True,
+            "timeout_ms": 30000,
+        }
+        for tid in ("nmap", "nuclei", "ffuf", "whatweb"):
+            integrations[tid] = {
+                "enabled": True,
+                "custom_path": "",
+            }
+
         return cls(
+            schema_version=2,
             enabled=True,
             default_provider="groq",
             call_budget=50,
             fallback_sequence=["google", "openai"],
             providers=providers,
             vulnerability_engines=vuln_engines,
+            integrations=integrations,
         )
 
 
 class SettingsManager:
     SERVICE_NAME = "horcrux_ai_keys"
     VULN_SERVICE_NAME = "horcrux_vuln_keys"
+    INTEGRATIONS_SERVICE_NAME = "horcrux_integrations"
 
     def __init__(self, config_dir: Path | None = None, use_keyring: bool = True):
         self.config_dir = config_dir or get_config_dir()
@@ -257,8 +290,68 @@ class SettingsManager:
         self.use_keyring = use_keyring
         self._runtime_overrides: dict[str, str] = {}
         self._vuln_runtime_overrides: dict[str, dict[str, str]] = {}
+        self._integration_runtime_overrides: dict[str, dict[str, str]] = {}
         self.settings = self.load()
 
+    @staticmethod
+    def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
+        """Automatically and idempotently migrate schema version 1 to schema version 2."""
+        version = raw.get("schema_version", 1)
+        if version >= 2 and "integrations" in raw:
+            return raw
+
+        integrations = dict(raw.get("integrations", {}))
+        cred_fallback = dict(raw.get("_integration_credentials_fallback", {}))
+
+        # Migrate AI providers
+        for name, p_data in raw.get("providers", {}).items():
+            norm_name = normalize_provider_name(name)
+            if norm_name not in integrations:
+                integrations[norm_name] = {
+                    "enabled": True,
+                    "model": p_data.get("model", DEFAULT_MODELS.get(norm_name, "")),
+                    "custom_endpoint": p_data.get("custom_endpoint", ""),
+                    "timeout": p_data.get("timeout", 60),
+                    "max_tokens": p_data.get("max_tokens", 2048),
+                    "temperature": p_data.get("temperature", 0.2),
+                    "last_validated": p_data.get("last_validated"),
+                    "last_status": p_data.get("last_status"),
+                }
+
+        # Migrate AI keys
+        for prov, key in raw.get("_keys_fallback", {}).items():
+            norm_prov = normalize_provider_name(prov)
+            if norm_prov not in cred_fallback:
+                cred_fallback[norm_prov] = {}
+            if key and isinstance(key, str):
+                cred_fallback[norm_prov]["api_key"] = key
+
+        # Migrate Vulnerability engines
+        for pid, v_data in (raw.get("vulnerability_engines", {}) or {}).items():
+            norm_pid = normalize_vuln_engine_id(pid)
+            if not norm_pid:
+                continue
+            if norm_pid not in integrations:
+                integrations[norm_pid] = {
+                    "enabled": v_data.get("enabled", True),
+                    "endpoint": v_data.get("endpoint", VULN_DEFAULT_ENDPOINTS.get(norm_pid, "")),
+                    "last_test": v_data.get("last_test"),
+                    "last_status": v_data.get("last_status"),
+                    **{k: v for k, v in v_data.items() if k not in ("provider_id", "enabled", "endpoint", "last_test", "last_status")},
+                }
+
+        # Migrate Vuln keys
+        for pid, cred_dict in raw.get("_vuln_keys_fallback", {}).items():
+            norm_pid = normalize_vuln_engine_id(pid)
+            if norm_pid not in cred_fallback:
+                cred_fallback[norm_pid] = {}
+            if isinstance(cred_dict, dict):
+                cred_fallback[norm_pid].update(cred_dict)
+
+        raw["schema_version"] = 2
+        raw["integrations"] = integrations
+        raw["_integration_credentials_fallback"] = cred_fallback
+        return raw
 
     def load(self) -> HorcruxSettings:
         if not self.settings_file.exists():
@@ -268,7 +361,9 @@ class SettingsManager:
 
         try:
             raw = json.loads(self.settings_file.read_text(encoding="utf-8"))
-            providers = {}
+            raw = self._migrate_v1_to_v2(raw)
+
+            providers: dict[str, ProviderConfig] = {}
             for name, p_data in raw.get("providers", {}).items():
                 norm_name = normalize_provider_name(name)
                 providers[norm_name] = ProviderConfig(
@@ -309,7 +404,33 @@ class SettingsManager:
                         provider_id=pid, enabled=True,
                         endpoint=VULN_DEFAULT_ENDPOINTS.get(pid, ""))
 
+            integrations: dict[str, dict[str, Any]] = raw.get("integrations", {})
+            # Ensure AI providers are present in integrations
+            for name, p in providers.items():
+                if name not in integrations:
+                    integrations[name] = {
+                        "enabled": True,
+                        "model": p.model,
+                        "custom_endpoint": p.custom_endpoint,
+                        "timeout": p.timeout,
+                        "max_tokens": p.max_tokens,
+                        "temperature": p.temperature,
+                        "last_validated": p.last_validated,
+                        "last_status": p.last_status,
+                    }
+            # Ensure Vuln engines are present in integrations
+            for pid, v in vuln_engines.items():
+                if pid not in integrations:
+                    integrations[pid] = {
+                        "enabled": v.enabled,
+                        "endpoint": v.endpoint,
+                        "last_test": v.last_test,
+                        "last_status": v.last_status,
+                        **(v.extra or {}),
+                    }
+
             return HorcruxSettings(
+                schema_version=2,
                 enabled=raw.get("enabled", True),
                 default_provider=default_prov,
                 call_budget=raw.get("call_budget", 50),
@@ -318,6 +439,8 @@ class SettingsManager:
                 _keys_file_fallback=raw.get("_keys_fallback", {}),
                 vulnerability_engines=vuln_engines,
                 _vuln_keys_file_fallback=raw.get("_vuln_keys_fallback", {}),
+                integrations=integrations,
+                _integration_credentials_fallback=raw.get("_integration_credentials_fallback", {}),
             )
         except Exception:
             return HorcruxSettings.default()
@@ -327,7 +450,34 @@ class SettingsManager:
         if settings is not None:
             self.settings = settings
 
+        # Sync providers into integrations
+        for name, p in self.settings.providers.items():
+            if name not in self.settings.integrations:
+                self.settings.integrations[name] = {}
+            self.settings.integrations[name].update({
+                "model": p.model,
+                "custom_endpoint": p.custom_endpoint,
+                "timeout": p.timeout,
+                "max_tokens": p.max_tokens,
+                "temperature": p.temperature,
+                "last_validated": p.last_validated,
+                "last_status": p.last_status,
+            })
+
+        # Sync vuln engines into integrations
+        for pid, cfg in self.settings.vulnerability_engines.items():
+            if pid not in self.settings.integrations:
+                self.settings.integrations[pid] = {}
+            self.settings.integrations[pid].update({
+                "enabled": cfg.enabled,
+                "endpoint": cfg.endpoint,
+                "last_test": cfg.last_test,
+                "last_status": cfg.last_status,
+                **(cfg.extra or {}),
+            })
+
         data = {
+            "schema_version": 2,
             "enabled": self.settings.enabled,
             "default_provider": self.settings.default_provider,
             "call_budget": self.settings.call_budget,
@@ -343,6 +493,8 @@ class SettingsManager:
                 for pid, cfg in self.settings.vulnerability_engines.items()
             },
             "_vuln_keys_fallback": self.settings._vuln_keys_file_fallback,
+            "integrations": self.settings.integrations,
+            "_integration_credentials_fallback": self.settings._integration_credentials_fallback,
         }
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -357,6 +509,231 @@ class SettingsManager:
 
         os.replace(tmp_file, self.settings_file)
 
+    # ── Unified Integration Control Plane Methods ─────────────────────────
+
+    @staticmethod
+    def _resolve_integration_id(identifier: str) -> str:
+        if not identifier:
+            return ""
+        norm = identifier.strip().lower().replace("-", "_")
+        norm_prov = normalize_provider_name(norm)
+        if norm_prov in ("groq", "openai", "anthropic", "google"):
+            return norm_prov
+        norm_vuln = normalize_vuln_engine_id(norm)
+        if norm_vuln in VULN_ENGINE_IDS:
+            return norm_vuln
+        return norm
+
+    def get_integration_config(self, integration_id: str) -> dict[str, Any]:
+        """Return non-secret configuration dict for an integration."""
+        iid = self._resolve_integration_id(integration_id)
+        if iid in self.settings.integrations:
+            return dict(self.settings.integrations[iid])
+        if iid in self.settings.providers:
+            p = self.settings.providers[iid]
+            return {
+                "enabled": True, "model": p.model, "custom_endpoint": p.custom_endpoint,
+                "timeout": p.timeout, "max_tokens": p.max_tokens, "temperature": p.temperature,
+            }
+        if iid in self.settings.vulnerability_engines:
+            return self.get_vuln_engine_config(iid)
+        return {"enabled": True}
+
+    def set_integration_config(self, integration_id: str, config: dict[str, Any]) -> None:
+        """Persist non-secret configuration dict for an integration."""
+        iid = self._resolve_integration_id(integration_id)
+        if iid not in self.settings.integrations:
+            self.settings.integrations[iid] = {}
+        self.settings.integrations[iid].update(config)
+
+        # Synchronize with legacy provider structures
+        if iid in ("groq", "openai", "anthropic", "google"):
+            if "model" in config and config["model"]:
+                self.set_model(iid, str(config["model"]))
+            if iid in self.settings.providers:
+                if "custom_endpoint" in config:
+                    self.settings.providers[iid].custom_endpoint = str(config["custom_endpoint"])
+        elif iid in VULN_ENGINE_IDS or normalize_vuln_engine_id(iid) in VULN_ENGINE_IDS:
+            norm_v = normalize_vuln_engine_id(iid)
+            self.set_vuln_engine_fields(norm_v, config)
+
+        self.save()
+
+    def set_integration_runtime_credential(self, integration_id: str, key: str, value: str) -> None:
+        """Set an in-memory runtime credential override for any integration."""
+        iid = self._resolve_integration_id(integration_id)
+        if iid not in self._integration_runtime_overrides:
+            self._integration_runtime_overrides[iid] = {}
+        if value and value.strip():
+            self._integration_runtime_overrides[iid][key] = value.strip()
+        else:
+            self._integration_runtime_overrides[iid].pop(key, None)
+
+        if iid in ("groq", "openai", "anthropic", "google") and key == "api_key":
+            self.set_runtime_credential(iid, value)
+        elif iid in VULN_ENGINE_IDS or normalize_vuln_engine_id(iid) in VULN_ENGINE_IDS:
+            self.set_vuln_runtime_credentials(iid, {key: value})
+
+    def get_integration_credentials(self, integration_id: str, fields: list[Any] | None = None) -> dict[str, str]:
+        """Resolve credentials for an integration following strict precedence:
+        1. Runtime overrides
+        2. OS Keyring / Secure storage
+        3. Settings file fallback
+        4. Environment variables
+        """
+        iid = self._resolve_integration_id(integration_id)
+        resolved: dict[str, str] = {}
+
+        field_names: list[str] = []
+        env_map: dict[str, list[str]] = {}
+
+        if fields:
+            for f in fields:
+                fname = getattr(f, "name", str(f))
+                field_names.append(fname)
+                env_list = getattr(f, "env_vars", [])
+                if env_list:
+                    env_map[fname] = list(env_list)
+
+        if not field_names:
+            if iid in ("groq", "openai", "anthropic", "google"):
+                field_names = ["api_key"]
+                env_map["api_key"] = ENV_KEY_NAMES.get(iid, [f"{iid.upper()}_API_KEY"])
+            elif iid in VULN_CREDENTIAL_FIELDS:
+                field_names = VULN_CREDENTIAL_FIELDS[iid]
+                env_map = VULN_ENV_VARS.get(iid, {})
+
+        keyring_creds: dict[str, str] = {}
+        if self.use_keyring and keyring is not None:
+            try:
+                stored = keyring.get_password(self.INTEGRATIONS_SERVICE_NAME, iid)
+                if stored:
+                    try:
+                        keyring_creds = json.loads(stored)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if not keyring_creds and iid in ("groq", "openai", "anthropic", "google"):
+                try:
+                    k_val = keyring.get_password(self.SERVICE_NAME, iid)
+                    if k_val:
+                        keyring_creds["api_key"] = k_val
+                except Exception:
+                    pass
+
+            if not keyring_creds and (iid in VULN_ENGINE_IDS or normalize_vuln_engine_id(iid) in VULN_ENGINE_IDS):
+                try:
+                    norm_v = normalize_vuln_engine_id(iid)
+                    stored_v = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{norm_v}")
+                    if stored_v:
+                        keyring_creds = json.loads(stored_v)
+                except Exception:
+                    pass
+
+        file_creds: dict[str, str] = dict(self.settings._integration_credentials_fallback.get(iid, {}))
+        if not file_creds and iid in self.settings._keys_file_fallback:
+            file_creds["api_key"] = self.settings._keys_file_fallback[iid]
+        if not file_creds and normalize_vuln_engine_id(iid) in self.settings._vuln_keys_file_fallback:
+            file_creds = dict(self.settings._vuln_keys_file_fallback[normalize_vuln_engine_id(iid)])
+
+        runtime_creds: dict[str, str] = dict(self._integration_runtime_overrides.get(iid, {}))
+        if iid in self._runtime_overrides:
+            runtime_creds["api_key"] = self._runtime_overrides[iid]
+        if normalize_vuln_engine_id(iid) in self._vuln_runtime_overrides:
+            runtime_creds.update(self._vuln_runtime_overrides[normalize_vuln_engine_id(iid)])
+
+        for fn in field_names:
+            # 1. Runtime override
+            if runtime_creds.get(fn):
+                resolved[fn] = runtime_creds[fn]
+                continue
+            # 2. Keyring
+            if keyring_creds.get(fn):
+                resolved[fn] = keyring_creds[fn]
+                continue
+            # 3. Settings file fallback
+            if file_creds.get(fn):
+                resolved[fn] = file_creds[fn]
+                continue
+            # 4. Environment variable
+            for ev in env_map.get(fn, []):
+                val = os.environ.get(ev)
+                if val and val.strip():
+                    resolved[fn] = val.strip()
+                    break
+
+        return resolved
+
+    def set_integration_credentials(self, integration_id: str, credentials: dict[str, str]) -> None:
+        """Store credentials for an integration securely."""
+        iid = self._resolve_integration_id(integration_id)
+        cleaned = {k: str(v).strip() for k, v in credentials.items() if str(v or "").strip()}
+        if not cleaned:
+            return
+
+        stored_in_keyring = False
+        if self.use_keyring and keyring is not None:
+            try:
+                keyring.set_password(self.INTEGRATIONS_SERVICE_NAME, iid, json.dumps(cleaned))
+                stored_in_keyring = True
+            except Exception:
+                stored_in_keyring = False
+
+        if not stored_in_keyring:
+            if iid not in self.settings._integration_credentials_fallback:
+                self.settings._integration_credentials_fallback[iid] = {}
+            self.settings._integration_credentials_fallback[iid].update(cleaned)
+        else:
+            self.settings._integration_credentials_fallback.pop(iid, None)
+
+        # Legacy backward compatibility sync
+        if iid in ("groq", "openai", "anthropic", "google") and "api_key" in cleaned:
+            if stored_in_keyring:
+                try:
+                    keyring.set_password(self.SERVICE_NAME, iid, cleaned["api_key"])
+                except Exception:
+                    pass
+            else:
+                self.settings._keys_file_fallback[iid] = cleaned["api_key"]
+        elif iid in VULN_ENGINE_IDS or normalize_vuln_engine_id(iid) in VULN_ENGINE_IDS:
+            norm_v = normalize_vuln_engine_id(iid)
+            if stored_in_keyring:
+                try:
+                    keyring.set_password(self.VULN_SERVICE_NAME, f"vuln:{norm_v}", json.dumps(cleaned))
+                except Exception:
+                    pass
+            else:
+                self.settings._vuln_keys_file_fallback[norm_v] = cleaned
+
+        self.save()
+
+    def remove_integration(self, integration_id: str, fields: list[Any] | None = None) -> None:
+        """Remove stored credentials and reset configuration for an integration."""
+        iid = self._resolve_integration_id(integration_id)
+        if self.use_keyring and keyring is not None:
+            try:
+                keyring.delete_password(self.INTEGRATIONS_SERVICE_NAME, iid)
+            except Exception:
+                pass
+        self.settings._integration_credentials_fallback.pop(iid, None)
+        self._integration_runtime_overrides.pop(iid, None)
+
+        if iid in ("groq", "openai", "anthropic", "google"):
+            self.remove_api_key(iid)
+        elif iid in VULN_ENGINE_IDS or normalize_vuln_engine_id(iid) in VULN_ENGINE_IDS:
+            self.remove_vuln_config(normalize_vuln_engine_id(iid))
+
+        if iid in self.settings.integrations:
+            self.settings.integrations[iid]["enabled"] = True
+            self.settings.integrations[iid].pop("last_test", None)
+            self.settings.integrations[iid].pop("last_status", None)
+
+        self.save()
+
+    # ── Legacy AI Provider Facades ────────────────────────────────────────
+
     def set_runtime_credential(self, provider: str, key: str) -> None:
         """Set in-memory runtime credential override (highest priority)."""
         prov = normalize_provider_name(provider)
@@ -366,13 +743,7 @@ class SettingsManager:
             self._runtime_overrides.pop(prov, None)
 
     def get_credential_info(self, provider: str) -> CredentialInfo:
-        """
-        Centralized credential resolution following strict precedence:
-          1. Explicit runtime credential override
-          2. Persisted HORCRUX settings credential (keyring / settings file fallback)
-          3. Environment variable fallback
-          4. No credential
-        """
+        """Centralized credential resolution following strict precedence."""
         prov = normalize_provider_name(provider)
 
         # 1. Runtime override
@@ -388,8 +759,7 @@ class SettingsManager:
                     is_configured=True,
                 )
 
-        # 2. Persisted credential
-        # Check system keyring first
+        # 2. Persisted credential (keyring)
         if self.use_keyring and keyring is not None:
             try:
                 stored = keyring.get_password(self.SERVICE_NAME, prov)
@@ -404,10 +774,36 @@ class SettingsManager:
                     )
             except Exception:
                 pass
+            try:
+                stored = keyring.get_password(self.INTEGRATIONS_SERVICE_NAME, prov)
+                if stored:
+                    data = json.loads(stored)
+                    if data.get("api_key"):
+                        k = data["api_key"].strip()
+                        return CredentialInfo(
+                            source="persisted",
+                            key=k,
+                            masked=mask_key(k),
+                            fingerprint=fingerprint_key(k),
+                            is_configured=True,
+                        )
+            except Exception:
+                pass
 
-        # Check settings file fallback
+        # Settings file fallback
         if prov in self.settings._keys_file_fallback:
             val = self.settings._keys_file_fallback[prov]
+            if val and val.strip():
+                k = val.strip()
+                return CredentialInfo(
+                    source="persisted",
+                    key=k,
+                    masked=mask_key(k),
+                    fingerprint=fingerprint_key(k),
+                    is_configured=True,
+                )
+        if prov in self.settings._integration_credentials_fallback:
+            val = self.settings._integration_credentials_fallback[prov].get("api_key")
             if val and val.strip():
                 k = val.strip()
                 return CredentialInfo(
@@ -453,19 +849,23 @@ class SettingsManager:
         if not key:
             raise ValueError(f"API key for provider '{prov}' cannot be empty.")
 
-        # Save to keyring or file fallback
         stored_in_keyring = False
         if self.use_keyring and keyring is not None:
             try:
                 keyring.set_password(self.SERVICE_NAME, prov, key)
+                keyring.set_password(self.INTEGRATIONS_SERVICE_NAME, prov, json.dumps({"api_key": key}))
                 stored_in_keyring = True
             except Exception:
                 stored_in_keyring = False
 
         if not stored_in_keyring:
             self.settings._keys_file_fallback[prov] = key
+            if prov not in self.settings._integration_credentials_fallback:
+                self.settings._integration_credentials_fallback[prov] = {}
+            self.settings._integration_credentials_fallback[prov]["api_key"] = key
         else:
             self.settings._keys_file_fallback.pop(prov, None)
+            self.settings._integration_credentials_fallback.pop(prov, None)
 
         self.save()
 
@@ -477,11 +877,15 @@ class SettingsManager:
                 keyring.delete_password(self.SERVICE_NAME, prov)
             except Exception:
                 pass
+            try:
+                keyring.delete_password(self.INTEGRATIONS_SERVICE_NAME, prov)
+            except Exception:
+                pass
         self.settings._keys_file_fallback.pop(prov, None)
+        self.settings._integration_credentials_fallback.pop(prov, None)
         self._runtime_overrides.pop(prov, None)
+        self._integration_runtime_overrides.pop(prov, None)
 
-
-        # If removed provider was default, switch to another configured provider if one exists
         if self.settings.default_provider == prov:
             other_configured = [
                 p for p in ("groq", "google", "openai", "anthropic")
@@ -509,6 +913,8 @@ class SettingsManager:
             val = os.environ.get(env_var)
             if val and val.strip():
                 return val.strip()
+        if prov in self.settings.integrations and self.settings.integrations[prov].get("model"):
+            return str(self.settings.integrations[prov]["model"])
         if prov in self.settings.providers:
             return self.settings.providers[prov].model or DEFAULT_MODELS.get(prov, "")
         return DEFAULT_MODELS.get(prov, "")
@@ -522,24 +928,33 @@ class SettingsManager:
             self.settings.providers[prov] = ProviderConfig(name=prov, model=m)
         else:
             self.settings.providers[prov].model = m
+
+        if prov not in self.settings.integrations:
+            self.settings.integrations[prov] = {}
+        self.settings.integrations[prov]["model"] = m
         self.save()
 
     def reset_model(self, provider: str) -> str:
-        """Reset model for a provider to its canonical default."""
         prov = normalize_provider_name(provider)
         def_model = DEFAULT_MODELS.get(prov, "")
         if prov in self.settings.providers:
             self.settings.providers[prov].model = def_model
-            self.save()
+        if prov in self.settings.integrations:
+            self.settings.integrations[prov]["model"] = def_model
+        self.save()
         return def_model
 
     def set_provider_validation(self, provider: str, valid: bool, status: str) -> None:
         import datetime
         prov = normalize_provider_name(provider)
+        iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         if prov in self.settings.providers:
-            self.settings.providers[prov].last_validated = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self.settings.providers[prov].last_validated = iso
             self.settings.providers[prov].last_status = status
-            self.save()
+        if prov in self.settings.integrations:
+            self.settings.integrations[prov]["last_validated"] = iso
+            self.settings.integrations[prov]["last_status"] = status
+        self.save()
 
     def set_fallback_sequence(self, sequence: list[str]) -> None:
         self.settings.fallback_sequence = [normalize_provider_name(s) for s in sequence if normalize_provider_name(s) in self.settings.providers]
@@ -555,7 +970,8 @@ class SettingsManager:
         self.settings.enabled = enabled
         self.save()
 
-    # ── Vulnerability engines (settings → VULNERABILITY ENGINES) ──────────
+    # ── Vulnerability Engines Facades ─────────────────────────────────────
+
     def _vuln_cfg(self, provider: str) -> VulnEngineConfig:
         pid = normalize_vuln_engine_id(provider)
         if pid not in self.settings.vulnerability_engines:
@@ -565,6 +981,12 @@ class SettingsManager:
 
     def get_vuln_engine_config(self, provider: str) -> dict[str, Any]:
         """Config dict for engine adapters (endpoint/enabled/extra, no secrets)."""
+        pid = normalize_vuln_engine_id(provider)
+        if pid in self.settings.integrations:
+            cfg_dict = dict(self.settings.integrations[pid])
+            cfg_dict.setdefault("endpoint", VULN_DEFAULT_ENDPOINTS.get(pid, ""))
+            cfg_dict.setdefault("enabled", True)
+            return cfg_dict
         cfg = self._vuln_cfg(provider)
         out: dict[str, Any] = {"endpoint": cfg.endpoint, "enabled": cfg.enabled,
                                "last_test": cfg.last_test, "last_status": cfg.last_status}
@@ -572,16 +994,25 @@ class SettingsManager:
         return out
 
     def set_vuln_engine_fields(self, provider: str, fields: dict[str, Any]) -> None:
+        pid = normalize_vuln_engine_id(provider)
         cfg = self._vuln_cfg(provider)
+        if pid not in self.settings.integrations:
+            self.settings.integrations[pid] = {}
+
         for key, value in (fields or {}).items():
             if key == "endpoint":
                 cfg.endpoint = str(value)
+                self.settings.integrations[pid]["endpoint"] = str(value)
             elif key == "enabled":
-                cfg.enabled = bool(value) if not isinstance(value, str) else value.lower() in ("1", "true", "yes")
+                en = bool(value) if not isinstance(value, str) else value.lower() in ("1", "true", "yes")
+                cfg.enabled = en
+                self.settings.integrations[pid]["enabled"] = en
             elif key in ("last_test", "last_status"):
                 setattr(cfg, key, value)
+                self.settings.integrations[pid][key] = value
             else:
                 cfg.extra[key] = value
+                self.settings.integrations[pid][key] = value
         self.save()
 
     def set_vuln_enabled(self, provider: str, enabled: bool) -> None:
@@ -602,64 +1033,37 @@ class SettingsManager:
         cleaned = {k: v.strip() for k, v in (fields or {}).items() if v and str(v).strip()}
         if cleaned:
             self._vuln_runtime_overrides[pid] = cleaned
+            if pid not in self._integration_runtime_overrides:
+                self._integration_runtime_overrides[pid] = {}
+            self._integration_runtime_overrides[pid].update(cleaned)
         else:
             self._vuln_runtime_overrides.pop(pid, None)
+            self._integration_runtime_overrides.pop(pid, None)
 
     def get_vuln_credentials(self, provider: str) -> dict[str, str]:
         """Resolve engine credentials: runtime > keyring/file persisted > environment."""
-        import json as _json
-
         pid = normalize_vuln_engine_id(provider)
-        fields = VULN_CREDENTIAL_FIELDS.get(pid, ["api_key"])
-        resolved: dict[str, str] = {}
-
-        persisted: dict[str, str] = {}
-        if self.use_keyring and keyring is not None:
-            try:
-                stored = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
-                if stored:
-                    try:
-                        persisted = {k: str(v) for k, v in _json.loads(stored).items()}
-                    except Exception:
-                        persisted = {}
-            except Exception:
-                pass
-        if not persisted:
-            fallback = self.settings._vuln_keys_file_fallback.get(pid, {})
-            if isinstance(fallback, dict):
-                persisted = {k: str(v) for k, v in fallback.items()}
-
-        env_map = VULN_ENV_VARS.get(pid, {})
-        for fname in fields:
-            # 1. runtime override
-            runtime = self._vuln_runtime_overrides.get(pid, {}).get(fname, "")
-            if runtime and runtime.strip():
-                resolved[fname] = runtime.strip()
-                continue
-            # 2. persisted
-            if persisted.get(fname, "").strip():
-                resolved[fname] = persisted[fname].strip()
-                continue
-            # 3. environment
-            for env_var in env_map.get(fname, []):
-                val = os.environ.get(env_var, "")
-                if val and val.strip():
-                    resolved[fname] = val.strip()
-                    break
-        return resolved
+        return self.get_integration_credentials(pid)
 
     def get_vuln_credential_source(self, provider: str, fname: str) -> str:
         pid = normalize_vuln_engine_id(provider)
-        if self._vuln_runtime_overrides.get(pid, {}).get(fname):
+        if self._vuln_runtime_overrides.get(pid, {}).get(fname) or self._integration_runtime_overrides.get(pid, {}).get(fname):
             return "runtime"
         if self.use_keyring and keyring is not None:
             try:
-                import json as _json
-                stored = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
-                if stored and _json.loads(stored).get(fname):
+                stored = keyring.get_password(self.INTEGRATIONS_SERVICE_NAME, pid)
+                if stored and json.loads(stored).get(fname):
                     return "persisted"
             except Exception:
                 pass
+            try:
+                stored = keyring.get_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
+                if stored and json.loads(stored).get(fname):
+                    return "persisted"
+            except Exception:
+                pass
+        if self.settings._integration_credentials_fallback.get(pid, {}).get(fname):
+            return "persisted"
         if self.settings._vuln_keys_file_fallback.get(pid, {}).get(fname):
             return "persisted"
         env_map = VULN_ENV_VARS.get(pid, {}).get(fname, [])
@@ -678,27 +1082,14 @@ class SettingsManager:
             return bool(creds.get("api_key") or (creds.get("username") and creds.get("password")))
         fields = VULN_CREDENTIAL_FIELDS.get(pid, [])
         required = [f for f in fields if f != "bearer_token"]
-        return all(creds.get(f) for f in required)
+        return all(bool(creds.get(f)) for f in required)
 
     def set_vuln_credentials(self, provider: str, fields: dict[str, str]) -> None:
-        import json as _json
-
         pid = normalize_vuln_engine_id(provider)
         cleaned = {k: str(v).strip() for k, v in (fields or {}).items() if str(v or "").strip()}
         if not cleaned:
             raise ValueError(f"No credential fields supplied for engine '{pid}'.")
-        stored_in_keyring = False
-        if self.use_keyring and keyring is not None:
-            try:
-                keyring.set_password(self.VULN_SERVICE_NAME, f"vuln:{pid}", _json.dumps(cleaned))
-                stored_in_keyring = True
-            except Exception:
-                stored_in_keyring = False
-        if not stored_in_keyring:
-            self.settings._vuln_keys_file_fallback[pid] = cleaned
-        else:
-            self.settings._vuln_keys_file_fallback.pop(pid, None)
-        self.save()
+        self.set_integration_credentials(pid, cleaned)
 
     def remove_vuln_config(self, provider: str) -> None:
         pid = normalize_vuln_engine_id(provider)
@@ -707,14 +1098,35 @@ class SettingsManager:
                 keyring.delete_password(self.VULN_SERVICE_NAME, f"vuln:{pid}")
             except Exception:
                 pass
+            try:
+                keyring.delete_password(self.INTEGRATIONS_SERVICE_NAME, pid)
+            except Exception:
+                pass
         self.settings._vuln_keys_file_fallback.pop(pid, None)
+        self.settings._integration_credentials_fallback.pop(pid, None)
         self._vuln_runtime_overrides.pop(pid, None)
+        self._integration_runtime_overrides.pop(pid, None)
         if pid in self.settings.vulnerability_engines:
             cfg = self.settings.vulnerability_engines[pid]
             cfg.last_status = None
             cfg.last_test = None
+        if pid in self.settings.integrations:
+            self.settings.integrations[pid].pop("last_test", None)
+            self.settings.integrations[pid].pop("last_status", None)
         self.save()
 
     def masked_vuln_credentials(self, provider: str) -> dict[str, str]:
         creds = self.get_vuln_credentials(provider)
         return {k: (mask_key(v) if v else "NOT CONFIGURED") for k, v in creds.items()}
+
+
+_GLOBAL_SETTINGS_MANAGER: SettingsManager | None = None
+
+
+def get_settings_manager(config_dir: Path | None = None, use_keyring: bool = True) -> SettingsManager:
+    """Global singleton accessor for SettingsManager."""
+    global _GLOBAL_SETTINGS_MANAGER
+    if _GLOBAL_SETTINGS_MANAGER is None or config_dir is not None:
+        _GLOBAL_SETTINGS_MANAGER = SettingsManager(config_dir=config_dir, use_keyring=use_keyring)
+    return _GLOBAL_SETTINGS_MANAGER
+

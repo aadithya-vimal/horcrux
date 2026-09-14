@@ -1620,129 +1620,26 @@ class ConsoleApp:
             self.console.print(f"  {mark} {res['fixture']:<22} score={res['score']}\n")
 
     def settings_cmd(self, args: list[str]):
+        from horcrux.core.integrations.controller import SettingsController
         mgr = SettingsManager()
+        ctrl = SettingsController(console=self.console, settings_manager=mgr)
 
         if len(args) == 1:
-            st = mgr.settings
-            default_p = st.default_provider
-            default_m = st.providers.get(default_p, None)
-            model_name = default_m.model if default_m else "-"
-            ai_status = "[bold green]ENABLED[/bold green]" if st.enabled else "[bold red]DISABLED[/bold red]"
-
-            providers_lines = []
-            symbols = ["①", "②", "③", "④"]
-            prov_names = [
-                ("groq", "Groq"),
-                ("openai", "OpenAI"),
-                ("anthropic", "Anthropic / Claude"),
-                ("google", "Google AI Studio / Gemini"),
-            ]
-
-            for idx, (p_id, p_label) in enumerate(prov_names):
-                sym = symbols[idx]
-                cred_info = mgr.get_credential_info(p_id)
-                status_icon = "[bold green]● CONFIGURED[/bold green]" if cred_info.is_configured else "[dim]○ NOT CONFIGURED[/dim]"
-                model = st.providers.get(p_id, None)
-                m_str = f"[dim cyan]Model: {model.model}[/dim cyan]" if (model and model.model) else ""
-
-                if cred_info.is_configured:
-                    if cred_info.source == "environment":
-                        key_str = f"[dim white]({cred_info.masked} from ${cred_info.env_var})[/dim white]"
-                    else:
-                        key_str = f"[dim white]({cred_info.masked})[/dim white]"
-                else:
-                    key_str = "[dim]not configured[/dim]"
-
-                last_status = model.last_status if model and model.last_status else None
-                if last_status == "READY":
-                    test_str = "[dim green]Last Test: SUCCESS[/dim green]"
-                elif last_status:
-                    test_str = f"[dim red]Last Test: {last_status}[/dim red]"
-                else:
-                    test_str = "[dim]Last Test: NOT TESTED[/dim]"
-
-                providers_lines.append(f"  {sym} [bold bright_white]{p_label:<24}[/bold bright_white] {status_icon} {key_str}")
-                line_details = []
-                if m_str:
-                    line_details.append(m_str)
-                line_details.append(test_str)
-                providers_lines.append(f"     {' | '.join(line_details)}")
-                providers_lines.append("")
-
-            body = (
-                "[bold bright_magenta]AI PROVIDERS[/bold bright_magenta]\n\n"
-                + "\n".join(providers_lines)
-                + f"[bold bright_yellow]Default Provider:   [/bold bright_yellow] [bold bright_cyan]{default_p.upper()}[/bold bright_cyan]\n"
-                + f"[bold bright_yellow]Default Model:      [/bold bright_yellow] [bold bright_cyan]{model_name}[/bold bright_cyan]\n"
-                + f"[bold bright_yellow]AI Engine Status:   [/bold bright_yellow] {ai_status}\n"
-                + f"[bold bright_yellow]Configuration Path: [/bold bright_yellow] [dim]{mgr.settings_file}[/dim]\n\n"
-                + "[dim cyan]💡 Tip: Global configuration is active. No workspace is required for AI configuration or general queries.[/dim cyan]\n\n"
-                + "[dim white]Commands:\n"
-                + "  settings status                         (deep diagnostics & credential sources)\n"
-                + "  settings provider <provider> [api_key]   (store or update provider key)\n"
-                + "  settings model <provider> [model_name]  (select or change active model)\n"
-                + "  settings models [provider]              (discover available generation models)\n"
-                + "  settings default <provider>             (set default AI provider)\n"
-                + "  settings test [provider]                (verify connection & text generation)\n"
-                + "  settings remove <provider>              (remove provider credential)\n"
-                + "  settings reset-model <provider>         (reset provider model to default)\n"
-                + "  settings vulnerability                  (external vulnerability engines)[/dim white]"
-            )
-
-            self.console.print()
-            self.console.print(
-                Panel(
-                    body,
-                    title="[bold bright_magenta]✦ HORCRUX AI SETTINGS ✦[/bold bright_magenta]",
-                    box=box.ROUNDED,
-                    border_style="bright_magenta",
-                    padding=(1, 2),
-                )
-            )
-            self.console.print()
+            ctrl.render_overview()
             return
 
         sub = args[1].lower()
+
+        if sub in {"status", "diagnostics"}:
+            ctrl.render_status()
+            return
 
         if sub in {"vulnerability", "vuln", "vulns", "engines"}:
             self.vuln_settings_cmd(["vulnerability"] + args[2:])
             return
 
-        if sub == "status":
-            st = mgr.settings
-            default_p = st.default_provider
-            cred = mgr.get_credential_info(default_p)
-            model = mgr.get_model(default_p)
-            cfg = st.providers.get(default_p)
-            last_test_time = cfg.last_validated if cfg and cfg.last_validated else "Never"
-            last_status = cfg.last_status if cfg and cfg.last_status else "NOT TESTED"
-
-            configured_list = [p for p in ("groq", "openai", "anthropic", "google") if mgr.get_credential_info(p).is_configured]
-            conf_str = ", ".join(configured_list).upper() if configured_list else "NONE"
-
-            table = Table(
-                title="[bold bright_magenta]✦ HORCRUX AI SUBSYSTEM DIAGNOSTICS ✦[/bold bright_magenta]",
-                box=box.ROUNDED,
-                border_style="magenta",
-                header_style="bold bright_cyan",
-            )
-            table.add_column("Property", style="bold bright_yellow")
-            table.add_column("Value", style="bold bright_white")
-
-            table.add_row("Active/Default Provider", default_p.upper())
-            table.add_row("Configured Model", model)
-            table.add_row("Credential Source", cred.source if cred.source != "environment" else f"environment (${cred.env_var})")
-            table.add_row("Credential Fingerprint", cred.fingerprint)
-            table.add_row("Configured Providers", conf_str)
-            table.add_row("Last Connection Test", last_test_time)
-            table.add_row("Last Test Result", last_status)
-            table.add_row("AI Engine State", "ENABLED" if st.enabled else "DISABLED")
-            table.add_row("Configuration File", str(mgr.settings_file))
-            table.add_row("Persistence Status", "OK (Writable)" if mgr.settings_file.parent.exists() else "UNWRITABLE")
-
-            self.console.print()
-            self.console.print(table)
-            self.console.print()
+        if sub in {"ai", "tools", "automation", "security", "security_tools", "browser", "playwright", "nmap", "nuclei", "ffuf", "whatweb"}:
+            ctrl.handle_command(args[1:])
             return
 
         if sub == "provider":
@@ -1942,7 +1839,8 @@ class ConsoleApp:
                 self.console.print(f"[white]{msg}[/white]\n")
 
         else:
-            raise ValueError(f"unknown settings command: '{sub}' — run 'settings' for help")
+            if ctrl.handle_command(args[1:]) != 0:
+                raise ValueError(f"unknown settings command: '{sub}' — run 'settings' for help")
 
     # ── Vulnerability engine fabric UX (settings → VULNERABILITY ENGINES) ──
     def vuln_settings_cmd(self, args: list[str]):
@@ -2051,9 +1949,10 @@ class ConsoleApp:
             mgr.remove_vuln_config(pid)
             self.console.print(f"[bold yellow]✔ Removed configuration for '{pid}'.[/bold yellow]")
             return
-        if sub == "info":
-            target = normalize_vuln_engine_id(rest[1]) if len(rest) >= 2 else ""
-            self.engines_info(target)
+        if normalize_vuln_engine_id(sub) in VULN_ENGINE_IDS:
+            from horcrux.core.integrations.controller import SettingsController
+            ctrl = SettingsController(console=self.console, settings_manager=mgr)
+            ctrl.handle_command(["vulnerability"] + rest)
             return
         raise ValueError(f"unknown vulnerability command: '{sub}' — run 'settings vulnerability' for help")
 

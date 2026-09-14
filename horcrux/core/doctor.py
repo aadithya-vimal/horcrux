@@ -229,3 +229,13 @@ def check_tools():
         for name in WORDLISTS
     ]
     return tool_rows, word_rows
+
+
+def run_doctor(console=None, only_tools: bool = False) -> None:
+    """Run full doctor audit across tools, wordlists, AI, and external integrations."""
+    from horcrux.ui.console import ConsoleApp
+    app = ConsoleApp()
+    if console is not None:
+        app.console = console
+    app.doctor(only_tools=only_tools)
+
