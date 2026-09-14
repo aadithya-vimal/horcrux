@@ -66,6 +66,26 @@ class CommandRunner:
                     duration=time.monotonic() - start,
                     installed=True,
                 )
+            except OSError as exc:
+                # Binary vanished, permission denied, or spawn failure (P24).
+                result = CommandResult(
+                    args=args,
+                    returncode=127,
+                    stdout="",
+                    stderr=f"process spawn failed: {exc}",
+                    duration=time.monotonic() - start,
+                    installed=False,
+                )
+            except Exception as exc:
+                # Any other crash becomes structured state, never an exception leak.
+                result = CommandResult(
+                    args=args,
+                    returncode=125,
+                    stdout="",
+                    stderr=f"runner failure: {type(exc).__name__}: {exc}",
+                    duration=time.monotonic() - start,
+                    installed=True,
+                )
             finally:
                 if callable(self.on_finish):
                     try:

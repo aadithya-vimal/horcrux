@@ -51,6 +51,15 @@ class DomainCoverage(BaseModel):
     notes: str = ""
     investigation_ids: list[str] = Field(default_factory=list)
     hypothesis_ids: list[str] = Field(default_factory=list)
+    # --- Phase 7 security-property detail (Part 11) ---
+    applicable: bool = True
+    observed: bool = False
+    investigated: bool = False
+    validated: bool = False
+    confirmed_issue: bool = False
+    blocked: bool = False
+    not_applicable: bool = False
+    unknown: bool = True
 
 
 class SecurityCoverageModel(BaseModel):
@@ -71,6 +80,31 @@ class SecurityCoverageModel(BaseModel):
         dc.status = status
         if notes:
             dc.notes = notes
+        # Keep property detail consistent with status.
+        if status == CoverageStatus.NOT_RELEVANT:
+            dc.applicable = False
+            dc.not_applicable = True
+            dc.unknown = False
+        elif status == CoverageStatus.NOT_REVIEWED:
+            dc.unknown = True
+        elif status == CoverageStatus.IN_PROGRESS:
+            dc.observed = True
+            dc.investigated = True
+            dc.unknown = False
+        elif status in {CoverageStatus.REVIEWED, CoverageStatus.REFUTED}:
+            dc.observed = True
+            dc.investigated = True
+            dc.validated = True
+            dc.unknown = False
+        elif status in {CoverageStatus.SUPPORTED, CoverageStatus.CONFIRMED}:
+            dc.observed = True
+            dc.investigated = True
+            dc.validated = True
+            dc.confirmed_issue = status == CoverageStatus.CONFIRMED
+            dc.unknown = False
+        elif status == CoverageStatus.BLOCKED:
+            dc.blocked = True
+            dc.unknown = False
 
     def percentage_complete(self) -> dict[str, float]:
         """Return coverage percentages by category group."""
@@ -204,12 +238,18 @@ def _update_domain_from_investigations(
     if not investigations:
         coverage.set_status(domain, CoverageStatus.NOT_REVIEWED)
         return
-    if any(i.state == InvestigationState.RUNNING for i in investigations):
+    dc = coverage.domains[domain]
+    dc.investigation_ids = [i.id for i in investigations[:10]]
+    if any(i.state == InvestigationState.SCOPE_BLOCKED for i in investigations):
+        coverage.set_status(domain, CoverageStatus.BLOCKED, "Scope/policy blocked")
+    elif any(i.state == InvestigationState.RUNNING for i in investigations):
         coverage.set_status(domain, CoverageStatus.IN_PROGRESS)
     elif any(i.state in {InvestigationState.SUPPORTED, InvestigationState.COMPLETE} for i in investigations):
         coverage.set_status(domain, CoverageStatus.REVIEWED)
     elif any(i.state == InvestigationState.REFUTED for i in investigations):
         coverage.set_status(domain, CoverageStatus.REFUTED)
+    elif any(i.state in {InvestigationState.UNAVAILABLE, InvestigationState.FAILED} for i in investigations):
+        coverage.set_status(domain, CoverageStatus.BLOCKED, "Capability unavailable or failed")
 
 
 def _update_domain_from_hypotheses(

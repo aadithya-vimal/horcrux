@@ -100,6 +100,66 @@ def report(
 
 
 @app.command()
+def status(
+    target: str = typer.Argument(..., help="Target workspace to show status for"),
+):
+    """Show the operator status console for a target workspace (no scan)."""
+    app_inst = ConsoleApp()
+    app_inst.workspace = Workspace(target)
+    app_inst.status()
+
+
+@app.command()
+def replay(
+    target: str = typer.Argument(..., help="Target workspace to replay"),
+    script: str = typer.Option("", "--script", "-s", help="Evidence script path (default: workspace evidence-script.json)"),
+):
+    """Replay an assessment deterministically from recorded evidence (no network)."""
+    from pathlib import Path as _Path
+    from horcrux.bench.runner import replay_workspace
+    console = Console()
+    ws = Workspace(target)
+    script_path = _Path(script) if script else (ws.root / "evidence-script.json")
+    if not script_path.exists():
+        from horcrux.bench.runner import write_evidence_script
+        script_path = write_evidence_script(ws)
+        console.print(f"[dim]Recorded evidence script: {script_path}[/dim]")
+    state = replay_workspace(target, script_path)
+    app = state.get_application_model()
+    console.print(f"\n[bold bright_magenta]REPLAY COMPLETE:[/bold bright_magenta] "
+                  f"[bold bright_cyan]{target}[/bold bright_cyan]\n")
+    console.print(f"  endpoints={len(app.endpoints)} "
+                  f"hypotheses={len(state.get_hypotheses())} "
+                  f"investigations={len(state.get_investigations())} "
+                  f"paths={len(state.attack_paths or [])}")
+
+
+@app.command()
+def benchmark(
+    fixture: str = typer.Argument("", help="Fixture name or 'all' (default: all)"),
+):
+    """Run the synthetic benchmark suite (fully offline, no external targets)."""
+    import tempfile
+    from pathlib import Path as _Path
+    from horcrux.bench.fixtures import FIXTURES
+    from horcrux.bench.runner import run_suite
+    console = Console()
+    names = sorted(FIXTURES) if fixture in ("", "all") else [fixture]
+    unknown = [n for n in names if n not in FIXTURES]
+    if unknown:
+        console.print(f"[bold red]Unknown fixture(s):[/bold red] {', '.join(unknown)}")
+        raise typer.Exit(code=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        report = run_suite(names, _Path(tmp))
+    console.print(f"\n[bold]Benchmark:[/bold] {report['passed']}/{report['fixtures']} "
+                  f"suites >= 0.60 (mean score {report['mean_score']})")
+    for res in report["results"]:
+        mark = "[green]✔[/green]" if res["score"] >= 0.6 else "[red]✖[/red]"
+        console.print(f"  {mark} {res['fixture']:<22} score={res['score']} "
+                      f"({res['passed']}/{res['total']})")
+
+
+@app.command()
 def ask(
     question: str = typer.Argument(..., help="Question to ask AI security analyst"),
     target: str = typer.Option("", "--target", "-t", help="Target workspace context (optional)"),
@@ -184,7 +244,7 @@ def assess(
 
 KNOWN_COMMANDS = {
     "scan", "assess", "doctor", "tools", "console", "gallery", "artifacts",
-    "settings", "report", "ask", "ai",
+    "settings", "report", "ask", "ai", "status", "replay", "benchmark",
     "--help", "-h", "--version", "-v",
 }
 

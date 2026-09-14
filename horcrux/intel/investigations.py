@@ -22,6 +22,27 @@ class InvestigationState(str, Enum):
     SUPPORTED = "SUPPORTED"
     REFUTED = "REFUTED"
     COMPLETE = "COMPLETE"
+    # --- Phase 7 execution outcomes (never COMPLETE on process-exit alone) ---
+    FAILED = "FAILED"  # execution failed
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"  # ran but no useful evidence
+    UNAVAILABLE = "UNAVAILABLE"  # capability unavailable
+    SCOPE_BLOCKED = "SCOPE_BLOCKED"  # scope/policy blocked
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"  # operator approval required
+
+
+ACTIONABLE_STATES = {InvestigationState.READY, InvestigationState.PENDING}
+TERMINAL_EVIDENCE_STATES = {
+    InvestigationState.SUPPORTED, InvestigationState.REFUTED,
+    InvestigationState.COMPLETE, InvestigationState.INSUFFICIENT_EVIDENCE,
+}
+ALL_DONE_STATES = TERMINAL_EVIDENCE_STATES | {InvestigationState.FAILED}
+
+
+#Cosmetic/low-value observations must never dominate scheduling.
+LOW_VALUE_OBJECTIVE_PATTERNS = (
+    "robots.txt", "sitemap.xml", "favicon", "banner grab",
+    "server header", "generic header",
+)
 
 
 class InvestigationScore(BaseModel):
@@ -86,6 +107,15 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
             "gain": "high",
             "specialist": "AuthorizationAgent",
             "impact": 0.85,
+        },
+        {
+            "objective": "Compare object access across identities (horizontal/vertical)",
+            "capabilities": ["http"],
+            "tools": ["identity_compare", "authz_compare"],
+            "gain": "high",
+            "specialist": "AuthorizationAgent",
+            "impact": 0.9,
+            "prerequisites": ["two_identities"],
         },
     ],
     HypothesisClass.PRIVILEGE_ESCALATION: [
@@ -219,6 +249,7 @@ def generate_investigations(
                 vulnerability_classes=[hyp.hypothesis_class.value],
                 required_capabilities=tmpl["capabilities"],
                 candidate_tools=tmpl["tools"],
+                prerequisites=list(tmpl.get("prerequisites", [])),
                 expected_information_gain=tmpl["gain"],
                 hypothesis_id=hyp.id,
                 specialist=tmpl["specialist"],
@@ -297,9 +328,21 @@ def _coverage_key_for_class(hyp_class: HypothesisClass) -> str:
 
 
 def rank_investigations(investigations: list[Investigation]) -> list[Investigation]:
-    """Rank investigations by information gain score."""
+    """Rank investigations by information gain score.
+
+    Low-value cosmetic observations (robots.txt, favicon, ...) are demoted so
+    information-dense security investigations dominate.
+    """
     for inv in investigations:
         inv.priority = inv.score.total
+        objective = (inv.objective or "").lower()
+        if any(pat in objective for pat in LOW_VALUE_OBJECTIVE_PATTERNS):
+            inv.priority = max(0.0, inv.priority - 0.35)
+        # High-impact classes dominate.
+        high_value = {"idor_bola", "privilege_escalation", "authentication",
+                      "business_logic", "ssrf", "graphql", "file_upload"}
+        if any(vc in high_value for vc in (inv.vulnerability_classes or [])):
+            inv.priority = min(1.0, inv.priority + 0.05)
     return sorted(investigations, key=lambda i: -i.priority)
 
 
@@ -307,18 +350,33 @@ def merge_investigations(
     existing: list[Investigation],
     candidates: list[Investigation],
 ) -> list[Investigation]:
-    """Deduplicate and preserve state of in-progress investigations."""
+    """Deduplicate and preserve state of in-progress investigations.
+
+    Terminal and parked states (COMPLETE/SUPPORTED/REFUTED/FAILED/UNAVAILABLE/
+    SCOPE_BLOCKED/APPROVAL_REQUIRED/BLOCKED/INSUFFICIENT_EVIDENCE) are never
+    regenerated — preventing repeated impossible investigations (Part 43).
+    """
+    _PARKED = {
+        InvestigationState.RUNNING,
+        InvestigationState.COMPLETE,
+        InvestigationState.SUPPORTED,
+        InvestigationState.REFUTED,
+        InvestigationState.INSUFFICIENT_EVIDENCE,
+        InvestigationState.FAILED,
+        InvestigationState.UNAVAILABLE,
+        InvestigationState.SCOPE_BLOCKED,
+        InvestigationState.APPROVAL_REQUIRED,
+        InvestigationState.BLOCKED,
+    }
     lookup = {i.id: i for i in existing}
     merged: list[Investigation] = []
     for cand in candidates:
         if cand.id in lookup:
             old = lookup[cand.id]
-            if old.state in {
-                InvestigationState.RUNNING,
-                InvestigationState.COMPLETE,
-                InvestigationState.SUPPORTED,
-                InvestigationState.REFUTED,
-            }:
+            if old.state in _PARKED:
+                # Refresh evidence refs but keep the parked outcome.
+                if cand.evidence_refs:
+                    old.evidence_refs = list(set(old.evidence_refs + cand.evidence_refs))
                 merged.append(old)
             else:
                 cand.state = old.state
@@ -327,10 +385,7 @@ def merge_investigations(
             merged.append(cand)
     done_ids = {i.id for i in merged}
     for old in existing:
-        if old.id not in done_ids and old.state in {
-            InvestigationState.RUNNING,
-            InvestigationState.COMPLETE,
-        }:
+        if old.id not in done_ids and old.state in _PARKED:
             merged.append(old)
     return merged
 

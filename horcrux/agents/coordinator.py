@@ -30,13 +30,18 @@ def run_full_assessment(
     workspace: Workspace,
     ai_manager=None,
     max_iterations: int = 15,
+    max_workers: int = 1,
+    observer=None,
 ) -> None:
     """Run complete agentic assessment loop."""
     state = workspace.load()
     state.assessment_phase = AssessmentPhase.RECONNAISSANCE.value
     workspace.save(state)
 
-    root = RootVAPTOrchestrator(workspace, ai_manager=ai_manager, max_iterations=max_iterations)
+    root = RootVAPTOrchestrator(workspace, ai_manager=ai_manager,
+                               max_iterations=max_iterations,
+                               max_workers=max_workers,
+                               observer=observer)
     root.run_assessment_loop()
     _sync_actions(workspace)
 

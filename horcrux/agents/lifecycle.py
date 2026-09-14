@@ -38,6 +38,12 @@ def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     candidates = generate_investigations(app, hypotheses, coverage_gaps)
     existing = state.get_investigations()
     merged = merge_investigations(existing, candidates)
+    # Dependency graph: score prerequisites, park impossible work as BLOCKED.
+    try:
+        from horcrux.intel.dependencies import apply_dependencies
+        merged = apply_dependencies(state, merged)
+    except Exception:
+        pass
     state.set_investigations(rank_investigations(merged))
 
     coverage = calculate_coverage(app, hypotheses, state.get_investigations(), coverage)
@@ -46,7 +52,50 @@ def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     state.attack_paths = attack_paths_to_dict(build_attack_paths(state))
 
     run_reasoning_checkpoint(state, ReasoningCheckpoint.AFTER_HYPOTHESIS_CREATION, ai_manager)
+    # Reassessment history for state-delta analysis ("what changed").
+    try:
+        from horcrux.intel.events import snapshot_counts
+        hist = (state.scheduler_state or {}).get("history", [])
+        hist.append(snapshot_counts(state))
+        state.scheduler_state = {**(state.scheduler_state or {}), "history": hist[-5:]}
+    except Exception:
+        pass
     return state
+
+
+def recover_interrupted(state: WorkspaceState) -> dict[str, Any]:
+    """Resume-safe recovery after interruption (Part 23).
+
+    - RUNNING investigations (interrupted mid-execution) return to READY.
+    - Verifies stored model/hypothesis/investigation consistency.
+    - Never discards completed evidence; never blindly reruns expensive work
+      (terminal states are preserved).
+    """
+    from typing import Any as _Any
+    from horcrux.intel.investigations import InvestigationState
+    report: dict[str, _Any] = {"recovered": [], "warnings": []}
+    try:
+        app = state.get_application_model()
+    except Exception as exc:
+        report["warnings"].append(f"application model unreadable: {exc}")
+        return report
+    invs = state.get_investigations()
+    for inv in invs:
+        if inv.state == InvestigationState.RUNNING:
+            inv.state = InvestigationState.READY
+            inv.result_summary = "recovered: interrupted mid-execution; rescheduled"
+            report["recovered"].append(inv.id)
+    # Consistency: hypothesis asset refs pointing at vanished endpoints.
+    try:
+        ep_ids = {e.id for e in app.endpoints}
+        for h in state.get_hypotheses():
+            stale = [r for r in h.asset_refs if r.startswith(("ep", "endpoint")) and r not in ep_ids]
+            if stale:
+                report["warnings"].append(f"hypothesis {h.id[:8]} refs {len(stale)} stale asset(s)")
+    except Exception as exc:
+        report["warnings"].append(f"consistency check skipped: {exc}")
+    state.set_investigations(invs)
+    return report
 
 
 def assessment_has_actionable_work(state: WorkspaceState) -> bool:
@@ -99,13 +148,22 @@ def prepare_exploit_handoffs(state: WorkspaceState) -> list[ExploitHandoff]:
         handoff = ExploitHandoff(
             id=f"handoff-{finding.id}",
             finding_id=finding.id,
+            target=finding.target or state.target,
+            vulnerability=finding.title,
             affected_asset=finding.affected_asset or finding.target,
+            affected_component=finding.category,
             evidence=finding.evidence,
-            prerequisites=["Operator authorization", "Scoped target access"],
+            prerequisites=["Operator authorization", "Scoped target access",
+                           *(finding.reproduction[:1] or [])],
             reproduction_plan=finding.reproduction,
             expected_result=finding.title,
             impact=finding.why_it_matters,
             confidence=finding.confidence,
+            recommended_operator_action=finding.recommended_next_action or
+            "Manually validate within authorized scope before any exploitation.",
+            relevant_capabilities=["http_probe", "authz_compare", "endpoint_validate"],
+            relevant_tools=["http_probe", "authz_compare", "endpoint_validate"],
+            risks=["Service disruption", "Account lockout", "Legal/scope violation if mis-scoped"],
             operator_approval_required=True,
         )
         handoffs.append(handoff)

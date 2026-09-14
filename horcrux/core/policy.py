@@ -192,3 +192,37 @@ class EngagementPolicy:
             op_mode = OperatorMode.OPERATOR
         scope = EngagementScope.from_dict(data.get("scope", {}))
         return cls(mode=mode, operator_mode=op_mode, scope=scope)
+
+
+def _host_of(url_or_host: str) -> str:
+    """Extract hostname from a URL or bare host[:port] string."""
+    text = (url_or_host or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(text).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def is_url_allowed(policy: EngagementPolicy, url: str) -> tuple[bool, str]:
+    """Deterministic URL scope check (target, hostname, redirect destination).
+
+    Never relies on LLM instructions — pure policy evaluation (Part 25).
+    """
+    host = _host_of(url)
+    if not host:
+        return False, f"URL '{url}' has no parseable host."
+    return policy.is_target_allowed(host)
+
+
+def validate_redirect_chain(policy: EngagementPolicy, urls: list[str]) -> tuple[bool, str]:
+    """Ensure every redirect hop stays in scope (Part 25)."""
+    for url in urls or []:
+        ok, reason = is_url_allowed(policy, url)
+        if not ok:
+            return False, f"Redirect escapes scope at '{url}': {reason}"
+    return True, "Redirect chain within scope."

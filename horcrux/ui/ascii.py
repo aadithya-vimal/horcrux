@@ -28,26 +28,30 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 # HORCRUX TITLE & FRAMES
 # ---------------------------------------------------------------------------
+# Block-letter wordmark in ANSI-Shadow style. Each glyph was hand-verified:
+# the 6th letter is U (two vertical sides, curved bottom, no central stem),
+# NOT Y (converging arms + central stem). See tests/test_visual_branding.py.
+# Caption "HORCRUX" underneath is the plain-text source of truth.
 
 TITLE = r"""
-██╗  ██╗ ██████╗ ██████╗  ██████╗██████╗ ██╗   ██╗██╗  ██╗
-██║  ██║██╔═══██╗██╔══██╗██╔════╝██╔══██╗╚██╗ ██╔╝╚██╗██╔╝
-███████║██║   ██║██████╔╝██║     ██████╔╝ ╚████╔╝  ╚███╔╝ 
-██╔══██║██║   ██║██╔══██╗██║     ██╔══██╗  ╚██╔╝   ██╔██╗ 
-██║  ██║╚██████╔╝██║  ██║╚██████╗██║  ██║   ██║   ██╔╝ ██╗
-╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝
+██╗  ██╗ ██████╗ ██████╗ ██████╗ ██████╗ ██╗   ██╗ ██╗  ██╗
+██║  ██║ ██╔═══██╗ ██╔══██╗ ██╔══██╗ ██╔══██╗ ██║   ██║ ╚██╗██╔╝
+███████║ ██║   ██║ ██████╔╝ ██║     ██████╔╝ ██║   ██║  ╚███╔╝
+██╔══██║ ██║   ██║ ██╔══██╗ ██║     ██╔══██╗ ██║   ██║  ██╔██╗
+██║  ██║ ╚██████╔╝ ██║  ██║ ╚██████╔╝ ██║  ██║ ╚██████╔╝ ██╔╝ ██╗
+╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝
                       HORCRUX
 """.strip("\n")
 
 TITLE_FRAMES = [
     TITLE,
-r"""
-██╗  ██╗ ██████╗ ██████╗  ██████╗██████╗ ██╗   ██╗██╗  ██╗
-██║  ██║██╔═══██╗██╔══██╗██╔════╝██╔══██╗╚██╗ ██╔╝╚██╗██╔╝
-███████║██║   ██║██████╔╝██║     ██████╔╝ ╚████╔╝  ╚███╔╝ 
-██╔══██║██║   ██║██╔══██╗██║     ██╔══██╗  ╚██╔╝   ██╔██╗ 
-██║  ██║╚██████╔╝██║  ██║╚██████╗██║  ██║   ██║   ██╔╝ ██╗
-╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝
+    r"""
+██╗  ██╗ ██████╗ ██████╗ ██████╗ ██████╗ ██╗   ██╗ ██╗  ██╗
+██║  ██║ ██╔═══██╗ ██╔══██╗ ██╔══██╗ ██╔══██╗ ██║   ██║ ╚██╗██╔╝
+███████║ ██║   ██║ ██████╔╝ ██║     ██████╔╝ ██║   ██║  ╚███╔╝
+██╔══██║ ██║   ██║ ██╔══██╗ ██║     ██╔══██╗ ██║   ██║  ██╔██╗
+██║  ██║ ╚██████╔╝ ██║  ██║ ╚██████╔╝ ██║  ██║ ╚██████╔╝ ██╔╝ ██╗
+╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝
 """.strip("\n"),
 ]
 
@@ -428,68 +432,80 @@ def render(
 # ANIMATED BANNERS & EFFECTS
 # ---------------------------------------------------------------------------
 
+def _write_raw(console: Console, text: str) -> None:
+    """Write terminal-ready bytes verbatim.
+
+    Bypasses Rich markup parsing and line wrapping so pre-colored art
+    (e.g. the exact HORCRUX heading) reaches the terminal byte-for-byte.
+    Falls back to a non-wrapping Rich print if direct write fails.
+    """
+    try:
+        console.file.write(text)
+    except Exception:
+        try:
+            console.print(text, markup=False, highlight=False, soft_wrap=True)
+            return
+        except Exception:
+            return
+    try:
+        console.file.flush()
+    except Exception:
+        pass
+
+
+def print_heading(console: Console) -> None:
+    """Print the exact HORCRUX heading verbatim (no panel, no reflow).
+
+    Shared by startup, assessment headers, and anywhere the identity mark
+    is shown, keeping the visual mark consistent.
+    """
+    from horcrux.ui import heading as _heading
+    _write_raw(console, _heading.render() + "\n")
+
+
 def banner(
     console: Console,
     version: str | None = None,
     duration: float = 1.0,
     palette: str = "horcrux",
 ):
-    """Animated shimmering banner with particle wave."""
-    art_idx = random.randrange(len(GRAPHIC_DATA))
-    item = GRAPHIC_DATA[art_idx]
+    """Startup splash: exact HORCRUX heading → init → ready.
 
-    deadline = time.monotonic() + duration
-    frame = 0
+    The heading art (``horcrux.ui.heading``) is user-supplied and printed
+    byte-for-byte — never recolored, reflowed, paneled, or passed through
+    Rich markup. Only the caption/status lines around it are themed.
+    Fast by design (sub-second) and animation-respecting.
+    """
+    from horcrux.ui import theme as _theme
 
-    with Live(
-        console=console,
-        refresh_per_second=14,
-        transient=True,
-    ) as live:
-        while time.monotonic() < deadline:
-            title_text = render_gradient_text(TITLE, palette_name=palette, shift=frame * 4)
+    animate = _theme.animations_enabled() and duration > 0
 
-            header_panel = Panel(
-                Align.center(
-                    Text.assemble(
-                        generate_sparkle_line(54, density=0.12),
-                        "\n",
-                        title_text,
-                        "\n",
-                        Text("✦ ─── THE FRAGMENTS REVEAL THE WHOLE ─── ✦", style="bold bright_magenta"),
-                        f"\n[dim cyan]v{version or '1.0.0'}[/dim cyan] [dim white]• Autonomous Attack Surface Orchestration[/dim white]\n",
-                        generate_sparkle_line(54, density=0.12),
+    if animate:
+        # Transient init status only — the heading itself is never animated.
+        steps = ["loading workspace", "checking capabilities", "ready"]
+        deadline = time.monotonic() + min(max(duration, 0.15), 0.9)
+        idx = 0
+        try:
+            with Live(console=console, refresh_per_second=8, transient=True) as live:
+                while time.monotonic() < deadline:
+                    live.update(
+                        Text(f"  {_theme.SUBTLE_SPINNER[idx % len(_theme.SUBTLE_SPINNER)]} "
+                             f"{steps[min(idx, len(steps) - 1)]}...",
+                             style="dim cyan"),
+                        refresh=True,
                     )
-                ),
-                box=box.DOUBLE_EDGE,
-                border_style="bright_magenta",
-                padding=(0, 1),
-            )
+                    idx += 1
+                    time.sleep(0.22)
+        except Exception:
+            pass
 
-            live.update(
-                Align.center(header_panel)
-            )
-
-            frame += 1
-            time.sleep(0.07)
-
-    # Print clean static banner at rest
-    final_title = render_gradient_text(TITLE, palette_name=palette, shift=frame * 4)
-    final_panel = Panel(
-        Align.center(
-            Text.assemble(
-                final_title,
-                "\n\n",
-                Text("⚡ THE FRAGMENTS REVEAL THE WHOLE ⚡", style="bold bright_magenta"),
-                f"\n[bold cyan]v{version or '1.0.0'}[/bold cyan] [dim white]• Operator Reconnaissance & Intelligence Engine[/dim white]",
-            )
-        ),
-        box=box.ROUNDED,
-        border_style="magenta",
-        padding=(0, 2),
-    )
     console.print()
-    console.print(Align.center(final_panel))
+    print_heading(console)
+    console.print()
+    caption = Text()
+    caption.append(f"  v{version or '1.0.0'}", style="bold cyan")
+    caption.append("  •  operator console", style="dim white")
+    console.print(Align.center(caption))
     console.print()
 
 
@@ -499,7 +515,15 @@ def loading(
     duration: float = 0.7,
     style: str = "sparkle",
 ):
-    """Rich dynamic spinner animation with colorful particle waves."""
+    """Brief determinate-feeling wait with a single-line spinner.
+
+    Respects reduced-motion settings (prints the completion line directly).
+    For real phased work, prefer ScanProgressManager / AssessmentProgress.
+    """
+    from horcrux.ui import theme as _theme
+    if not _theme.animations_enabled() or duration <= 0:
+        console.print(f"  [bold green]{_theme.OK}[/bold green] [dim white]{message}[/dim white]")
+        return
     pulse_frames = [
         "⟦  ▰▱▱▱▱▱▱▱▱▱  ⟧",
         "⟦  ▰▰▱▱▱▱▱▱▱▱  ⟧",

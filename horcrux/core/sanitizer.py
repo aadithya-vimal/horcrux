@@ -90,6 +90,32 @@ def redact_secrets(text: str, extra_secrets: Optional[Iterable[str]] = None) -> 
     sanitized = re.sub(r"\bgsk_[0-9A-Za-z-_]{20,}\b", "gsk_••••[REDACTED]", sanitized)
     sanitized = re.sub(r"\bsk-[0-9A-Za-z-_]{20,}\b", "sk-••••[REDACTED]", sanitized)
 
+    # 3b. Redact JWTs (header.payload.signature) — Phase 8.
+    sanitized = re.sub(
+        r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b",
+        "[JWT-REDACTED]",
+        sanitized,
+    )
+
+    # 3c. Redact cookie/session values and JSON secret fields — Phase 8.
+    sanitized = re.sub(
+        r"(?i)((?:cookie|sessionid|session[_-]?id|session[_-]?token|auth[_-]?token|"
+        r"password|passwd|secret|set-cookie)\s*[:=]\s*)([^\s;,\"'}]+)",
+        r"\g<1>[REDACTED]",
+        sanitized,
+    )
+    # Bare bearer tokens without a header name (e.g. stored token values).
+    sanitized = re.sub(
+        r"(?i)\b(Bearer\s+)([A-Za-z0-9_\-\.~+/=]{6,})",
+        r"\g<1>[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?i)(\"?(?:password|secret|token|api_key|apikey|session)\"?\s*:\s*\")([^\"]+)(\")",
+        r"\g<1>[REDACTED]\g<3>",
+        sanitized,
+    )
+
     # 4. Redact any explicitly passed secret strings (e.g. active configured keys)
     if extra_secrets:
         for secret in extra_secrets:
@@ -99,3 +125,34 @@ def redact_secrets(text: str, extra_secrets: Optional[Iterable[str]] = None) -> 
                 sanitized = sanitized.replace(s, masked)
 
     return sanitized
+
+
+def redact_dict(data: Any, extra_secrets: Optional[Iterable[str]] = None) -> Any:
+    """Recursively redact secrets in structured data (reports, events, prompts)."""
+    if isinstance(data, str):
+        return redact_secrets(data, extra_secrets)
+    if isinstance(data, dict):
+        return {k: redact_dict(v, extra_secrets) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [redact_dict(v, extra_secrets) for v in data]
+    return data
+
+
+_SECRET_FINDINGS = [
+    (re.compile(r"\bAIza[0-9A-Za-z-_]{35}\b"), "google-api-key"),
+    (re.compile(r"\bsk-ant-[0-9A-Za-z-_]{20,}\b"), "anthropic-key"),
+    (re.compile(r"\bgsk_[0-9A-Za-z-_]{20,}\b"), "groq-key"),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"), "jwt"),
+    (re.compile(r"(?i)password\s*[:=]\s*\S+"), "password-assignment"),
+]
+
+
+def scan_for_secrets(text: str) -> list[dict[str, str]]:
+    """Audit helper: locate unredacted secret-like patterns in text output."""
+    hits: list[dict[str, str]] = []
+    for pattern, kind in _SECRET_FINDINGS:
+        for match in pattern.finditer(text or ""):
+            if "[REDACTED]" in match.group(0) or "••••" in match.group(0):
+                continue
+            hits.append({"kind": kind, "sample": match.group(0)[:24] + "…"})
+    return hits

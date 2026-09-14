@@ -132,6 +132,9 @@ class ScanProgressManager:
             self._running = True
             self.start_time = time.monotonic()
             self.operation.start("Reconnaissance Scan", total_items=len(self.stages))
+            from horcrux.ui import theme as _theme
+            if not _theme.animations_enabled():
+                return  # static mode: stages render once in stop()
             self._live = Live(
                 console=self.console,
                 refresh_per_second=12,
@@ -162,6 +165,13 @@ class ScanProgressManager:
         elapsed = max(0.0, time.monotonic() - self.start_time)
         completed_count = sum(1 for s in self.stages.values() if s.state == StageState.COMPLETED)
         total_count = len(self.stages)
+        from horcrux.ui import theme as _theme
+        if not _theme.animations_enabled():
+            # Static mode: one honest stage list, no animation frames.
+            for key, stage in self.stages.items():
+                mark = {StageState.COMPLETED: "done", StageState.SKIPPED: "skipped",
+                        StageState.FAILED: "failed"}.get(stage.state, "queued")
+                self.console.print(f"  [{mark}] {stage.name}")
         if self.aborted:
             self.console.print(
                 f"[bold yellow]⚠ Scan aborted by operator[/bold yellow] "
@@ -311,8 +321,10 @@ class ScanProgressManager:
 
             if self.active_tool:
                 cmd_summary = " ".join(self.active_args)
-                if len(cmd_summary) > 75:
-                    cmd_summary = cmd_summary[:72] + "..."
+                from horcrux.ui import theme as _theme
+                max_cmd = max(40, _theme.console_width(self.console) - 40)
+                if len(cmd_summary) > max_cmd:
+                    cmd_summary = cmd_summary[:max_cmd - 3] + "..."
                 tool_elapsed = self._format_time(now - (self.active_tool_start or now))
                 sub_table.add_row("Running", f"[bold bright_green]{self.active_tool}[/bold bright_green] [dim]({tool_elapsed})[/dim]")
                 sub_table.add_row("Command", f"[italic cyan]{cmd_summary}[/italic cyan]")
@@ -343,6 +355,231 @@ class ScanProgressManager:
             )
 
             return Group(panel)
+
+
+# ---------------------------------------------------------------------------
+# Assessment phase tracker — honest live view of the agentic loop.
+# ---------------------------------------------------------------------------
+
+ASSESSMENT_PHASES = [
+    "RECON",
+    "MODEL",
+    "HYPOTHESIZE",
+    "INVESTIGATE",
+    "REASSESS",
+    "SYNTHESIZE",
+    "HANDOFF",
+]
+
+INVESTIGATION_STEPS = [
+    "resolving capability",
+    "executing",
+    "collecting evidence",
+    "ingesting",
+    "reassessing",
+]
+
+
+class AssessmentProgress:
+    """Live assessment monitor reflecting REAL orchestrator state.
+
+    Feed via ``notify(event, payload)`` from the assessment loop; the
+    renderer never invents progress. All updates funnel through one Live
+    region (no flicker, no duplicated lines). ``observer()`` returns a
+    callback suitable for ``RootVAPTOrchestrator(observer=...)``.
+    """
+
+    def __init__(self, console: Console, target: str = ""):
+        from horcrux.ui import theme as _theme
+        self.console = console
+        self.target = target
+        self._theme = _theme
+        self._lock = threading.Lock()
+        self._running = False
+        self._live: Optional[Live] = None
+        self._thread: Optional[threading.Thread] = None
+        self._tick = 0
+        self.phase: str = "RECON"
+        self.done_phases: set[str] = set()
+        self.failed_phase: str = ""
+        self.investigation_id: str = ""
+        self.investigation_objective: str = ""
+        self.step_idx: int = -1  # -1 = between investigations
+        self.investigation_state: str = ""
+        self.agents: list[tuple[str, str]] = []
+
+    def observer(self):
+        def _cb(event: str, payload: dict | None = None) -> None:
+            self.notify(event, payload or {})
+        return _cb
+
+    def notify(self, event: str, payload: dict | None = None) -> None:
+        payload = payload or {}
+        with self._lock:
+            if event == "phase":
+                name = str(payload.get("name", "")).upper()
+                if name in ASSESSMENT_PHASES:
+                    for earlier in ASSESSMENT_PHASES:
+                        if earlier == name:
+                            break
+                        self.done_phases.add(earlier)
+                    self.phase = name
+                    if name != "INVESTIGATE":
+                        self.step_idx = -1
+            elif event == "investigation_start":
+                self.investigation_id = str(payload.get("id", ""))
+                self.investigation_objective = str(payload.get("objective", ""))
+                self.step_idx = 0
+                self.investigation_state = "RUNNING"
+                self.phase = "INVESTIGATE"
+            elif event == "investigation_step":
+                label = str(payload.get("step", ""))
+                if label in INVESTIGATION_STEPS:
+                    self.step_idx = INVESTIGATION_STEPS.index(label)
+            elif event == "investigation_done":
+                self.investigation_state = str(payload.get("state", "COMPLETE"))
+                self.step_idx = len(INVESTIGATION_STEPS)
+            elif event == "phase_failed":
+                self.failed_phase = str(payload.get("name", "")).upper()
+            elif event == "agents":
+                self.agents = [(str(n), str(s)) for n, s in payload.get("agents", [])]
+
+    def __enter__(self) -> "AssessmentProgress":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.stop(failed=exc_type is not None and exc_type is not KeyboardInterrupt)
+
+    def start(self) -> None:
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+        if not self._theme.animations_enabled():
+            return  # static mode: caller prints final snapshot via render_text()
+        self._live = Live(console=self.console, refresh_per_second=6,
+                          transient=True, auto_refresh=False)
+        try:
+            self._live.start()
+        except Exception:
+            self._live = None
+            return
+        self._thread = threading.Thread(target=self._render_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self, failed: bool = False) -> None:
+        with self._lock:
+            self._running = False
+        if self._thread:
+            self._thread.join(timeout=0.8)
+            self._thread = None
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+        if failed:
+            self.console.print("[bold red]✖ Assessment interrupted[/bold red]")
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            phases = []
+            for name in ASSESSMENT_PHASES:
+                if name == self.failed_phase:
+                    state = "FAILED"
+                elif name in self.done_phases or (
+                        ASSESSMENT_PHASES.index(name) < ASSESSMENT_PHASES.index(self.phase)):
+                    state = "DONE"
+                elif name == self.phase:
+                    state = "ACTIVE"
+                else:
+                    state = "QUEUED"
+                phases.append((name, state))
+            steps = []
+            if self.investigation_id:
+                for idx, label in enumerate(INVESTIGATION_STEPS):
+                    if idx < self.step_idx:
+                        state = "DONE"
+                    elif idx == self.step_idx and self.investigation_state == "RUNNING":
+                        state = "ACTIVE"
+                    elif idx <= self.step_idx:
+                        state = "DONE"
+                    else:
+                        state = "QUEUED"
+                    steps.append((label, state))
+            return {"phases": phases, "steps": steps,
+                    "investigation_id": self.investigation_id,
+                    "objective": self.investigation_objective,
+                    "inv_state": self.investigation_state,
+                    "agents": list(self.agents)}
+
+    def render_text(self) -> Text:
+        """Static snapshot (reduced-motion path and tests)."""
+        from horcrux.ui import theme as _theme
+        snap = self.snapshot()
+        text = Text()
+        text.append("HORCRUX ASSESSMENT", style=_theme.TITLE)
+        if self.target:
+            text.append(f"  •  {self.target}", style=_theme.META)
+        text.append("\n")
+        for line in _theme.phase_tracker(snap["phases"]):
+            text.append_text(Text.from_markup(line + "\n"))
+        if snap["investigation_id"]:
+            text.append(f"\n{snap['investigation_id']}", style=_theme.INVESTIGATION)
+            if snap["objective"]:
+                text.append(f"  {snap['objective'][:60]}", style="bright_white")
+            text.append("\n")
+            for line in _theme.investigation_steps(snap["steps"]):
+                text.append_text(Text.from_markup(line + "\n"))
+        return text
+
+    def _render_loop(self) -> None:
+        while self._running:
+            try:
+                if self._live:
+                    self._live.update(self._build_display(), refresh=True)
+            except Exception:
+                pass
+            self._tick += 1
+            time.sleep(0.16)
+
+    def _build_display(self) -> Group:
+        from horcrux.ui import theme as _theme
+        snap = self.snapshot()
+        width = _theme.console_width(self.console)
+        tick = _theme.SUBTLE_SPINNER[self._tick % len(_theme.SUBTLE_SPINNER)]
+
+        table = Table(box=box.MINIMAL, show_header=False, padding=(0, 1), expand=True)
+        table.add_column("Mark", width=3, no_wrap=True)
+        table.add_column("Phase", no_wrap=True)
+        table.add_column("State", justify="right", no_wrap=True)
+        for line in _theme.phase_tracker(snap["phases"], width):
+            # phase_tracker lines are "mark name  right"; split for columns
+            parts = Text.from_markup(line)
+            table.add_row("", parts, "")
+
+        group_items: list = [table]
+        if snap["investigation_id"]:
+            inv_title = Text()
+            inv_title.append(f"{tick} ", style="bold bright_cyan")
+            inv_title.append(snap["investigation_id"], style=_theme.INVESTIGATION)
+            if snap["objective"] and width >= 80:
+                inv_title.append(f"  {_theme.fit(snap['objective'], width - 24)}",
+                                 style="bright_white")
+            group_items.append(inv_title)
+            for line in _theme.investigation_steps(snap["steps"]):
+                group_items.append(Text.from_markup("  " + line))
+        if snap["agents"]:
+            shown = ", ".join(f"{n}({s})" for n, s in snap["agents"][:5])
+            group_items.append(Text.from_markup(f"[dim]agents:[/dim] {shown}"))
+
+        return Group(Panel(
+            Group(*group_items),
+            title="[bold bright_magenta]✦ HORCRUX ASSESSMENT ✦[/bold bright_magenta]",
+            box=box.ROUNDED, border_style="magenta", padding=(0, 1),
+        ))
 
 
 class AIProgressManager:
@@ -400,6 +637,9 @@ class AIProgressManager:
                 return
             self._running = True
             self.start_time = time.monotonic()
+            from horcrux.ui import theme as _theme
+            if not _theme.animations_enabled():
+                return
             self._live = Live(
                 console=self.console,
                 refresh_per_second=10,

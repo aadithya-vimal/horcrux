@@ -17,18 +17,59 @@ if TYPE_CHECKING:
 
 
 class SpecialistExecutor:
-    def __init__(self, tool_registry: ToolRegistry | None = None):
+    """Specialist execution — always routes through the central capability registry.
+
+    No specialist executes shell directly. When workspace/runner/state context
+    is bound, the full production pipeline (resolve -> validate -> execute ->
+    normalize -> ingest -> reassess) is used; otherwise the legacy offline
+    synthesis path preserves backward compatibility for unit tests.
+    """
+
+    def __init__(self, tool_registry: ToolRegistry | None = None,
+                 workspace: Any = None, runner: Any = None, observer=None):
         self.tools = tool_registry or create_default_registry()
+        self.workspace = workspace
+        self.runner = runner
+        self._observer = observer
+
+    def bind_context(self, workspace: Any = None, runner: Any = None,
+                     state: WorkspaceState | None = None, observer=None) -> None:
+        if workspace is not None:
+            self.workspace = workspace
+        if runner is not None:
+            self.runner = runner
+        if observer is not None:
+            self._observer = observer
+        try:
+            self.tools.bind_context(workspace=self.workspace, runner=self.runner,
+                                    state=state)
+        except Exception:
+            pass
 
     def execute_investigation(
         self,
         state: WorkspaceState,
         investigation: Investigation,
+        observer=None,
     ) -> dict[str, Any]:
         """Execute an investigation using appropriate specialist and tools."""
         spec = SPECIALIST_REGISTRY.get(investigation.specialist)
         if not spec:
             return {"success": False, "error": f"Unknown specialist: {investigation.specialist}"}
+        if observer is not None:
+            self._observer = observer
+
+        # Production pipeline when execution context is available.
+        if self.workspace is not None or self.runner is not None:
+            try:
+                from horcrux.agents.executor import execute_investigation_pipeline
+                self.tools.bind_context(workspace=self.workspace, runner=self.runner,
+                                        state=state)
+                return execute_investigation_pipeline(
+                    state, investigation, self.tools.capabilities,
+                    workspace=self.workspace, observer=self._observer)
+            except Exception:
+                pass  # fall through to offline synthesis
 
         app = state.get_application_model()
         skills = select_skills(

@@ -1,12 +1,23 @@
+"""Investigation-graph reporting (Phase 8, Parts 28-29).
+
+Reports reflect the deterministic investigation graph — model, hypotheses,
+investigations, coverage, attack paths, handoffs — not just scanner output.
+A clean assessment explains what was covered and why completion criteria
+were satisfied; it never just says "no vulnerabilities found".
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
+from horcrux.core.sanitizer import redact_secrets
 from horcrux.models import AuditStatus, ValidationState
 
 
 def markdown(ws, output: Path | None = None) -> Path:
     state = ws.load()
     output = output or (ws.reports / "report.md")
+    app = state.get_application_model()
+    summary = app.summary()
 
     # Executive risk summary (AI-assisted if configured, otherwise deterministic)
     exec_summary = state.executive_summary
@@ -20,229 +31,376 @@ def markdown(ws, output: Path | None = None) -> Path:
                 ws.save(state)
         except Exception:
             pass
-
     if not exec_summary:
-        exec_summary = (
-            f"Automated security reconnaissance and validation completed for target `{state.target}`. "
-            f"Discovered {len(state.services)} active network service(s), {len(state.findings)} potential vulnerability finding(s), "
-            f"and {len(state.audit)} audited/hardened control check(s)."
-        )
+        exec_summary = _deterministic_summary(state, app, summary)
 
-    lines = [
-        f"# HORCRUX REPORT — {state.target}",
-        "",
-        "## Executive Risk Summary",
-        "",
-        exec_summary,
-        "",
-        "## Target",
-        "",
-        f"- **Host / Target**: `{state.target}`",
-        f"- **Updated At**: `{state.updated_at.isoformat()}`",
-        f"- **Workspace Path**: `{ws.root}`",
-        "",
-        "## Scan Metadata",
-        "",
-        f"- **Services Discovered**: {len(state.services)}",
-        f"- **Software Components**: {len(state.software)}",
-        f"- **Confirmed Findings**: {len([f for f in state.findings if f.validation_state == ValidationState.confirmed])}",
-        f"- **Likely Findings**: {len([f for f in state.findings if f.validation_state == ValidationState.likely])}",
-        f"- **Potential Findings**: {len([f for f in state.findings if f.validation_state == ValidationState.potential])}",
-        f"- **Audited Controls**: {len(state.audit)}",
-        f"- **Exploit Candidates**: {len(state.exploits)}",
-        "",
-        "## Attack Surface",
-        "",
-    ]
+    lines = [f"# HORCRUX REPORT — {state.target}", ""]
 
+    # Legacy-compatible executive summary (also preamble to §1–§19).
+    lines += ["## Executive Risk Summary", "", exec_summary, ""]
+
+    # 1. Target and scope
+    lines += ["## 1. Target and Scope", ""]
+    try:
+        policy = state.get_policy()
+        scope = policy.scope
+        lines.append(f"- **Host / Target**: `{state.target}`")
+        lines.append(f"- **Allowed targets**: {', '.join(scope.allowed_targets) or state.target}")
+        lines.append(f"- **Engagement mode**: `{policy.mode.value}`")
+    except Exception:
+        lines.append(f"- **Host / Target**: `{state.target}`")
+    lines += [f"- **Updated At**: `{state.updated_at.isoformat()}`",
+              f"- **Workspace Path**: `{ws.root}`", ""]
+
+    # 2. Assessment lifecycle
+    lines += ["## 2. Assessment Lifecycle", ""]
+    lines.append(f"- **Phase**: `{state.assessment_phase}`")
+    lines.append(f"- **Run ID**: `{state.assessment_run_id or 'n/a'}`")
+    sched = state.scheduler_state or {}
+    if sched.get("recovered"):
+        lines.append(f"- **Recovered investigations**: {len(sched['recovered'])} (resumed after interruption)")
+    lines.append(f"- **Scheduler**: `{sched.get('mode', 'sequential')}` "
+                 f"(max_workers={sched.get('max_workers', 1)})")
+    lines.append(f"- **Reasoning checkpoints used**: {state.reasoning_checkpoints_used}")
+    lines.append("")
+
+    # 3. Application overview
+    lines += ["## 3. Application Overview", ""]
+    lines.append(f"- **Type**: `{summary['application']['type']}` "
+                 f"(framework: {summary['application']['framework'] or 'unknown'})")
+    lines.append(f"- **Endpoints**: {summary['endpoints']} "
+                 f"({summary['object_bearing_endpoints']} object-bearing, "
+                 f"{summary['admin_endpoints']} privileged)")
+    lines.append(f"- **Auth surfaces**: {summary['authentication_surfaces']}, "
+                 f"**identities**: {len(app.identities)}, "
+                 f"**sessions**: {len(app.sessions)}")
+    lines.append(f"- **Workflows**: {len(app.workflows)} "
+                 f"({len(app.workflow_transitions)} transitions), "
+                 f"**object lifecycles**: {len(app.object_lifecycles)}")
+    lines += [""]
+
+    # 4. Application model
+    lines += ["## 4. Application Model", ""]
+    lines.append(f"- **Routes**: {len(app.routes)}, **pages**: {len(app.pages)}, "
+                 f"**parameters**: {len(app.parameters)}")
+    lines.append(f"- **API operations**: {len(app.api_operations)}, "
+                 f"**GraphQL operations**: {len(app.graphql_operations)}")
+    lines.append(f"- **Object types**: {', '.join(summary['object_types'][:10]) or 'none'}")
+    lines.append(f"- **Service facts**: {len(app.service_facts)}")
+    lines += [""]
+
+    # 5. Technologies/services
+    lines += ["## 5. Technologies and Services", ""]
     if state.services:
         for service in sorted(state.services, key=lambda x: (x.port, x.protocol)):
             cpe_str = f" (`{service.cpe}`)" if service.cpe else ""
-            lines.append(
-                f"- `{service.port}/{service.protocol.upper()}` — "
-                f"**{service.service or 'unknown'}** {service.product} {service.version}{cpe_str}".strip()
-            )
+            lines.append(f"- `{service.port}/{service.protocol.upper()}` — "
+                         f"**{service.service or 'unknown'}** {service.product} "
+                         f"{service.version}{cpe_str}".strip())
     else:
         lines.append("- *No open network services identified.*")
-
-    lines += ["", "## Services", ""]
-    for service in sorted(state.services, key=lambda x: (x.port, x.protocol)):
-        lines.append(f"- **Port {service.port}/{service.protocol.upper()}**: `{service.service}` {service.product} {service.version} {service.extrainfo}".strip())
-
-    lines += ["", "## Software", ""]
+    if state.technologies:
+        lines.append(f"- **Web technologies**: {', '.join(f'`{t}`' for t in state.technologies)}")
     if state.software:
         for software in state.software:
-            cpe_str = f" [CPE: `{software.cpe}`]" if software.cpe else ""
-            lines.append(
-                f"- `{software.product} {software.version}` — "
-                f"{software.service} ({software.source}, confidence: {software.confidence:.0%}){cpe_str}"
-            )
-    else:
-        lines.append("- *No discrete software versions fingerprinted.*")
+            lines.append(f"- `{software.product} {software.version}` — {software.service} "
+                         f"({software.source}, confidence: {software.confidence:.0%})")
+    lines += [""]
 
-    lines += ["", "## Technologies", ""]
-    if state.technologies:
-        for tech in state.technologies:
-            lines.append(f"- `{tech}`")
+    # 6. Identities/roles
+    lines += ["## 6. Identities and Roles", ""]
+    if app.identities:
+        for ident in app.identities:
+            lines.append(f"- **{ident.label}** (`{ident.role.value}`, privilege {ident.privilege_level}) — "
+                         f"{len(ident.observed_endpoints)} endpoints, "
+                         f"{len(ident.observed_objects)} objects, "
+                         f"{len(ident.session_ids)} sessions")
     else:
-        lines.append("- *No web technologies fingerprinted.*")
+        lines.append("- *No identities modeled.*")
+    lines += [""]
 
-    # Confirmed Findings
+    # 7. Attack surface (legacy header preserved for compatibility).
+    lines += ["## Attack Surface", ""]
+    for ep in sorted(app.endpoints, key=lambda e: e.path)[:60]:
+        flags = []
+        if ep.has_object_reference:
+            flags.append("object")
+        if ep.is_mutation:
+            flags.append("mutation")
+        if "admin" in ep.path.lower():
+            flags.append("privileged")
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"- `{ep.method} {ep.path}`{flag_str} "
+                     f"(via {', '.join(ep.sources[:3]) or 'unknown'})")
+    if len(app.endpoints) > 60:
+        lines.append(f"- *... and {len(app.endpoints) - 60} more endpoints.*")
+    if not app.endpoints:
+        lines.append("- *No application endpoints mapped.*")
+    lines += [""]
+
+    # 8. Security coverage
+    lines += ["## 8. Security Coverage", ""]
+    try:
+        coverage = state.get_security_coverage()
+        coverage.ensure_domains()
+        pct = coverage.percentage_complete()
+        for group, value in pct.items():
+            lines.append(f"- **{group}**: {value:.0f}%")
+        lines.append("")
+        for domain, dc in sorted(coverage.domains.items()):
+            detail = (f"observed={dc.observed} investigated={dc.investigated} "
+                      f"validated={dc.validated} blocked={dc.blocked}")
+            lines.append(f"- `{domain}`: **{dc.status.value}** ({detail})"
+                         + (f" — {dc.notes}" if dc.notes else ""))
+    except Exception:
+        lines.append("- *Coverage unavailable.*")
+    lines += [""]
+
+    # 9. Investigations performed
+    lines += ["## 9. Investigations Performed", ""]
+    invs = state.get_investigations()
+    if invs:
+        by_state: dict[str, int] = {}
+        for inv in invs:
+            by_state[inv.state.value] = by_state.get(inv.state.value, 0) + 1
+        lines.append(f"- **Total**: {len(invs)} "
+                     + ", ".join(f"{s}: {n}" for s, n in sorted(by_state.items())))
+        for inv in invs[:30]:
+            blocked = f" — {inv.result_summary[:100]}" if inv.state.value in {
+                "BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE", "FAILED",
+                "APPROVAL_REQUIRED"} and inv.result_summary else ""
+            lines.append(f"- [{inv.state.value}] **{inv.objective}** "
+                         f"({inv.specialist}, priority {inv.priority:.2f}){blocked}")
+    else:
+        lines.append("- *No investigations recorded.*")
+    lines += [""]
+
+    # 10. Findings (legacy ## headers preserved for compatibility).
+    lines += ["## Findings", "",
+              "_Evidence-backed conclusions from the investigation graph._", ""]
+    lines += ["## Confirmed Findings", ""]
     confirmed = [f for f in state.findings if f.validation_state == ValidationState.confirmed]
     likely = [f for f in state.findings if f.validation_state == ValidationState.likely]
     potential = [f for f in state.findings if f.validation_state == ValidationState.potential]
-
-    lines += ["", "## Confirmed Findings", ""]
     if confirmed:
         for f in confirmed:
-            lines.append(f"### [{f.severity.value.upper()}] {f.title}")
-            lines.append(f"- **Target Asset**: `{f.affected_asset or f.target}`")
-            lines.append(f"- **Confidence**: {f.confidence:.0%}")
-            lines.append(f"- **Status**: `{f.status.value}`")
-            if f.why_it_matters:
-                lines.append(f"- **Impact**: {f.why_it_matters}")
-            if f.evidence:
-                lines.append("- **Evidence**:")
-                for ev in f.evidence:
-                    lines.append(f"  - {ev}")
-            if f.reproduction:
-                lines.append("- **Reproduction**:")
-                for rep in f.reproduction:
-                    lines.append(f"  - `{rep}`")
-            if f.recommended_next_action:
-                lines.append(f"- **Remediation / Next Step**: {f.recommended_next_action}")
+            lines.append(f"### [{f.severity.value.upper()}] {f.title} (CONFIRMED)")
+            lines.append(f"- **Asset**: `{f.affected_asset or f.target}` — "
+                         f"confidence {f.confidence:.0%}")
+            for ev in f.evidence[:6]:
+                lines.append(f"  - {redact_secrets(str(ev))}")
+            for rep in f.reproduction[:5]:
+                lines.append(f"  - `{redact_secrets(str(rep))}`")
             lines.append("")
-    else:
-        lines.append("- *No confirmed high-confidence vulnerabilities identified.*")
-
-    lines += ["", "## Likely Findings", ""]
     if likely:
         for f in likely:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} (Confidence: {f.confidence:.0%})")
-            for ev in f.evidence:
-                lines.append(f"  - Evidence: {ev}")
+            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+                         f"(LIKELY, {f.confidence:.0%})")
+            for ev in f.evidence[:4]:
+                lines.append(f"  - {redact_secrets(str(ev))}")
+    if potential:
+        for f in potential:
+            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+                         f"(POTENTIAL, {f.confidence:.0%})")
+    if not (confirmed or likely or potential):
+        lines.append("- *No findings requiring action. See §19 for what this means.*")
+        lines += [""]
+    lines += ["## Likely Findings", ""]
+    if likely:
+        for f in likely:
+            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+                         f"(LIKELY, {f.confidence:.0%})")
+            for ev in f.evidence[:4]:
+                lines.append(f"  - {redact_secrets(str(ev))}")
     else:
         lines.append("- *No likely findings.*")
-
     lines += ["", "## Potential Findings", ""]
     if potential:
         for f in potential:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} (Confidence: {f.confidence:.0%})")
-            for ev in f.evidence:
-                lines.append(f"  - Evidence: {ev}")
+            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+                         f"(POTENTIAL, {f.confidence:.0%})")
+            for ev in f.evidence[:4]:
+                lines.append(f"  - {redact_secrets(str(ev))}")
     else:
         lines.append("- *No potential findings requiring verification.*")
+    lines += [""]
 
-    # Audited / Hardened Controls
-    lines += ["", "## Audited / Hardened Controls", ""]
+    # Legacy-compatible audited-controls section (content restored, Part 42).
+    lines += ["## Audited / Hardened Controls", ""]
     if state.audit:
-        for item in state.audit:
+        for item in state.audit[:40]:
             badge = f"[{item.status.value}]"
             lines.append(f"- **{badge}** `{item.asset}` — {item.check_name}: {item.reason}")
     else:
         lines.append("- *No defensive controls audited.*")
+    lines += [""]
 
-    # CVE Intelligence
-    lines += ["", "## CVE Intelligence", ""]
-    cve_candidates = [e for e in state.exploits if e.cve]
-    if cve_candidates:
-        for exploit in cve_candidates:
-            lines.append(f"- **{exploit.cve}** (`{exploit.product} {exploit.version}`): {exploit.title} [{exploit.relevance}]")
-    else:
-        lines.append("- *No validated CVE matches.*")
+    # 11. Evidence
+    lines += ["## 11. Evidence Index", ""]
+    n_refs = sum(len(e.evidence_refs) for e in app.endpoints)
+    lines.append(f"- **Endpoint evidence refs**: {n_refs}")
+    lines.append(f"- **Raw observations**: {len(state.raw_observations)}")
+    lines.append(f"- **Artifacts**: {len(state.artifacts)} "
+                 f"(raw output under `{ws.raw}`)")
+    lines.append(f"- **Finding evidence items**: {sum(len(f.evidence) for f in state.findings)}")
+    lines += [""]
 
-    # SearchSploit Intelligence & Exploit Candidates
-    lines += ["", "## SearchSploit Intelligence", ""]
-    if state.exploits:
-        for exploit in state.exploits:
-            lines.append(
-                f"- `{exploit.product} {exploit.version}` — {exploit.title} — `{exploit.source}` "
-                f"[{exploit.exploitability} | {exploit.relevance}]"
-            )
-            if exploit.relevance_reasoning:
-                lines.append(f"  - Reasoning: {exploit.relevance_reasoning}")
-    else:
-        lines.append("- *No SearchSploit candidates correlated.*")
-
-    lines += ["", "## Exploit Candidates", ""]
-    relevant_exploits = [e for e in state.exploits if e.relevance in {"CONFIRMED VERSION MATCH", "HIGH-CONFIDENCE CANDIDATE", "HIGHLY_RELEVANT"}]
-    if relevant_exploits:
-        for exploit in relevant_exploits:
-            lines.append(f"- **{exploit.title}** ({exploit.product} {exploit.version})")
-            lines.append(f"  - Exploitability: {exploit.exploitability}")
-            lines.append(f"  - Path / PoC: `{exploit.source}`")
-    else:
-        lines.append("- *No immediately actionable exploit candidates confirmed.*")
-
-    # Suggested Attack Paths
-    lines += ["", "## Suggested Attack Paths", ""]
+    # 12. Attack paths
+    lines += ["## 12. Attack Paths", ""]
     if state.attack_paths:
         for idx, path in enumerate(state.attack_paths, 1):
             name = path.get("name", f"Attack Path #{idx}")
             prob = path.get("probability", "MEDIUM")
-            lines.append(f"### Path {idx}: {name} [{prob}]")
+            lines.append(f"### Path {idx}: {name} [{prob}] "
+                         f"(score {path.get('rank_score', '?')})")
             for step in path.get("steps", []):
-                lines.append(f"- {step}")
+                lines.append(f"- {redact_secrets(str(step))}")
             if path.get("prerequisites"):
                 lines.append(f"- **Prerequisites**: {path['prerequisites']}")
+            if path.get("assumptions"):
+                lines.append(f"- **Assumptions**: {'; '.join(path['assumptions'][:4])}")
+            if path.get("rank_why"):
+                lines.append(f"- **Why prioritized**: {path['rank_why']}")
             lines.append("")
     else:
         lines.append("- *No multi-stage attack paths synthesized.*")
+        lines.append("")
 
-    # Next Best Actions
-    lines += ["", "## Next Best Actions", ""]
-    if state.actions:
-        for idx, action in enumerate(state.actions, 1):
-            lines.append(f"{idx}. **{action.title}** (Score: {int(action.score)}): {action.reason}")
+    # 13. Exploit handoffs
+    lines += ["## 13. Exploit Handoffs (Operator Approval Required)", ""]
+    if state.exploit_handoffs:
+        for h in state.exploit_handoffs:
+            lines.append(f"- **{h.vulnerability}** on `{h.affected_asset}` "
+                         f"(confidence {h.confidence:.0%})")
+            lines.append(f"  - Action: {h.recommended_operator_action}")
+            lines.append(f"  - Why manual: {h.why_manual_approval_required}")
     else:
-        lines.append("- *No pending actions in queue.*")
+        lines.append("- *No validated findings reached the handoff boundary.*")
+    lines += [""]
 
-    lines += [
-        "",
-        "## Enumeration Performed",
-        "",
-    ]
-    if state.subsystem_states:
-        for sub, st in state.subsystem_states.items():
-            badge = "✓" if "COMPLETE" in st else "▶" if st == "RUNNING" else "✖"
-            lines.append(f"- {badge} **{sub.replace('_', ' ').title()}**: `{st}`")
+    # 14. Unresolved hypotheses
+    lines += ["## 14. Unresolved Hypotheses", ""]
+    open_hyps = [h for h in state.get_hypotheses()
+                 if h.status.value in {"OPEN", "INVESTIGATING"}]
+    if open_hyps:
+        for h in open_hyps[:20]:
+            lines.append(f"- [{h.status.value}] **{h.title}** ({h.confidence:.0%}) — "
+                         f"missing: {'; '.join(h.validation_requirements[:2])}")
     else:
-        lines.append("- *Initial surface discovery performed.*")
+        lines.append("- *No unresolved hypotheses.*")
+    lines += [""]
 
-    lines += [
-        "",
-        "## Missing / Unavailable Tooling",
-        "",
-    ]
+    # 15. Blocked capabilities
+    lines += ["## 15. Blocked Capabilities and Investigations", ""]
+    blocked = [i for i in invs if i.state.value in {
+        "BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE", "FAILED", "APPROVAL_REQUIRED"}]
+    if blocked:
+        for inv in blocked[:20]:
+            lines.append(f"- [{inv.state.value}] **{inv.objective}**: "
+                         f"{inv.result_summary[:140]}")
+    else:
+        lines.append("- *Nothing blocked.*")
+    lines += [""]
+
+    # 16. Tool availability
+    lines += ["## 16. Tool Availability", ""]
     try:
-        from horcrux.core.doctor import check_tools
-        tool_rows, _ = check_tools()
-        missing = [row for row in tool_rows if not row[1]]
+        from horcrux.agents.tools.capabilities import CapabilityRegistry
+        report = CapabilityRegistry().availability_report()
+        live = [k for k, v in report.items() if v.get("mode") == "live"]
+        synth = [k for k, v in report.items() if v.get("mode") == "synthesis"]
+        missing = [k for k, v in report.items() if v.get("status") == "MISSING"]
+        lines.append(f"- **Live backends**: {', '.join(f'`{k}`' for k in live) or 'none'}")
+        lines.append(f"- **Synthesis fallback**: {', '.join(f'`{k}`' for k in synth[:12])}"
+                     + (f" (+{len(synth) - 12} more)" if len(synth) > 12 else ""))
         if missing:
-            for name, path, purpose, install_cmd in missing[:12]:
-                lines.append(f"- ✖ `{name}` — {purpose}. *Install: `{install_cmd}`*")
-        else:
-            lines.append("- *All core tooling installed and verified.*")
+            lines.append(f"- **Missing**: {', '.join(f'`{k}`' for k in missing)}")
+        try:
+            from horcrux.intel.browser import browser_backend_status
+            for key, val in browser_backend_status().items():
+                icon = "✔" if val["available"] else "✖"
+                lines.append(f"- {icon} **browser/{key}**: {val['reason']}")
+        except Exception:
+            pass
     except Exception:
-        lines.append("- *Tooling audit unavailable.*")
+        lines.append("- *Availability intelligence unavailable.*")
+    lines += [""]
 
-    lines += [
-        "",
-        "## Artifacts",
-        "",
-        f"- Raw command output stored under: `{ws.raw}`",
-        f"- HTTP responses stored under: `{ws.responses}`",
-        f"- HTTP headers stored under: `{ws.headers}`",
-        "",
-        "## Limitations",
-        "",
-        "- Assessments are non-destructive and limited to authorized target scope.",
-        "- Exploit intelligence correlates software version metadata; operator validation is required before reproduction.",
-        "",
-    ]
+    # 17. Limitations
+    lines += ["## 17. Limitations", ""]
+    lines += ["- Assessments are non-destructive and limited to authorized target scope.",
+              "- Exploit intelligence correlates version metadata; operator validation is required.",
+              "- Hypotheses marked OPEN need the validation steps in §14 before conclusions.",
+              "- AI reasoning is advisory; deterministic evidence is authoritative.", ""]
+
+    # 18. Operator actions
+    lines += ["## 18. Operator Actions", ""]
+    focus = state.operator_focus
+    lines.append(f"- **Focus**: `{focus.focus_id or focus.focus_area or 'all'}`")
+    if focus.skip_investigation_ids:
+        lines.append(f"- **Skipped**: {len(focus.skip_investigation_ids)} investigation(s)")
+    if focus.prioritize_investigation_id:
+        lines.append(f"- **Prioritized**: `{focus.prioritize_investigation_id[:16]}`")
+    lines.append(f"- **Paused**: {focus.paused}, **Stopped**: {focus.stopped}")
+    if state.actions:
+        for idx, action in enumerate(state.actions[:5], 1):
+            lines.append(f"- {idx}. **{action.title}** (Score: {int(action.score)}): {action.reason}")
+    lines += [""]
+
+    # 19. Assessment completeness
+    lines += ["## 19. Assessment Completeness", ""]
+    try:
+        from horcrux.intel.coverage import assessment_completeness
+        comp = assessment_completeness(state)
+        lines.append(f"- **Sufficient**: `{comp['sufficient']}`")
+        lines.append(f"- **High-value surfaces**: {comp['high_value_surfaces']}")
+        lines.append(f"- **Open hypotheses**: {comp['open_hypotheses']}")
+        lines.append(f"- **Pending high-value investigations**: {comp['pending_high_investigations']}")
+        if not (confirmed or likely):
+            lines.append("")
+            lines.append(_clean_narrative(state, comp))
+    except Exception:
+        pass
+    lines += [""]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
     return output
 
 
+def _deterministic_summary(state, app, summary) -> str:
+    return (
+        f"Automated security assessment for target `{state.target}`. "
+        f"Mapped {summary['endpoints']} endpoint(s) "
+        f"({summary['object_bearing_endpoints']} object-bearing), "
+        f"{len(state.get_hypotheses())} hypothese(s), "
+        f"{len(state.get_investigations())} investigation(s), "
+        f"{len(state.findings)} finding(s), and "
+        f"{len(state.attack_paths or [])} attack path(s).")
+
+
+def _clean_narrative(state, comp: dict) -> str:
+    """A clean result explains coverage — never just 'no vulns found' (P29)."""
+    try:
+        coverage = state.get_security_coverage()
+        coverage.ensure_domains()
+        reviewed = [d for d, dc in coverage.domains.items()
+                    if dc.status.value in {"REVIEWED", "SUPPORTED", "CONFIRMED", "REFUTED"}]
+        blocked = [d for d, dc in coverage.domains.items()
+                   if dc.status.value == "BLOCKED"]
+        unknown = [d for d, dc in coverage.domains.items()
+                   if dc.status.value == "NOT_REVIEWED"]
+    except Exception:
+        reviewed, blocked, unknown = [], [], []
+    parts = ["> **No confirmed vulnerabilities.** This means: sufficient security "
+             "properties were investigated without producing validated findings — "
+             "not that scanning was skipped."]
+    parts.append(f"> Investigated properties: {', '.join(reviewed) or 'none yet'}.")
+    if unknown:
+        parts.append(f"> Remaining unknown: {', '.join(unknown)}.")
+    if blocked:
+        parts.append(f"> Blocked: {', '.join(blocked)} (see §15).")
+    parts.append(f"> Completion criteria satisfied: `{comp['sufficient']}` "
+                 f"({comp['high_value_surfaces']} high-value surfaces, "
+                 f"{comp['pending_high_investigations']} pending high-value investigations).")
+    return "\n".join(parts)

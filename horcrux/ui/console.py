@@ -149,56 +149,61 @@ class ConsoleApp:
 
         categories = [
             (
-                "⚡ RECONNAISSANCE & ATTACK SURFACE",
+                "ASSESSMENT",
                 [
                     ("scan <target> [--profile <name>] [--deep] [--verify]", "Full automated attack surface discovery"),
-                    ("status", "Display current workspace metrics & indicators"),
+                    ("assess [--iterations N] [--workers W]", "Run continuous agentic assessment loop"),
+                    ("status", "Workspace, coverage, queue, and AI health overview"),
+                ]
+            ),
+            (
+                "INVESTIGATION",
+                [
+                    ("next / actions", "Highest-value next actions from live state"),
+                    ("findings", "Security findings with validation states"),
+                    ("inspect <id>", "Evidence, reproduction, and impact for one finding"),
+                    ("why [<id>]", "Structured rationale for the current decision"),
+                    ("ask <question>", "State-grounded analysis (coverage, gaps, paths)"),
+                    ("graph", "Attack surface and attack path visualization"),
+                ]
+            ),
+            (
+                "OPERATOR CONTROL",
+                [
+                    ("focus <area>", "Steer the loop: web, api, auth, authz, business-logic, network, all"),
+                    ("pause / resume", "Halt or continue scheduling new work"),
+                    ("skip <id>", "Park an investigation without deleting it"),
+                    ("prioritize <id>", "Move an investigation to the front of the queue"),
+                ]
+            ),
+            (
+                "RECONNAISSANCE & CORRELATION",
+                [
                     ("surface", "Network attack surface (open ports & protocols)"),
                     ("services", "Service inventory with protocols and versions"),
                     ("software", "Software & framework detection breakdown"),
                     ("web", "Web attack surface and technology fingerprinting"),
-                ]
-            ),
-            (
-                "🎯 INTELLIGENCE & CORRELATION",
-                [
-                    ("findings", "Security findings with severity & confidence meters"),
-                    ("inspect <id>", "Deep-dive inspection of finding evidence & reproduction"),
-                    ("audit", "Audited and verified hardened security controls"),
-                    ("next / actions", "State-aware Next Best Actions based on actual reconnaissance"),
-                    ("subsystems / states", "View status of all reconnaissance & enumeration subsystems"),
+                    ("subsystems / states", "Reconnaissance & enumeration subsystem states"),
                     ("creds", "Recovered credentials with masked secrets"),
-
-                    ("graph", "Interactive attack surface graph visualization"),
+                    ("audit", "Audited and verified hardened security controls"),
                     ("cve / searchsploit", "Correlate software with known exploit candidates"),
                     ("exploit", "Review actionable exploit candidates & AI decisions"),
                     ("intel", "Execute exploit correlation & AI triage pipeline"),
                     ("nuclei", "Execute targeted Nuclei templates against web targets"),
+                    ("local", "Linux local privilege escalation checks"),
                 ]
             ),
             (
-                "🤖 AI ASSISTANT & SETTINGS",
+                "CONFIGURATION & ARTIFACTS",
                 [
-                    ("ask <question>", "Query AI security analyst with workspace context"),
+                    ("replay [--script PATH]", "Replay assessment deterministically from evidence script"),
+                    ("benchmark [fixture|all]", "Run the synthetic benchmark suite (offline)"),
                     ("ai [status|enable|disable|usage|clear-cache]", "Manage AI engine, model, and cache"),
                     ("settings", "Interactive settings & provider configuration"),
-                ]
-            ),
-            (
-                "🛡 EXPLOIT & POST-EXPLOITATION",
-                [
-                    ("local", "Perform Linux local privilege escalation checks"),
-                ]
-            ),
-            (
-                "🛠 UTILITIES & ARTIFACTS",
-                [
-                    ("doctor", "Audit installed tools, categories, wordlists, and AI"),
-                    ("tools", "Fast check of external binary availability"),
-                    ("artifacts / gallery", "View the Horcrux ASCII art gallery"),
-                    ("source <artifact>", "Inspect raw tool output or response body"),
-                    ("raw <module>", "Inspect raw output file for specific module"),
+                    ("doctor / tools", "Audit installed tools, wordlists, and AI"),
+                    ("source <artifact> / raw <module>", "Inspect raw tool output or response body"),
                     ("report", "Generate structured Markdown engagement report"),
+                    ("artifacts / gallery", "View the Horcrux ASCII art gallery"),
                     ("clear", "Clear terminal screen"),
                     ("exit / quit", "Leave the Horcrux console"),
                 ]
@@ -206,7 +211,7 @@ class ConsoleApp:
         ]
 
         table = Table(
-            title="[bold bright_magenta]✦ HORCRUX OPERATOR COMMAND REFERENCE ✦[/bold bright_magenta]",
+            title="[bold bright_magenta]HORCRUX OPERATOR COMMANDS[/bold bright_magenta]",
             box=box.ROUNDED,
             border_style="magenta",
             header_style="bold bright_cyan",
@@ -226,11 +231,16 @@ class ConsoleApp:
         self.console.print()
 
     def run(self):
-        self.startup(duration=1.0)
+        self.startup(duration=0.6)
 
         while True:
             target_str = self.workspace.target if self.workspace else "ready"
-            prompt_text = f"[bold magenta]⚡ horcrux[/bold magenta][dim white]@[/dim white][bold cyan]{target_str}[/bold cyan] [bold bright_magenta]❯[/bold bright_magenta] "
+            prompt_text = (
+                "[bold bright_magenta]HORCRUX[/bold bright_magenta]"
+                "[dim] › [/dim]"
+                f"[bold cyan]{target_str}[/bold cyan] "
+                "[dim]›[/dim] "
+            )
 
             try:
                 line = Prompt.ask(prompt_text).strip()
@@ -242,13 +252,21 @@ class ConsoleApp:
                 continue
 
             if line.lower() in {"exit", "quit"}:
-                self.console.print("\n[bold magenta]✦ The fragments remain intact. Farewell.[/bold magenta]\n")
+                self.console.print("\n[dim]Assessment state saved. HORCRUX standing by.[/dim]\n")
                 return
 
             try:
                 self.dispatch(shlex.split(line))
             except Exception as exc:
-                self.console.print(f"[bold red]✖ Error:[/bold red] {exc}")
+                from horcrux.ui import theme as _theme
+                self.console.print()
+                self.console.print(_theme.error_card(
+                    "Command failed",
+                    why=str(exc) or exc.__class__.__name__,
+                    action="No workspace state was changed.",
+                    nxt="Type 'help' for command reference.",
+                ))
+                self.console.print()
 
     def dispatch(self, args: list[str]):
         GLOBAL_COMMANDS = {
@@ -318,6 +336,29 @@ class ConsoleApp:
 
         if command == "ask":
             self.ask_cmd(args)
+            return
+
+        if command == "assess":
+            if self.workspace is None:
+                raise ValueError("no workspace loaded; run 'scan <target>' first")
+            self.assess_cmd(args)
+            return
+
+        if command == "replay":
+            if self.workspace is None:
+                raise ValueError("no workspace loaded; run 'scan <target>' first")
+            self.replay_cmd(args)
+            return
+
+        if command == "benchmark":
+            self.benchmark_cmd(args)
+            return
+
+        if command in {"focus", "pause", "resume", "skip", "prioritize", "why"}:
+            # Operator steering is global; workspace required for focus state.
+            if self.workspace is None:
+                raise ValueError("no workspace loaded; run 'scan <target>' first")
+            self.steering_cmd(args)
             return
 
         if command == "scan":
@@ -437,6 +478,18 @@ class ConsoleApp:
                 )
             )
 
+        elif command in {"focus", "pause", "resume", "skip", "prioritize", "why"}:
+            self.steering_cmd(args)
+
+        elif command == "assess":
+            self.assess_cmd(args)
+
+        elif command == "replay":
+            self.replay_cmd(args)
+
+        elif command == "benchmark":
+            self.benchmark_cmd(args)
+
         elif command == "raw":
             self.raw_cmd(args)
 
@@ -453,12 +506,13 @@ class ConsoleApp:
 
         else:
             _ALL_COMMANDS = [
-                "scan", "status", "surface", "services", "software", "web", "audit",
+                "scan", "assess", "replay", "benchmark", "status", "surface", "services", "software", "web", "audit",
                 "findings", "inspect", "next", "actions", "creds", "credentials",
                 "graph", "subsystems", "states", "cve", "searchsploit", "intel",
                 "nuclei", "exploit", "exploits", "source", "raw", "report",
                 "local", "ask", "ai", "settings", "doctor", "tools", "help",
                 "artifacts", "gallery", "art", "version", "clear",
+                "focus", "pause", "resume", "skip", "prioritize", "why",
             ]
             close = difflib.get_close_matches(command, _ALL_COMMANDS, n=1, cutoff=0.6)
             hint = f" — did you mean '[bold bright_cyan]{close[0]}[/bold bright_cyan]'?" if close else " — type 'help' for command reference"
@@ -560,7 +614,156 @@ class ConsoleApp:
                     padding=(0, 2),
                 )
             )
+
+        # --- Agentic assessment state (Part 36 operator console) ---
+        try:
+            self._print_assessment_status(state)
+        except Exception:
+            pass
         self.console.print()
+
+    def _print_assessment_status(self, state) -> None:
+        """Serious operator console: state without raw tool-output flooding."""
+        from horcrux.intel.ai.capabilities import summarize_ai_usage
+        from horcrux.ui import theme as _theme
+        focus = state.operator_focus
+        focus_label = getattr(focus, "focus_id", "") or getattr(focus, "focus_area", "all") or "all"
+        phase = "PAUSED" if focus.paused else ("STOPPED" if focus.stopped else state.assessment_phase)
+        try:
+            scope_targets = state.get_policy().scope.allowed_targets or [state.target]
+        except Exception:
+            scope_targets = [state.target]
+        app = state.get_application_model()
+        summ = app.summary()
+        cov = state.get_security_coverage()
+        cov.ensure_domains()
+        pct = cov.percentage_complete()
+        cov_text = "  ".join(f"{k} {v:.0f}%" for k, v in pct.items())
+        invs = state.get_investigations()
+        open_inv = [i for i in invs if i.state.value in {"READY", "PENDING"}]
+        blocked = [i for i in invs if i.state.value in {
+            "BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE", "FAILED", "APPROVAL_REQUIRED"}]
+        hyps = state.get_hypotheses()
+        open_hyps = [h for h in hyps if h.status.value in {"OPEN", "INVESTIGATING"}]
+
+        api_eps = [e for e in app.endpoints
+                   if e.path.startswith(("/api", "/rest", "/v1", "/graphql"))]
+        self.console.print(
+            _theme.kv_panel(
+                "[bold bright_cyan]APPLICATION MODEL[/bold bright_cyan]",
+                [
+                    ("Routes", f"[bold bright_white]{summ['routes']}[/bold bright_white]"),
+                    ("APIs", f"[bold bright_white]{len(api_eps)}[/bold bright_white]"),
+                    ("Identities", f"[bold bright_white]{len(app.identities)}[/bold bright_white]"),
+                    ("Objects", f"[bold bright_white]{len(app.object_types)}[/bold bright_white]"),
+                    ("Workflows", f"[bold bright_white]{len(app.workflows)}[/bold bright_white]"),
+                    ("Services", f"[bold bright_white]{len(app.services)}[/bold bright_white]"),
+                ],
+            )
+        )
+
+        self.console.print(
+            Panel(
+                f"[bold cyan]TARGET:[/bold cyan] {state.target}   "
+                f"[bold cyan]SCOPE:[/bold cyan] {', '.join(scope_targets[:3])}   "
+                f"[bold cyan]PHASE:[/bold cyan] {phase}\n"
+                f"[bold cyan]APPLICATION:[/bold cyan] {summ['application']['type']} "
+                f"({summ['application']['framework'] or 'unknown framework'}) — "
+                f"{summ['endpoints']} endpoints, {summ['object_bearing_endpoints']} object-bearing, "
+                f"{summ['admin_endpoints']} privileged\n"
+                f"[bold cyan]IDENTITIES:[/bold cyan] "
+                f"{', '.join(f'{i.label}({i.role.value})' for i in app.identities[:6]) or 'none'}   "
+                f"[bold cyan]SESSIONS:[/bold cyan] {len(app.sessions)}\n"
+                f"[bold cyan]OBJECTS:[/bold cyan] {', '.join(summ['object_types'][:6]) or 'none'}   "
+                f"[bold cyan]WORKFLOWS:[/bold cyan] {', '.join(summ['workflows'][:4]) or 'none'}\n"
+                f"[bold cyan]COVERAGE:[/bold cyan] {cov_text}\n"
+                f"[bold cyan]HYPOTHESES:[/bold cyan] {len(open_hyps)} open / {len(hyps)} total   "
+                f"[bold cyan]QUEUE:[/bold cyan] {len(open_inv)} pending / {len(invs)} total   "
+                f"[bold cyan]BLOCKED:[/bold cyan] {len(blocked)}\n"
+                f"[bold cyan]FOCUS:[/bold cyan] {focus_label}   "
+                f"[bold cyan]PAUSE:[/bold cyan] {'yes' if focus.paused else 'no'}   "
+                f"[bold cyan]FINDINGS:[/bold cyan] {len(state.findings)}   "
+                f"[bold cyan]ATTACK PATHS:[/bold cyan] {len(state.attack_paths or [])}   "
+                f"[bold cyan]HANDOFFS:[/bold cyan] {len(state.exploit_handoffs or [])}",
+                title="[bold bright_magenta]AGENTIC ASSESSMENT[/bold bright_magenta]",
+                box=box.ROUNDED,
+                border_style="magenta",
+                padding=(0, 2),
+            )
+        )
+
+        # Current investigation + queue peek.
+        if open_inv:
+            top = max(open_inv, key=lambda i: i.priority)
+            table = Table(box=box.ROUNDED, border_style="yellow", expand=True,
+                          title="[bold bright_yellow]CURRENT INVESTIGATION & QUEUE[/bold bright_yellow]")
+            table.add_column("Objective", style="bright_white")
+            table.add_column("Specialist", style="cyan")
+            table.add_column("State", justify="center")
+            table.add_column("Priority", justify="right")
+            table.add_row(f"▶ {top.objective[:70]}", top.specialist, top.state.value,
+                          f"{top.priority:.2f}")
+            for inv in sorted(open_inv, key=lambda i: -i.priority)[1:4]:
+                if inv.id != top.id:
+                    table.add_row(f"  {inv.objective[:70]}", inv.specialist,
+                                  inv.state.value, f"{inv.priority:.2f}")
+            self.console.print(table)
+        if blocked:
+            self.console.print(
+                f"[dim yellow]Blocked work ({len(blocked)}):[/dim yellow] " +
+                "; ".join(f"{b.objective[:45]} [{b.state.value}]" for b in blocked[:3]))
+
+        # Agents + capabilities.
+        agents = [a for a in (state.agent_states or []) if a.status in {"RUNNING", "READY"}][:6]
+        if agents:
+            self.console.print(
+                "[bold cyan]AGENTS:[/bold cyan] " +
+                ", ".join(f"{a.name}({a.status})" for a in agents))
+        try:
+            from horcrux.agents.tools.capabilities import CapabilityRegistry
+            rep = CapabilityRegistry(runner=None).availability_report()
+            live = sum(1 for v in rep.values() if v.get("mode") == "live")
+            synth = sum(1 for v in rep.values() if v.get("mode") == "synthesis")
+            missing = [k for k, v in rep.items() if v.get("status") == "MISSING"]
+            cap_line = f"[bold cyan]CAPABILITIES:[/bold cyan] {live} live, {synth} synthesis"
+            if missing:
+                cap_line += f" — missing: {', '.join(missing[:5])}"
+            try:
+                from horcrux.intel.browser import browser_backend_status
+                bw = browser_backend_status()
+                cap_line += " — browser: " + ", ".join(
+                    f"{k}={'✔' if v['available'] else '✖'}" for k, v in bw.items())
+            except Exception:
+                pass
+            self.console.print(cap_line)
+        except Exception:
+            pass
+
+        # AI provider / health / usage.
+        try:
+            prov = self.ai_manager.active_provider_name()
+            usage = summarize_ai_usage(self.workspace, self.ai_manager)
+            ai_line = (f"[bold cyan]AI:[/bold cyan] provider={prov} "
+                       f"calls={usage.get('calls', 0)} "
+                       f"tokens={usage.get('total_tokens', 0)}")
+            if usage.get("tiers"):
+                ai_line += " tiers=" + ",".join(f"{k}:{v}" for k, v in usage["tiers"].items())
+            self.console.print(ai_line)
+        except Exception:
+            pass
+
+        # Recent state changes (redacted event tail).
+        try:
+            from horcrux.intel.events import read_events
+            recent = read_events(self.workspace, limit=5)
+            if recent:
+                self.console.print(
+                    "[bold cyan]RECENT:[/bold cyan] " +
+                    " · ".join(f"{r.get('event')}" for r in recent))
+        except Exception:
+            pass
+        self.console.print(
+            "[dim]Steer via focus/pause/skip/prioritize; details via 'why', 'ask', 'next'.[/dim]")
 
     def surface(self):
         state = self.workspace.load()
@@ -929,6 +1132,27 @@ class ConsoleApp:
                     f"[dim]({finding.status.value})[/dim]"
                 )
 
+        # Attack paths branch (evidence-backed chains, not flat findings)
+        attack_paths = state.attack_paths or []
+        if attack_paths:
+            paths_branch = root_tree.add(
+                f"[bold bright_magenta]ATTACK PATHS ({len(attack_paths)})[/bold bright_magenta]",
+                guide_style="magenta",
+            )
+            for path in attack_paths[:5]:
+                name = path.get("name", "path")
+                prob = path.get("probability", "")
+                node = paths_branch.add(
+                    f"[bright_white]{name}[/bright_white] [dim]({prob})[/dim]"
+                )
+                for edge in path.get("edges", [])[:4]:
+                    if edge.get("inference"):
+                        node.add("[yellow]╌ inferred — needs validation[/yellow]")
+                    elif edge.get("evidence"):
+                        node.add("[green]━ evidenced[/green]")
+                    else:
+                        node.add("[dim]┄ unverified[/dim]")
+
         # Credentials branch
         if state.credentials:
             creds_branch = root_tree.add(
@@ -1150,12 +1374,27 @@ class ConsoleApp:
             url,
         )
 
+        from horcrux.ui import theme as _theme
         if result is None:
-            self.console.print("[bold yellow]✖ Nuclei is not installed or not in PATH.[/bold yellow]")
+            self.console.print()
+            self.console.print(_theme.error_card(
+                "Capability unavailable",
+                why="Nuclei was not found on PATH.",
+                action="Investigation skipped and deprioritized.",
+                nxt="Assessment continues. Install Nuclei to enable template scans.",
+            ))
+            self.console.print()
         else:
-            self.console.print(
-                f"[bold green]✔ Nuclei completed successfully (code {result.returncode}).[/bold green]"
-            )
+            state = self.workspace.load()
+            nuclei_hits = [f for f in state.findings if f.source_tool == "nuclei"]
+            self.console.print()
+            self.console.print(_theme.tool_card(
+                "Nuclei",
+                f"[bold green]{_theme.OK} Completed[/bold green] (code {result.returncode})",
+                result=f"{len(nuclei_hits)} finding(s) recorded",
+                evidence=f"target {url}",
+            ))
+            self.console.print()
 
     def ask_cmd(self, args: list[str]):
         if len(args) < 2:
@@ -1180,6 +1419,13 @@ class ConsoleApp:
             ai_prog.set_phase("Normalizing response")
             time.sleep(0.02)
 
+        # Persist any orchestrator-validated state mutations from ask actions.
+        if self.workspace is not None and state is not None:
+            try:
+                self.workspace.save(state)
+            except Exception:
+                pass
+
         # Build a clean question preview for the subtitle — truncate at word boundary
         preview = question
         if len(preview) > 60:
@@ -1194,8 +1440,8 @@ class ConsoleApp:
         self.console.print(
             Panel(
                 answer if is_rich_markup else Markdown(answer),
-                title="[bold bright_magenta]⚡ HORCRUX AI[/bold bright_magenta]",
-                subtitle=f"[dim white]{preview}[/dim white]",
+                title="[bold bright_magenta]HORCRUX ANALYSIS[/bold bright_magenta]",
+                subtitle=f"[dim]grounded in workspace state • {preview}[/dim]",
                 box=box.ROUNDED,
                 border_style="bright_magenta",
                 padding=(1, 2),
@@ -1203,6 +1449,134 @@ class ConsoleApp:
         )
         self.console.print()
 
+
+    def steering_cmd(self, args: list[str]):
+        """Operator focus controls: focus / pause / resume / skip / prioritize / why."""
+        from horcrux.agents.focus import apply_focus, pause, prioritize, resume, skip
+        from horcrux.intel.explain import build_why_summary
+        cmd = args[0].lower()
+        state = self.workspace.load()
+        if cmd == "focus":
+            area = " ".join(args[1:]).strip() or "all"
+            res = apply_focus(state, area)
+            self.workspace.save(state)
+            self.console.print(f"\n[bold cyan]Focus:[/bold cyan] {res['detail']}\n")
+            return
+        if cmd == "pause":
+            res = pause(state)
+            self.workspace.save(state)
+            self.console.print(f"\n[bold yellow]{res['detail']}[/bold yellow]\n")
+            return
+        if cmd == "resume":
+            res = resume(state)
+            self.workspace.save(state)
+            self.console.print(f"\n[bold green]{res['detail']}[/bold green]\n")
+            return
+        if cmd == "skip":
+            if len(args) < 2:
+                raise ValueError("usage: skip <investigation-id-or-keyword>")
+            res = skip(state, " ".join(args[1:]))
+            self.workspace.save(state)
+            self.console.print(f"\n[bold yellow]Skip:[/bold yellow] {res['detail']}\n")
+            return
+        if cmd == "prioritize":
+            if len(args) < 2:
+                raise ValueError("usage: prioritize <investigation-id-or-keyword>")
+            res = prioritize(state, " ".join(args[1:]))
+            self.workspace.save(state)
+            self.console.print(f"\n[bold green]Prioritized:[/bold green] {res['detail']}\n")
+            return
+        if cmd == "why":
+            from horcrux.intel.explain import (build_why_summary, explain_finding_confidence,
+                                               explain_investigation, explain_not_investigated)
+            self.console.print()
+            target = " ".join(args[1:]).strip()
+            if not target:
+                body = build_why_summary(state)
+            elif target.lower().startswith("finding "):
+                body = explain_finding_confidence(state, target[8:].strip())
+            elif target.lower().startswith("not "):
+                body = explain_not_investigated(state, target[4:].strip())
+            else:
+                body = explain_investigation(state, target)
+                if body.startswith("No investigation"):
+                    body += "\n\n" + explain_not_investigated(state, target)
+            self.console.print(Panel(Markdown(body),
+                                     title="[bold bright_magenta]WHY[/bold bright_magenta]",
+                                     subtitle="[dim]structured rationale • no chain-of-thought[/dim]",
+                                     box=box.ROUNDED, border_style="bright_magenta",
+                                     padding=(1, 2)))
+            self.console.print()
+            return
+
+    def assess_cmd(self, args: list[str]):
+        """Run the continuous agentic assessment loop (live phase tracker)."""
+        from horcrux.agents.coordinator import run_full_assessment
+        from horcrux.ui.progress import AssessmentProgress
+        iterations = 15
+        workers = 1
+        for i, a in enumerate(args):
+            if a in ("--iterations", "-n") and i + 1 < len(args):
+                try:
+                    iterations = int(args[i + 1])
+                except ValueError:
+                    pass
+            if a in ("--workers", "-w") and i + 1 < len(args):
+                try:
+                    workers = max(1, int(args[i + 1]))
+                except ValueError:
+                    pass
+        self.console.print(f"\n[bold bright_magenta]⚡ ASSESSMENT:[/bold bright_magenta] "
+                           f"[bold bright_cyan]{self.workspace.target}[/bold bright_cyan] "
+                           f"[dim]iterations={iterations} workers={workers}[/dim]\n")
+        tracker = AssessmentProgress(self.console, self.workspace.target)
+        with tracker:
+            run_full_assessment(self.workspace, ai_manager=self.ai_manager,
+                                max_iterations=iterations, max_workers=workers,
+                                observer=tracker.observer())
+        self.console.print(tracker.render_text())
+        self.console.print()
+        self.status()
+
+    def replay_cmd(self, args: list[str]):
+        """Replay assessment deterministically from a recorded evidence script."""
+        from pathlib import Path as _Path
+        from horcrux.bench.runner import replay_workspace, write_evidence_script
+        script = ""
+        for i, a in enumerate(args):
+            if a in ("--script", "-s") and i + 1 < len(args):
+                script = args[i + 1]
+        script_path = _Path(script) if script else (self.workspace.root / "evidence-script.json")
+        if not script_path.exists():
+            script_path = write_evidence_script(self.workspace)
+            self.console.print(f"[dim]Recorded evidence script: {script_path}[/dim]")
+        state = replay_workspace(self.workspace.target, script_path)
+        app = state.get_application_model()
+        self.console.print(f"\n[bold green]✔ Replay complete:[/bold green] "
+                           f"{len(app.endpoints)} endpoints, "
+                           f"{len(state.get_hypotheses())} hypotheses, "
+                           f"{len(state.get_investigations())} investigations, "
+                           f"{len(state.attack_paths or [])} attack paths.\n")
+
+    def benchmark_cmd(self, args: list[str]):
+        """Run the synthetic benchmark suite (offline)."""
+        import tempfile
+        from pathlib import Path as _Path
+        from horcrux.bench.fixtures import FIXTURES
+        from horcrux.bench.runner import run_suite
+        names = [a for a in args[1:] if not a.startswith("-")]
+        selected = sorted(FIXTURES) if not names or names == ["all"] else names
+        unknown = [n for n in selected if n not in FIXTURES]
+        if unknown:
+            raise ValueError(f"unknown fixture(s): {', '.join(unknown)} "
+                             f"(choose from: {', '.join(sorted(FIXTURES))})")
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_suite(selected, _Path(tmp))
+        self.console.print(f"\n[bold]Benchmark:[/bold] {report['passed']}/{report['fixtures']} "
+                           f">= 0.60 (mean {report['mean_score']})\n")
+        for res in report["results"]:
+            mark = "[green]✔[/green]" if res["score"] >= 0.6 else "[red]✖[/red]"
+            self.console.print(f"  {mark} {res['fixture']:<22} score={res['score']}\n")
 
     def settings_cmd(self, args: list[str]):
         mgr = SettingsManager()

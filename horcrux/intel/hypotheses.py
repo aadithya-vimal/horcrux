@@ -277,8 +277,242 @@ _register_rule("file_upload", _file_upload_rule)
 _register_rule("business_logic_workflow", _workflow_rule)
 
 
+def _correlated_authz_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """Correlated: authenticated API + object IDs + identities + retrieval (P7/P15).
+
+    Generates property hypotheses with explicit evidence requirements instead
+    of asserting a vulnerability from inference.
+    """
+    object_eps = [e for e in app.endpoints if e.has_object_reference]
+    if not object_eps:
+        return []
+    identities = [i for i in app.identities if i.role.value != "anonymous"]
+    authed_api = any(e.authentication in ("required", "unknown")
+                     for e in app.endpoints if e.path.startswith(("/api", "/rest", "/v1")))
+    if not (authed_api and identities):
+        return []
+    retrieval = [e for e in object_eps if e.method.upper() == "GET"]
+    mutations = [e for e in object_eps if e.is_mutation]
+    results: list[Hypothesis] = []
+    if retrieval:
+        results.append(Hypothesis(
+            hypothesis_class=HypothesisClass.IDOR_BOLA,
+            title="Unauthorized object read may be possible across identities",
+            asset_refs=[e.id for e in retrieval[:8]],
+            evidence_refs=list({r for e in retrieval for r in e.evidence_refs})[:12],
+            confidence=min(0.8, 0.55 + 0.05 * len(retrieval)),
+            assumptions=["Same object identifier is addressable by different identities",
+                         "Ownership is not verified server-side"],
+            validation_requirements=[
+                "Same object identifier requested from two distinct identities",
+                "Comparable requests with response comparison",
+                "Ownership relationship between identity and object",
+            ],
+            rule_id="correlated_authorization"))
+    if mutations:
+        results.append(Hypothesis(
+            hypothesis_class=HypothesisClass.IDOR_BOLA,
+            title="Unauthorized object mutation may be possible across identities",
+            asset_refs=[e.id for e in mutations[:8]],
+            evidence_refs=list({r for e in mutations for r in e.evidence_refs})[:12],
+            confidence=0.6,
+            assumptions=["Mutation endpoints bind objects by client-supplied identifier"],
+            validation_requirements=[
+                "Replay mutation with a second identity's object identifier",
+                "Verify state change attribution server-side",
+            ],
+            rule_id="correlated_authorization"))
+    # Vertical dimension: low-privilege identity vs privileged endpoints.
+    admin_eps = [e for e in app.endpoints if "admin" in e.path.lower()]
+    low_priv = [i for i in identities if i.privilege_level <= 1]
+    if admin_eps and low_priv:
+        results.append(Hypothesis(
+            hypothesis_class=HypothesisClass.PRIVILEGE_ESCALATION,
+            title="Low-privilege identity may reach privileged functions",
+            asset_refs=[e.id for e in admin_eps[:8]],
+            evidence_refs=list({r for e in admin_eps for r in e.evidence_refs})[:12],
+            confidence=0.6,
+            assumptions=["Role is enforced client-side or inconsistently server-side"],
+            validation_requirements=[
+                "Request privileged endpoints as anonymous and low-privilege identities",
+                "Compare role-differentiated responses",
+            ],
+            rule_id="correlated_authorization"))
+    return results
+
+
+def _file_processing_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """Correlated: upload endpoint + stored object + downloadable resource."""
+    upload = [e for e in app.endpoints if "upload" in e.path.lower()]
+    if not upload:
+        return []
+    stored = [o for o in app.object_lifecycles
+              if "file" in o.object_type.lower() or o.mutation_endpoints]
+    downloadable = [e for e in app.endpoints
+                    if any(k in e.path.lower() for k in ("download", "files", "static", "uploads"))]
+    if not (stored or downloadable):
+        return []
+    return [Hypothesis(
+        hypothesis_class=HypothesisClass.FILE_UPLOAD,
+        title="Uploaded files may be stored unsafely and retrievable",
+        asset_refs=[e.id for e in upload[:6]],
+        evidence_refs=list({r for e in upload for r in e.evidence_refs})[:10],
+        confidence=0.65,
+        assumptions=["Server-side processing trusts uploaded content",
+                     "Stored objects are served without re-validation"],
+        validation_requirements=[
+            "Upload constrained test file and observe storage response",
+            "Attempt retrieval of the stored resource",
+            "Test extension, content-type, and path handling",
+        ],
+        rule_id="file_processing_chain")]
+
+
+def _jwt_weakness_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """JWT/session weakness from mechanism + session observations."""
+    jwt_mechs = [a for a in app.authentication if a.mechanism_type == "jwt"]
+    has_sessions = bool(app.sessions)
+    token_params = [p for p in app.parameters
+                    if p.name.lower() in ("token", "jwt", "access_token", "id_token")]
+    if not (jwt_mechs or token_params):
+        return []
+    return [Hypothesis(
+        hypothesis_class=HypothesisClass.SESSION,
+        title="Session tokens may be weakly validated (algorithm/expiry/audience)",
+        asset_refs=[a.id for a in jwt_mechs[:4]] + [p.id for p in token_params[:4]],
+        evidence_refs=list({r for a in jwt_mechs for r in a.evidence_refs})[:10],
+        confidence=0.6 if has_sessions else 0.5,
+        assumptions=["Tokens accepted without strict alg/expiry/audience checks"],
+        validation_requirements=[
+            "Decode token header/payload structure (no secret needed)",
+            "Test none-algorithm and expiry enforcement",
+            "Observe session replacement/expiry behavior",
+        ],
+        rule_id="jwt_session_weakness")]
+
+
+SENSITIVE_KEYWORDS = {"ssn", "password", "secret", "card", "pan", "iban",
+                      "salary", "medical", "dob", "phone", "address", "email"}
+
+
+def _sensitive_data_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """Sensitive-data exposure from parameters/paths/object fields."""
+    hits = [p for p in app.parameters if p.name.lower() in SENSITIVE_KEYWORDS]
+    hits += [p for p in app.parameters if p.param_class == "auth_credential"]
+    paths = [e for e in app.endpoints
+             if any(k in e.path.lower() for k in ("profile", "account", "invoice", "export"))]
+    if not hits and not paths:
+        return []
+    return [Hypothesis(
+        hypothesis_class=HypothesisClass.INFORMATION_DISCLOSURE,
+        title="Sensitive personal/credential data may be over-exposed via APIs",
+        asset_refs=[p.id for p in hits[:8]] + [e.id for e in paths[:6]],
+        evidence_refs=list({r for p in hits for r in p.evidence_refs})[:10],
+        confidence=0.55,
+        assumptions=["Responses return full objects without field minimization"],
+        validation_requirements=[
+            "Inspect response fields for sensitive attributes",
+            "Verify authorization on export/profile endpoints",
+        ],
+        rule_id="sensitive_data_exposure")]
+
+
+def _workflow_state_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """Business-logic properties from workflow transitions (Part 8)."""
+    transitions = getattr(app, "workflow_transitions", [])
+    if not transitions and len(app.workflows) < 1:
+        return []
+    props: list[Hypothesis] = []
+    state_changing = [t for t in transitions if t.state_changing]
+    if len(transitions) >= 2 or state_changing:
+        props.append(Hypothesis(
+            hypothesis_class=HypothesisClass.BUSINESS_LOGIC,
+            title="Workflow state transition may be reorderable or skippable",
+            asset_refs=[t.id for t in transitions[:8]],
+            evidence_refs=list({r for t in transitions for r in t.evidence_refs})[:10],
+            confidence=0.55,
+            assumptions=["Server does not enforce step preconditions",
+                         "Client-controlled state drives transitions"],
+            validation_requirements=[
+                "Invoke later step without completing prerequisites",
+                "Replay transitions out of order",
+                "Verify server-side state machine enforcement",
+            ],
+            rule_id="workflow_state_properties"))
+    privileged_steps = [t for t in transitions
+                        if any(k in (t.endpoint or "").lower()
+                               for k in ("admin", "approve", "refund", "role", "privileg"))]
+    if privileged_steps:
+        props.append(Hypothesis(
+            hypothesis_class=HypothesisClass.BUSINESS_LOGIC,
+            title="Privileged workflow transition may lack authorization",
+            asset_refs=[t.id for t in privileged_steps[:6]],
+            evidence_refs=list({r for t in privileged_steps for r in t.evidence_refs})[:10],
+            confidence=0.6,
+            assumptions=["Transition authorization differs from endpoint authorization"],
+            validation_requirements=[
+                "Execute privileged transition as low-privilege identity",
+                "Compare transition outcomes across roles",
+            ],
+            rule_id="workflow_state_properties"))
+    return props
+
+
+def _graphql_authz_rule(app: ApplicationModel) -> list[Hypothesis]:
+    """Schema-semantics GraphQL authorization hypotheses (Part 10)."""
+    ops = getattr(app, "graphql_operations", [])
+    if not ops:
+        return []
+    mutations = [o for o in ops if o.kind == "mutation"]
+    results = [Hypothesis(
+        hypothesis_class=HypothesisClass.GRAPHQL,
+        title="GraphQL operations may lack object/field-level authorization",
+        asset_refs=[o.id for o in ops[:10]],
+        evidence_refs=list({r for o in ops for r in o.evidence_refs})[:10],
+        confidence=0.6,
+        assumptions=["Resolvers enforce authorization inconsistently across fields"],
+        validation_requirements=[
+            "Test introspection availability and depth limits",
+            "Exercise queries/mutations across identities",
+            "Compare field visibility by role",
+        ],
+        rule_id="graphql_authorization")]
+    if mutations:
+        results.append(Hypothesis(
+            hypothesis_class=HypothesisClass.BUSINESS_LOGIC,
+            title="GraphQL mutations may permit unsafe state changes",
+            asset_refs=[o.id for o in mutations[:8]],
+            evidence_refs=list({r for o in mutations for r in o.evidence_refs})[:10],
+            confidence=0.55,
+            assumptions=["Mutations lack server-side state validation"],
+            validation_requirements=[
+                "Invoke mutations with controlled inputs only",
+                "Verify state effects and authorization per mutation",
+            ],
+            rule_id="graphql_authorization"))
+    return results
+
+
+_PHASE8_RULES_REGISTERED = False
+
+
+def _ensure_phase8_rules() -> None:
+    """Register Phase 8 correlated rules once (defined below registration site)."""
+    global _PHASE8_RULES_REGISTERED
+    if _PHASE8_RULES_REGISTERED:
+        return
+    _PHASE8_RULES_REGISTERED = True
+    _register_rule("correlated_authorization", _correlated_authz_rule)
+    _register_rule("file_processing_chain", _file_processing_rule)
+    _register_rule("jwt_session_weakness", _jwt_weakness_rule)
+    _register_rule("sensitive_data_exposure", _sensitive_data_rule)
+    _register_rule("workflow_state_properties", _workflow_state_rule)
+    _register_rule("graphql_authorization", _graphql_authz_rule)
+
+
 def generate_hypotheses(app: ApplicationModel) -> list[Hypothesis]:
     """Run all registered rules against the application model."""
+    _ensure_phase8_rules()
     seen: dict[str, Hypothesis] = {}
     for rule in HYPOTHESIS_RULES:
         for hyp in rule["fn"](app):

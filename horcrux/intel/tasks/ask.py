@@ -261,6 +261,54 @@ RESPONSE FORMAT RULES (CRITICAL):
 """
 
 
+def _ask_with_grounding(ai_manager, question: str, state, structured_ctx: dict,
+                        deterministic: str) -> str:
+    """LLM enhancement grounded in selective workspace context + deterministic core."""
+    import json as _json
+    policy_prefix = ""
+    try:
+        policy_prefix = state.get_policy().format_ai_context(state.target) + "\n\n"
+    except Exception:
+        pass
+    prompt = f"""{policy_prefix}You are the HORCRUX AI Offensive Security Analyst advising an operator.
+
+## Selective workspace context (authoritative; do NOT invent outside it)
+```json
+{_json.dumps(structured_ctx, indent=2)[:6000]}
+```
+
+## Deterministic workspace-grounded draft (preserve its facts; improve prose)
+{deterministic[:3000]}
+
+## Operator Question
+{question}
+
+Respond in Markdown. Distinguish CONFIRMED / LIKELY / POTENTIAL / UNVERIFIED.
+Never claim state changes; steering actions were already applied deterministically.
+"""
+    resp = ai_manager.call_task(
+        "operator_ask",
+        prompt,
+        payload={"question": question, "workspace_context": structured_ctx},
+        system_prompt=_MARKDOWN_SYSTEM_PROMPT,
+        max_tokens=2048,
+        structured=False,
+    )
+    if resp and resp.content and resp.content.strip():
+        return _ensure_prose(resp.content.strip())
+    if deterministic:
+        # Preserve workspace grounding AND surface the provider diagnostic
+        # so operators (and legacy fallback expectations) see next steps.
+        try:
+            diag = _format_failure_diagnostic(ai_manager)
+        except Exception:
+            diag = ""
+        if diag:
+            return deterministic + "\n\n---\n" + diag
+        return deterministic
+    return _format_failure_diagnostic(ai_manager)
+
+
 def _format_failure_diagnostic(ai_manager) -> str:
     stage = getattr(ai_manager, "last_failure_stage", "") or "REQUEST_FAILED"
     diag = getattr(ai_manager, "last_diagnostic", "")
@@ -284,12 +332,60 @@ def execute_operator_ask(
     state: Optional[WorkspaceState] = None,
 ) -> str:
     """
-    Answers operator queries.
-    - If a target workspace is loaded: leverages bounded, structured workspace context.
-    - If no workspace is loaded: acts as a general offensive security advisor.
+    First-class operator interface over the live workspace.
 
-    Always returns prose Markdown. If the AI returns JSON, it is converted to readable prose.
+    - Classifies intent (explanation / evidence / coverage / hypothesis /
+      finding / investigation / prioritization / steering / validation).
+    - Builds selective structured context (never a blind full dump).
+    - Applies steering/investigation intents ONLY through typed,
+      orchestrator-validated actions (LLM never mutates state).
+    - Answers deterministically when AI is unavailable; otherwise the LLM
+      enhances a workspace-grounded deterministic core.
     """
+    # --- Structured ask plane (works without AI) ---
+    _has_workspace_state = (
+        state is not None and bool(state.target) and state.target != "ready"
+        and (bool(state.services) or bool(state.findings) or bool(state.software)
+             or bool(state.application_model) or bool(state.hypotheses)
+             or bool(state.investigations) or bool(state.discovered_paths))
+    )
+    if _has_workspace_state:
+        try:
+            from horcrux.intel.ask_engine import (
+                answer_deterministically,
+                build_structured_context,
+                plan_ask_actions,
+                validate_and_apply_action,
+            )
+            actions = plan_ask_actions(state, question)
+            action_notes: list[str] = []
+            for act in actions:
+                try:
+                    res = validate_and_apply_action(state, act)
+                    if res.get("applied"):
+                        action_notes.append(f"- [action:{res['action']}] {res['detail']}")
+                except Exception:
+                    continue
+            deterministic = answer_deterministically(state, question)
+            if action_notes:
+                deterministic += "\n\n**Applied actions:**\n" + "\n".join(action_notes)
+            # AI unavailable -> deterministic answer is authoritative, with
+            # a graceful notice preserving legacy fallback expectations.
+            _prov = ai_manager.get_provider() if ai_manager.is_enabled else None
+            _ai_ready = bool(_prov and _prov.is_configured())
+            if not _ai_ready:
+                notice = ("\n\n---\n[dim]AI analysis unavailable — showing workspace-grounded "
+                          "assessment. Configure providers with 'settings'.[/dim]")
+                # Return Markdown-first so console renders cleanly, while the
+                # fallback substring remains detectable by automation/tests.
+                return deterministic + notice
+            # AI available -> enhance, grounded in structured context.
+            structured_ctx = build_structured_context(state, question)
+            return _ask_with_grounding(ai_manager, question, state, structured_ctx,
+                                       deterministic)
+        except Exception:
+            pass  # fall through to legacy path
+
     if not ai_manager.is_enabled:
         return (
             "[dim yellow]AI assistant is currently disabled.[/dim yellow]\n"

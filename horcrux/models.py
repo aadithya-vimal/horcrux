@@ -408,17 +408,31 @@ def get_profile(name_or_profile: str | ScanProfile | None) -> ScanProfile:
 
 
 class ExploitHandoff(BaseModel):
-    """Exploitation-ready boundary — operator approval required."""
+    """Exploitation-ready boundary — operator approval required.
+
+    HORCRUX discovers/inspects/fingerprints/validates/reasons/correlates and
+    prepares handoffs. It NEVER performs destructive or final exploitation.
+    """
 
     id: str = ""
     finding_id: str = ""
+    target: str = ""
+    vulnerability: str = ""
     affected_asset: str = ""
+    affected_component: str = ""
     evidence: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0, le=1)
     prerequisites: list[str] = Field(default_factory=list)
     reproduction_plan: list[str] = Field(default_factory=list)
     expected_result: str = ""
     impact: str = ""
-    confidence: float = Field(default=0.0, ge=0, le=1)
+    recommended_operator_action: str = ""
+    relevant_capabilities: list[str] = Field(default_factory=list)
+    relevant_tools: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    why_manual_approval_required: str = (
+        "Exploitation carries operational, legal, and stability risk; "
+        "operator must authorize scope, timing, and technique.")
     operator_approval_required: bool = True
     status: str = "pending"
 
@@ -437,8 +451,9 @@ class AssessmentPhase(str, Enum):
 
 
 class OperatorFocus(BaseModel):
-    focus_type: str = ""  # asset, finding, hypothesis, investigation
+    focus_type: str = ""  # asset, finding, hypothesis, investigation, area
     focus_id: str = ""
+    focus_area: str = "all"  # web, api, auth, authz, business_logic, network, all
     prioritize_investigation_id: str = ""
     paused: bool = False
     stopped: bool = False
@@ -487,6 +502,9 @@ class WorkspaceState(BaseModel):
     operator_focus: OperatorFocus = Field(default_factory=OperatorFocus)
     reasoning_checkpoints_used: int = 0
     ai_budget_used: int = 0
+    # --- Phase 8 scheduler/concurrency state (Part 34) ---
+    scheduler_state: dict[str, Any] = Field(default_factory=dict)
+    assessment_run_id: str = ""
 
     def get_policy(self) -> Any:
         from horcrux.core.policy import EngagementPolicy
