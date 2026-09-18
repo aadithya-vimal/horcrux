@@ -62,6 +62,15 @@ def markdown(ws, output: Path | None = None) -> Path:
     lines.append(f"- **Scheduler**: `{sched.get('mode', 'sequential')}` "
                  f"(max_workers={sched.get('max_workers', 1)})")
     lines.append(f"- **Reasoning checkpoints used**: {state.reasoning_checkpoints_used}")
+    mission = state.get_mission()
+    if mission:
+        lines.append(f"- **Headless Mission ID**: `{mission.mission_id}`")
+        lines.append(f"- **Mission Stage**: `{mission.current_stage.value}`")
+        lines.append(f"- **Mission Status**: `{mission.status.value}`")
+        lines.append(f"- **Completion Verdict**: `{mission.completion_verdict}`")
+        lines.append(f"- **Runtime**: `{int(mission.budget.runtime_seconds)}s` (checkpoints: {mission.checkpoints_count})")
+        if mission.identities:
+            lines.append(f"- **Identities Tested**: {', '.join(f'{i.identity_id} ({i.role})' for i in mission.identities)}")
     lines.append("")
 
     # 3. Application overview
@@ -415,6 +424,12 @@ def markdown(ws, output: Path | None = None) -> Path:
     except Exception:
         pass
     lines += [""]
+
+    if mission and mission.narrative_timeline:
+        lines += ["## 20. Autonomous Assessment Timeline", ""]
+        for entry in mission.narrative_timeline[-40:]:
+            lines.append(f"- `[{entry.get('stage', '').lower()}]` **{entry.get('header', '')}**: {entry.get('detail', '')}")
+        lines += [""]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")

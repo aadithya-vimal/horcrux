@@ -53,15 +53,17 @@ class InvestigationScore(BaseModel):
     prerequisites_satisfied: float = 1.0
     execution_cost: float = 0.3
     redundancy_penalty: float = 0.0
+    blast_radius: float = 0.5
 
     @property
     def total(self) -> float:
         return (
-            self.evidence_relevance * 0.2
-            + self.expected_information_gain * 0.25
-            + self.impact_potential * 0.2
+            self.evidence_relevance * 0.15
+            + self.expected_information_gain * 0.20
+            + self.impact_potential * 0.20
+            + self.blast_radius * 0.15
             + self.coverage_gap * 0.15
-            + self.prerequisites_satisfied * 0.1
+            + self.prerequisites_satisfied * 0.10
             - self.execution_cost * 0.05
             - self.redundancy_penalty * 0.05
         )
@@ -83,6 +85,13 @@ class Investigation(BaseModel):
     specialist: str = ""
     score: InvestigationScore = Field(default_factory=InvestigationScore)
     result_summary: str = ""
+    # --- Autonomous & Multi-Perspective Enhancements ---
+    blast_radius: str = "medium"  # low, medium, high, critical
+    identity_requirement: str = ""
+    attempts: int = 0
+    confidence: float = 0.5
+    observations: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
 
     def ensure_id(self) -> str:
         if not self.id:
@@ -616,6 +625,11 @@ def rank_investigations(investigations: list[Investigation]) -> list[Investigati
         high_value = {"idor_bola", "privilege_escalation", "authentication",
                       "business_logic", "ssrf", "graphql", "file_upload"}
         if any(vc in high_value for vc in (inv.vulnerability_classes or [])):
+            inv.priority = min(1.0, inv.priority + 0.05)
+        # Blast radius prioritization
+        if getattr(inv, "blast_radius", "") == "critical":
+            inv.priority = min(1.0, inv.priority + 0.10)
+        elif getattr(inv, "blast_radius", "") == "high":
             inv.priority = min(1.0, inv.priority + 0.05)
     return sorted(investigations, key=lambda i: -i.priority)
 

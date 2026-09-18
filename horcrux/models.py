@@ -25,6 +25,11 @@ class ValidationState(str, Enum):
     potential = "POTENTIAL"
     unverified = "UNVERIFIED"
     false_positive = "FALSE_POSITIVE"
+    discovered = "DISCOVERED"
+    suspected = "SUSPECTED"
+    provisional = "PROVISIONAL"
+    corroborated = "CORROBORATED"
+    inconclusive = "INCONCLUSIVE"
 
 
 class AuditStatus(str, Enum):
@@ -578,6 +583,8 @@ class WorkspaceState(BaseModel):
     external_engine_runs: dict[str, Any] = Field(default_factory=dict)
     correlated_vulnerabilities: list[dict[str, Any]] = Field(default_factory=list)
     engine_operator_exclusions: list[str] = Field(default_factory=list)
+    # --- Autonomous Headless Mission state ---
+    mission: dict[str, Any] = Field(default_factory=dict)
 
     def get_policy(self) -> Any:
         from horcrux.core.policy import EngagementPolicy
@@ -688,4 +695,18 @@ class WorkspaceState(BaseModel):
             return AssessmentPhase(self.assessment_phase)
         except ValueError:
             return AssessmentPhase.INITIALIZED
+
+    def get_mission(self) -> Any:
+        from horcrux.core.mission import AssessmentMission
+        if self.mission:
+            return AssessmentMission.model_validate(self.mission)
+        return None
+
+    def set_mission(self, mission: Any) -> None:
+        if hasattr(mission, "model_dump"):
+            self.mission = mission.model_dump()
+        elif isinstance(mission, dict):
+            self.mission = mission
+        elif mission is None:
+            self.mission = {}
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 import typer
+from rich import box
 from rich.console import Console
+from rich.table import Table
 
 from horcrux import __version__
 from horcrux.core.orchestrator import Orchestrator
@@ -266,8 +269,215 @@ def assess(
     fanfare(console, f"ASSESSMENT CYCLE COMPLETE: {target}")
 
 
+# ── HEADLESS AUTONOMOUS COMMANDS ──────────────────────────────────────────
+headless_app = typer.Typer(
+    name="headless",
+    help="Autonomous headless VAPT assessment operator and mission controller",
+    no_args_is_help=True,
+)
+
+
+def _resolve_workspace_for_mission(target_or_id: str) -> Workspace:
+    ws = Workspace(target_or_id)
+    if ws.state_file.exists():
+        return ws
+    from pathlib import Path
+    base = Path("workspaces")
+    if base.exists():
+        for d in base.iterdir():
+            if d.is_dir() and (d / "state.json").exists():
+                try:
+                    cand_ws = Workspace(d.name)
+                    st = cand_ws.load()
+                    m = st.get_mission()
+                    if m and m.mission_id == target_or_id:
+                        return cand_ws
+                except Exception:
+                    pass
+    return ws
+
+
+@headless_app.command("scan")
+def headless_scan(
+    target: str = typer.Argument(..., help="Target URL, hostname, or IP address"),
+    profile: str = typer.Option("standard", "--profile", "-p", help="Scan profile: quick, standard, deep, full"),
+    config: str = typer.Option("", "--config", "-c", help="Path to engagement configuration YAML/JSON file"),
+    jsonl: bool = typer.Option(False, "--jsonl", help="Stream machine-readable JSONL event stream to stdout"),
+    max_iterations: int = typer.Option(25, "--max-iterations", "-n", help="Max autonomous investigation loop iterations"),
+    max_runtime: int = typer.Option(1800, "--max-runtime", "-t", help="Max runtime in seconds"),
+    concurrency: int = typer.Option(2, "--concurrency", "-w", help="Concurrency level"),
+):
+    """Execute a fully autonomous headless VAPT assessment against a target."""
+    from horcrux.core.headless.config import build_mission_from_config, load_engagement_config
+    from horcrux.core.headless.controller import HeadlessMissionController
+
+    cfg_data = {}
+    if config:
+        cfg_data = load_engagement_config(config)
+
+    overrides = {
+        "profile": profile,
+        "max_iterations": max_iterations,
+        "max_runtime": max_runtime,
+        "concurrency": concurrency,
+    }
+
+    mission = build_mission_from_config(
+        target=target,
+        profile=profile,
+        config_data=cfg_data,
+        execution_overrides=overrides,
+    )
+
+    ws = Workspace(mission.target)
+    controller = HeadlessMissionController(
+        workspace=ws,
+        mission=mission,
+        stdout_jsonl=jsonl,
+    )
+    final_mission = controller.run()
+    if not jsonl:
+        Console().print(f"\n[bold green]✔ Headless mission finished:[/bold green] status={final_mission.status.value} verdict={final_mission.completion_verdict}")
+
+
+@headless_app.command("status")
+def headless_status(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+):
+    """Inspect the status and queue metrics of a headless assessment mission."""
+    from horcrux.core.headless.controller import HeadlessMissionController
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    if not m:
+        Console().print(f"[bold red]No headless mission record found for:[/bold red] {mission_id_or_target}")
+        raise typer.Exit(code=1)
+    ctrl = HeadlessMissionController(ws, m)
+    summary = ctrl.status_summary()
+    table = Table(
+        title=f"[bold bright_magenta]✦ MISSION STATUS: {summary['mission_id']} ✦[/bold bright_magenta]",
+        box=box.ROUNDED,
+        border_style="magenta",
+    )
+    table.add_column("Property", style="bold bright_white")
+    table.add_column("Value", style="cyan")
+    table.add_row("Target", summary["target"])
+    table.add_row("Stage", summary["stage"])
+    table.add_row("Status", summary["status"])
+    table.add_row("Verdict", summary["completion_verdict"])
+    table.add_row("Runtime", f"{summary['runtime_seconds']}s")
+    table.add_row("Findings Count", str(summary["findings_count"]))
+    table.add_row("Exploit Handoffs", str(summary["handoffs_count"]))
+    table.add_row(
+        "Investigation Queue",
+        f"READY: {summary['investigations']['ready']} | "
+        f"RUNNING: {summary['investigations']['running']} | "
+        f"BLOCKED: {summary['investigations']['blocked']} | "
+        f"COMPLETE: {summary['investigations']['complete']}",
+    )
+    Console().print(table)
+
+
+@headless_app.command("pause")
+def headless_pause(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+):
+    """Pause an active headless assessment mission."""
+    from horcrux.core.headless.controller import HeadlessMissionController
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    if not m:
+        Console().print(f"[bold red]No headless mission found for:[/bold red] {mission_id_or_target}")
+        raise typer.Exit(code=1)
+    ctrl = HeadlessMissionController(ws, m)
+    res = ctrl.pause()
+    Console().print(f"[bold yellow]✔ Mission {res['mission_id']} paused.[/bold yellow]")
+
+
+@headless_app.command("resume")
+def headless_resume(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+):
+    """Resume a paused or interrupted headless assessment mission."""
+    from horcrux.core.headless.controller import HeadlessMissionController
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    if not m:
+        Console().print(f"[bold red]No headless mission found to resume for:[/bold red] {mission_id_or_target}")
+        raise typer.Exit(code=1)
+    ctrl = HeadlessMissionController(ws, m)
+    Console().print(f"[bold green]✔ Resuming headless mission {m.mission_id}...[/bold green]")
+    ctrl.resume()
+
+
+@headless_app.command("abort")
+def headless_abort(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+):
+    """Abort a headless assessment mission."""
+    from horcrux.core.headless.controller import HeadlessMissionController
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    if not m:
+        Console().print(f"[bold red]No headless mission found to abort for:[/bold red] {mission_id_or_target}")
+        raise typer.Exit(code=1)
+    ctrl = HeadlessMissionController(ws, m)
+    res = ctrl.abort()
+    Console().print(f"[bold red]✔ Mission {res['mission_id']} aborted.[/bold red]")
+
+
+@headless_app.command("attach")
+def headless_attach(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+):
+    """Attach the interactive operator console to a headless assessment workspace."""
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    target_name = m.target if m else ws.target
+    Console().print(f"[bold cyan]Attaching interactive console to workspace:[/bold cyan] {target_name}")
+    app_inst = ConsoleApp()
+    app_inst.workspace = ws
+    app_inst.run()
+
+
+@headless_app.command("export")
+def headless_export(
+    mission_id_or_target: str = typer.Argument(..., help="Mission ID or target name"),
+    format: str = typer.Option("json", "--format", "-f", help="Export format: json or markdown"),
+):
+    """Export mission state and findings as JSON or Markdown."""
+    ws = _resolve_workspace_for_mission(mission_id_or_target)
+    st = ws.load()
+    m = st.get_mission()
+    if not m:
+        Console().print(f"[bold red]No mission record found to export for:[/bold red] {mission_id_or_target}")
+        raise typer.Exit(code=1)
+    if format.lower() in ("md", "markdown"):
+        from horcrux.reporting.reports import markdown
+        report_path = markdown(ws)
+        Console().print(f"[bold green]✔ Report written to:[/bold green] {report_path}")
+    else:
+        out_file = ws.root / "raw" / "mission-export.json"
+        data = {
+            "mission": m.model_dump(),
+            "findings": [f.model_dump() for f in st.findings],
+            "handoffs": [h.model_dump() for h in st.exploit_handoffs],
+            "attack_paths": st.attack_paths,
+            "false_negative_audit": st.false_negative_audit,
+        }
+        out_file.write_text(json.dumps(data, default=str, indent=2), encoding="utf-8")
+        Console().print(f"[bold green]✔ Mission data exported to:[/bold green] {out_file}")
+
+
+app.add_typer(headless_app, name="headless")
+
+
 KNOWN_COMMANDS = {
-    "scan", "assess", "doctor", "tools", "console", "gallery", "artifacts",
+    "scan", "assess", "headless", "doctor", "tools", "console", "gallery", "artifacts",
     "settings", "report", "ask", "ai", "status", "replay", "benchmark",
     "engines", "--help", "-h", "--version", "-v",
 }

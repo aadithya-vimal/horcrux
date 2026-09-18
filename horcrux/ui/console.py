@@ -308,6 +308,7 @@ class ConsoleApp:
             "ask",
             "engines",
             "import",
+            "headless",
         }
 
         # Clean leading colons or slashes and filter empty arguments
@@ -528,6 +529,9 @@ class ConsoleApp:
         elif command == "raw":
             self.raw_cmd(args)
 
+        elif command == "headless":
+            self.headless_cmd(args)
+
         elif command == "report":
             report_path = markdown(self.workspace)
             self.console.print(
@@ -541,7 +545,7 @@ class ConsoleApp:
 
         else:
             _ALL_COMMANDS = [
-                "scan", "assess", "replay", "benchmark", "status", "surface", "services", "software", "web", "audit",
+                "scan", "assess", "headless", "replay", "benchmark", "status", "surface", "services", "software", "web", "audit",
                 "findings", "inspect", "next", "actions", "creds", "credentials",
                 "graph", "subsystems", "states", "cve", "searchsploit", "intel",
                 "nuclei", "exploit", "exploits", "source", "raw", "report",
@@ -1578,6 +1582,82 @@ class ConsoleApp:
         self.console.print(tracker.render_text())
         self.console.print()
         self.status()
+
+    def headless_cmd(self, args: list[str]):
+        """Manage autonomous headless missions from interactive console."""
+        if len(args) < 2 or args[1].lower() == "help":
+            self.console.print("[bold bright_magenta]HEADLESS OPERATOR COMMANDS:[/bold bright_magenta]")
+            self.console.print("  headless scan <target> [--profile P] [--config C]")
+            self.console.print("  headless status")
+            self.console.print("  headless pause")
+            self.console.print("  headless resume")
+            self.console.print("  headless abort")
+            self.console.print("  headless export")
+            return
+
+        sub = args[1].lower()
+        from horcrux.core.headless.controller import HeadlessMissionController
+        from horcrux.core.headless.config import build_mission_from_config
+
+        target = self.workspace.target if self.workspace else ""
+        if len(args) >= 3 and not args[2].startswith("-"):
+            target = args[2]
+
+        if sub == "scan":
+            if not target or target == "ready":
+                raise ValueError("usage: headless scan <target> [--profile standard|deep|full]")
+            mission = build_mission_from_config(target=target)
+            ws = Workspace(target)
+            ctrl = HeadlessMissionController(ws, mission, console=self.console)
+            ctrl.run()
+            self.workspace = ws
+        elif sub == "status":
+            if not self.workspace:
+                raise ValueError("No workspace loaded.")
+            state = self.workspace.load()
+            m = state.get_mission()
+            if not m:
+                self.console.print(f"[bold red]No headless mission found in workspace '{self.workspace.target}'.[/bold red]")
+                return
+            ctrl = HeadlessMissionController(self.workspace, m, console=self.console)
+            summary = ctrl.status_summary()
+            self.console.print(f"[bold cyan]Mission {summary['mission_id']}:[/bold cyan] stage={summary['stage']} status={summary['status']} verdict={summary['completion_verdict']} findings={summary['findings_count']}")
+        elif sub == "pause":
+            if not self.workspace:
+                raise ValueError("No workspace loaded.")
+            state = self.workspace.load()
+            m = state.get_mission()
+            if m:
+                ctrl = HeadlessMissionController(self.workspace, m, console=self.console)
+                ctrl.pause()
+                self.console.print(f"[bold yellow]✔ Headless mission {m.mission_id} paused.[/bold yellow]")
+        elif sub == "resume":
+            if not self.workspace:
+                raise ValueError("No workspace loaded.")
+            state = self.workspace.load()
+            m = state.get_mission()
+            if m:
+                ctrl = HeadlessMissionController(self.workspace, m, console=self.console)
+                ctrl.resume()
+        elif sub == "abort":
+            if not self.workspace:
+                raise ValueError("No workspace loaded.")
+            state = self.workspace.load()
+            m = state.get_mission()
+            if m:
+                ctrl = HeadlessMissionController(self.workspace, m, console=self.console)
+                ctrl.abort()
+                self.console.print(f"[bold red]✔ Headless mission {m.mission_id} aborted.[/bold red]")
+        elif sub == "export":
+            if not self.workspace:
+                raise ValueError("No workspace loaded.")
+            state = self.workspace.load()
+            m = state.get_mission()
+            if m:
+                ctrl = HeadlessMissionController(self.workspace, m, console=self.console)
+                from horcrux.reporting.reports import markdown
+                rpath = markdown(self.workspace)
+                self.console.print(f"[bold green]✔ Report exported:[/bold green] {rpath}")
 
     def replay_cmd(self, args: list[str]):
         """Replay assessment deterministically from a recorded evidence script."""
