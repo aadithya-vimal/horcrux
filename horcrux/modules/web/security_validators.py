@@ -465,9 +465,16 @@ def validate_ssrf(request_fn: RequestFn, method: str, url: str, param: str,
                              sentinel_url, auth_context=auth_context, stage="OBSERVED",
                              extra={"classification": "open-redirect-not-ssrf"})]
         return ValidatorResult("NO_EFFECT", 0.75, ev, {"classification": "open-redirect"}, "REFUTED")
-    fetch_markers = [control_token.lower(), "connection refused", "127.0.0.1",
-                     "internal", "enoent", "getaddrinfo", "dial tcp"]
-    hit = next((m for m in fetch_markers if m in body.lower()), "")
+    # Fetch evidence must be server-side fetch semantics, never a mere echo of
+    # the supplied URL (error pages routinely echo the request URL, including
+    # the token and 127.0.0.1). Strip the echo, then require network-error text.
+    scrubbed = body.replace(sentinel_url, "").replace(control_token, "")
+    scrubbed = scrubbed.replace("127.0.0.1", "").replace("localhost", "")
+    fetch_markers = ["connection refused", "econnrefused", "enotfound",
+                     "getaddrinfo", "enoent", "dial tcp", "socket hang up",
+                     "fetch failed", "failed to fetch", "error fetching",
+                     "unable to fetch", "etimedout", "timed out"]
+    hit = next((m for m in fetch_markers if m in scrubbed.lower()), "")
     elapsed = resp.get("elapsed_ms", 0)
     if hit and status in (200, 500):
         ev = [build_evidence(capability, test_id, url, req, {"status": status}, body[:1200],

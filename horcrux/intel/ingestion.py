@@ -230,6 +230,8 @@ def _ingest_discovered_paths(state: WorkspaceState, app: ApplicationModel) -> No
 
 def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
     for param in state.parameters:
+        if not (param.name or "").strip():
+            continue
         sem = SemanticParameter(
             name=param.name,
             location=param.location,
@@ -243,9 +245,20 @@ def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
             app.parameters.append(sem)
 
         if param.endpoint:
+            # Never promote static JS bundle / asset URLs into server endpoints.
+            ep_path = (param.endpoint or "").strip()
+            if "://" in ep_path:
+                try:
+                    from urllib.parse import urlparse as _urlparse
+                    ep_path = _urlparse(ep_path).path or "/"
+                except Exception:
+                    ep_path = "/"
+            if ep_path.lower().endswith((".js", ".css", ".png", ".jpg", ".jpeg",
+                                         ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map")):
+                continue
             ep = SemanticEndpoint(
                 method="GET",
-                path=param.endpoint,
+                path=ep_path,
                 parameters=[param.name],
                 sources=[param.source],
             )
@@ -742,6 +755,50 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
                     app, "user" if data.get("to_identity", "user") != "anonymous" else "anonymous",
                     data.get("to_identity", data.get("identity", "observed")),
                     evidence=f"{source}", endpoints=None)
+                count += 1
+            elif etype in ("validator_evidence",):
+                # Validator evidence: anchor endpoint + parameter, harvest any
+                # newly discovered surface for continuous replenishment.
+                req = data.get("request", {}) or {}
+                raw_target = str(data.get("target", "") or req.get("url", "") or "/")
+                if "://" in raw_target:
+                    try:
+                        from urllib.parse import urlparse as _urlparse
+                        vpath = _urlparse(raw_target).path or "/"
+                    except Exception:
+                        vpath = "/"
+                else:
+                    vpath = raw_target.split("?")[0] or "/"
+                if not vpath.startswith("/"):
+                    vpath = "/" + vpath
+                ingest_http_request(app, method=str(req.get("method", "GET") or "GET"),
+                                    path=vpath, identity=str(data.get("authentication_context", "anonymous") or "anonymous"),
+                                    source=source)
+                vparam = str(req.get("param", "") or data.get("payload", "") or "")
+                # payload may be a full value; only anchor plausible param names.
+                if vparam and len(vparam) <= 64 and " " not in vparam and "/" not in vparam:
+                    sem = SemanticParameter(name=vparam, location="query",
+                                            endpoint=vpath, source=source,
+                                            evidence_refs=[f"{source}:param:{vparam}"])
+                    sem.ensure_id()
+                    if not any(p.id == sem.id for p in app.parameters):
+                        app.parameters.append(sem)
+                extra = data.get("extra", {}) or {}
+                for route in (extra.get("discovered_routes") or [])[:10]:
+                    try:
+                        ingest_crawler_paths(app, [str(route)], source=source)
+                    except Exception:
+                        continue
+                for pname in (extra.get("discovered_params") or [])[:10]:
+                    try:
+                        sem2 = SemanticParameter(name=str(pname), location="query",
+                                                 endpoint=vpath, source=source,
+                                                 evidence_refs=[f"{source}:param:{pname}"])
+                        sem2.ensure_id()
+                        if not any(p.id == sem2.id for p in app.parameters):
+                            app.parameters.append(sem2)
+                    except Exception:
+                        continue
                 count += 1
             elif etype in ("authorization_observation", "graphql_observation",
                            "graphql_operation", "validation_result", "nuclei_finding",

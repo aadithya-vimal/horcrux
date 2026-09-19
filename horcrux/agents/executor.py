@@ -119,6 +119,7 @@ def build_capability_inputs(state: Any, investigation: Investigation,
             matrix_family = obs.split(":", 1)[1]
 
     endpoint = "/"
+    asset_provided = bool(matrix_asset)
     if matrix_asset:
         try:
             from horcrux.intel.test_matrix import normalize_matrix_path
@@ -159,9 +160,13 @@ def build_capability_inputs(state: Any, investigation: Investigation,
                         endpoint = _norm(target_ep.path)
                     except Exception:
                         endpoint = target_ep.path
+                    asset_provided = True
                     break
 
-    if endpoint == "/":
+    # Fallback asset only when the test names no asset at all. A literal "/"
+    # target is a real attack surface (document root) and must not be
+    # silently retargeted at an unrelated admin/object endpoint.
+    if endpoint == "/" and not asset_provided:
         for e in app.endpoints:
             if e.has_object_reference or "admin" in e.path.lower():
                 try:
@@ -283,8 +288,15 @@ def run_capability_for_investigation(state: Any, investigation: Investigation,
 
     ok, reason = validate_prerequisites(state, investigation)
     if not ok:
-        terminal = (InvestigationState.SCOPE_BLOCKED if reason == "scope_blocked"
-                    else InvestigationState.BLOCKED)
+        r_lower = str(reason or "").lower()
+        if reason == "scope_blocked":
+            terminal = InvestigationState.SCOPE_BLOCKED
+        elif any(k in r_lower for k in ("two", "second identity", "cross-context", "identity context")):
+            terminal = InvestigationState.REQUIRES_SECOND_IDENTITY
+        elif any(k in r_lower for k in ("auth", "session", "admin access context", "user access context")):
+            terminal = InvestigationState.REQUIRES_AUTH
+        else:
+            terminal = InvestigationState.BLOCKED
         return {"ok": False, "outcome": terminal.value.lower(),
                 "capability": capability_id, "request_id": request_id,
                 "terminal_state": terminal, "summary": reason}

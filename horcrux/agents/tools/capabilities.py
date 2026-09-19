@@ -896,6 +896,58 @@ def _validator_evidence(cap_id: str, res: Any) -> list[dict]:
     return out
 
 
+_STATIC_VALIDATOR_EXCLUSIONS = (
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".gif", ".webp",
+    ".woff", ".woff2", ".ttf", ".eot", ".map", ".mp4", ".webm",
+)
+
+
+def _resolve_param_location(ctx: dict, endpoint: str, param: str) -> str | None:
+    """Model-driven parameter location (query/body/path); None = not server-side.
+
+    Returns None for client_state-only parameters so they never reach
+    server-side validators.
+    """
+    app = ctx.get("application_model")
+    if app is None:
+        return "query"
+    try:
+        from horcrux.intel.test_matrix import normalize_matrix_path as _norm
+        want = _norm(endpoint)
+    except Exception:
+        want = endpoint
+    for p in getattr(app, "parameters", []) or []:
+        name = getattr(p, "name", "")
+        if str(name).lower() != str(param).lower():
+            continue
+        try:
+            pep = _norm(getattr(p, "endpoint", "") or "")
+        except Exception:
+            pep = getattr(p, "endpoint", "") or ""
+        if pep and pep != want:
+            continue
+        loc = str(getattr(p, "location", "query") or "query").lower()
+        if loc == "client_state":
+            return None
+        if loc in ("query", "body", "path"):
+            return loc
+        return "query"
+    return "query"
+
+
+_SECURITY_PROPERTY_BY_KIND = {
+    "sqli": "input neutralization / SQL injection resistance",
+    "xss": "output encoding / XSS resistance",
+    "traversal": "path confinement / file disclosure resistance",
+    "ssrf": "server-side fetch confinement",
+    "cmdi": "command neutralization / OS injection resistance",
+    "upload": "file upload confinement / executable-upload resistance",
+    "auth": "authentication enforcement",
+    "api": "API data minimization / mass-assignment resistance",
+    "workflow": "workflow state-transition integrity",
+}
+
+
 def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResult:
     """Generic live adapter for security validators; offline stays synthetic."""
     t0 = time.monotonic()
@@ -903,11 +955,14 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
     target = ctx.get("target", "")
     param = ctx.get("parameter") or (ctx.get("parameters") or [""])[0] if ctx.get("parameters") else ctx.get("parameter", "")
     param = param or ctx.get("target_parameter", "") or "q"
+    matrix_family = str(ctx.get("matrix_family", "") or "")
     test_id = f"{cap_id}:{endpoint}:{param}"
     if _use_offline(target, ctx):
         ms = int((time.monotonic() - t0) * 1000)
         return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
-                            "verdict": "NO_EFFECT", "synthetic": True},
+                            "verdict": "NO_EFFECT", "synthetic": True,
+                            "test_id": test_id, "matrix_family": matrix_family,
+                            "target": target, "access_context": "anonymous"},
                    evidence=[_ev("parameter_observation",
                                  {"endpoint": endpoint, "parameter": param},
                                  source=cap_id, confidence=0.6)],
@@ -919,36 +974,52 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
         base_url = _live_base_url(ctx, target)
         url = base_url + endpoint
         from horcrux.intel.parameters import is_static_asset_endpoint as _is_static
-        if _is_static(endpoint) or endpoint.endswith((".js", ".css")):
+        lowered = endpoint.lower().split("?")[0]
+        if (_is_static(endpoint) or lowered.endswith(_STATIC_VALIDATOR_EXCLUSIONS)
+                or lowered in ("/favicon.ico", "/robots.txt", "/sitemap.xml")
+                or "/assets/" in lowered or "/static/" in lowered):
             ms = int((time.monotonic() - t0) * 1000)
             return _ok(cap_id, {"endpoint": endpoint, "verdict": "NO_EFFECT",
-                                "reason": "static-asset-excluded"},
+                                "reason": "static-asset-excluded",
+                                "test_id": test_id, "matrix_family": matrix_family,
+                                "target": target, "access_context": "anonymous"},
                        evidence=[], provenance="horcrux.security_validators:excluded",
                        duration_ms=ms)
+        location = _resolve_param_location(ctx, endpoint, param)
+        if location is None and kind in ("sqli", "xss", "traversal", "ssrf", "cmdi"):
+            ms = int((time.monotonic() - t0) * 1000)
+            return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
+                                "verdict": "NO_EFFECT",
+                                "reason": "client-state-only-parameter",
+                                "test_id": test_id, "matrix_family": matrix_family,
+                                "target": target, "access_context": "anonymous"},
+                       evidence=[], provenance="horcrux.security_validators:excluded",
+                       duration_ms=ms)
+        location = location or "query"
         method = str(ctx.get("method", "GET")).upper()
         if kind == "sqli":
-            res = sv.validate_sqli(req, method, url, param, location="query",
+            res = sv.validate_sqli(req, method, url, param, location=location,
                                    capability=cap_id, test_id=test_id)
             extra = {"endpoint": endpoint, "parameter": param, "sqli_confirmed": res.verdict in ("STRONG_SQLI_EVIDENCE",),
                      "sql_errors": str((res.details or {}).get("signals", ""))}
         elif kind == "xss":
-            res = sv.validate_xss_reflected(req, method, url, param, location="query",
+            res = sv.validate_xss_reflected(req, method, url, param, location=location,
                                             capability=cap_id, test_id=test_id)
             extra = {"endpoint": endpoint, "parameter": param,
                      "xss_confirmed": res.verdict == "STRONG_XSS_EVIDENCE",
                      "unescaped_payload_reflected": res.verdict == "STRONG_XSS_EVIDENCE"}
         elif kind == "traversal":
-            res = sv.validate_traversal(req, method, url, param, location="query",
+            res = sv.validate_traversal(req, method, url, param, location=location,
                                         capability=cap_id, test_id=test_id)
             extra = {"endpoint": endpoint, "parameter": param,
                      "traversal_confirmed": res.verdict == "STRONG_TRAVERSAL_EVIDENCE"}
         elif kind == "ssrf":
-            res = sv.validate_ssrf(req, method, url, param, location="query",
+            res = sv.validate_ssrf(req, method, url, param, location=location,
                                    capability=cap_id, test_id=test_id)
             extra = {"endpoint": endpoint, "parameter": param,
                      "ssrf_confirmed": res.verdict == "STRONG_SSRF_EVIDENCE"}
         elif kind == "cmdi":
-            res = _validate_cmdi_generic(req, method, url, param, cap_id, test_id)
+            res = _validate_cmdi_generic(req, method, url, param, cap_id, test_id, location=location)
             extra = {"endpoint": endpoint, "parameter": param,
                      "cmd_injection_confirmed": res.verdict == "STRONG_CMDI_EVIDENCE"}
         elif kind == "upload":
@@ -970,11 +1041,27 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
             return _fail(cap_id, FailureClass.TOOL_FAILED, f"unknown validator kind {kind}")
         ms = int((time.monotonic() - t0) * 1000)
         structured = _structured_from_validator(cap_id, res, extra)
+        # Validator result contract (§4): identity + comparison fields.
+        structured.setdefault("test_id", test_id)
+        structured.setdefault("matrix_family", matrix_family)
+        structured.setdefault("target", target)
+        structured.setdefault("access_context", "anonymous")
+        structured.setdefault("security_property",
+                              _SECURITY_PROPERTY_BY_KIND.get(kind, "input validation"))
+        structured.setdefault("payload", param)
+        if res.evidence:
+            first, last = res.evidence[0], res.evidence[-1]
+            structured.setdefault("baseline", first.get("baseline_comparison", {}))
+            structured.setdefault("comparison", {
+                "baseline": first.get("baseline_comparison", {}),
+                "mutated": last.get("mutated_comparison", last.get("response_meta", {})),
+                "stages": [e.get("stage") for e in res.evidence],
+            })
         result = _ok(cap_id, structured, evidence=_validator_evidence(cap_id, res),
                      provenance=f"horcrux.modules.web.security_validators:{kind}:live",
                      duration_ms=ms)
         print(f"{cap_id.upper()} TEST  param={param} endpoint={endpoint} "
-              f"verdict={res.verdict} conf={res.confidence:.2f}")
+              f"loc={location} verdict={res.verdict} conf={res.confidence:.2f}")
         return result
     except Exception as exc:
         return _fail(cap_id, FailureClass.TOOL_FAILED, f"{cap_id} failed: {exc}")
@@ -984,9 +1071,15 @@ _CMDI_MARKERS = ("uid=", "gid=", "root:", "bin:", "daemon:", "PWNED-CMDI")
 
 
 def _validate_cmdi_generic(req, method: str, url: str, param: str,
-                           cap_id: str, test_id: str):
+                           cap_id: str, test_id: str, location: str = "query"):
     from horcrux.modules.web import security_validators as sv
-    base = req(method, url, query={param: "test123"})
+
+    def _send(value: str) -> dict:
+        if location == "body":
+            return req(method if method != "GET" else "POST", url, body={param: value})
+        return req(method, url, query={param: value})
+
+    base = _send("test123")
     if base.get("status") == 0:
         return sv.ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, stage="INSUFFICIENT_EVIDENCE")
     probes = [("$(id)", None), (";id", None), ("|id", None), ("`id`", None)]
@@ -994,7 +1087,7 @@ def _validate_cmdi_generic(req, method: str, url: str, param: str,
                             {"status": base.get("status")}, base.get("text", "")[:600],
                             "test123", stage="OBSERVED")]
     for payload, _ in probes:
-        r = req(method, url, query={param: f"test123{payload}"})
+        r = _send(f"test123{payload}")
         body = r.get("text", "") or ""
         hit = next((m for m in _CMDI_MARKERS if m in body), "")
         fp_base = sv._fingerprint(base.get("text", ""))
@@ -1054,6 +1147,23 @@ def _validate_workflow_generic(req, base_url: str, endpoint: str, ctx: dict,
     extra_steps = ctx.get("workflow_steps")
     if isinstance(extra_steps, list) and extra_steps:
         steps = extra_steps
+    else:
+        # Baseline sequence from the discovered model workflow containing this
+        # endpoint, so the validator knows STATE A -> ACTION -> STATE B.
+        try:
+            app = ctx.get("application_model")
+            for wf in (getattr(app, "workflows", []) or []):
+                names = [getattr(wf, "name", "")]
+                wsteps = list(getattr(wf, "steps", []) or [])
+                paths = [str(getattr(s, "path", "")) for s in wsteps]
+                if endpoint in paths or any(endpoint in (p or "") for p in paths):
+                    steps = [{"name": str(getattr(s, "name", p) or p),
+                              "request": {"url": base_url + (p if p.startswith("/") else "/" + p),
+                                          "method": str(getattr(s, "method", "GET") or "GET")}}
+                             for s, p in zip(wsteps, paths)][:8]
+                    break
+        except Exception:
+            pass
 
     def _run(step: dict, _ctx: dict) -> dict:
         r = step.get("request", {})
@@ -1075,7 +1185,108 @@ def _adapter_sqli_probe(ctx: dict) -> CapabilityResult:
 
 
 def _adapter_xss_probe(ctx: dict) -> CapabilityResult:
-    return _run_validator_adapter("xss_probe", ctx, "xss")
+    result = _run_validator_adapter("xss_probe", ctx, "xss")
+    try:
+        return _augment_xss_with_browser(ctx, result)
+    except Exception:
+        return result
+
+
+def _augment_xss_with_browser(ctx: dict, result: CapabilityResult) -> CapabilityResult:
+    """DOM/XSS browser integration: invoke the browser explicitly when a
+    client-side sink check is meaningful; never silently downgrade to HTTP.
+
+    - HTTP STRONG verdict: DOM check unnecessary, record skipped reason.
+    - Playwright available: navigate payload URL, correlate token to DOM
+      sinks/dialogs via validate_xss_dom, merge evidence (upgrade on confirm).
+    - Playwright unavailable: explicit REQUIRES_TOOL evidence (no silent skip).
+    """
+    from horcrux.modules.web import security_validators as sv
+    data = result.structured_data or {}
+    if data.get("synthetic"):
+        return result
+    verdict = str(data.get("verdict", ""))
+    endpoint = str(data.get("endpoint", ctx.get("endpoint", "/")))
+    param = str(data.get("parameter", ctx.get("parameter", "q")))
+    target = str(ctx.get("target", ""))
+    if verdict == "STRONG_XSS_EVIDENCE":
+        result.evidence.append(_ev("validator_evidence", {
+            "capability": "xss_probe", "test_id": data.get("test_id", ""),
+            "stage": "OBSERVED",
+            "extra": {"dom_check": "skipped-http-confirmed"},
+        }, source="xss_probe", confidence=0.6))
+        return result
+    base_url = _live_base_url(ctx, target)
+    token = f"hdom{endpoint.replace('/', '-')[:12]}"
+    payload_url = base_url + endpoint
+    sep = "&" if "?" in payload_url else "?"
+    payload_url = f"{payload_url}{sep}{param}={token}"
+    probe = _playwright_probe()
+    if not probe["ok"]:
+        result.evidence.append(_ev("validator_evidence", {
+            "capability": "xss_probe", "test_id": data.get("test_id", ""),
+            "stage": "OBSERVED",
+            "extra": {"dom_check": "REQUIRES_TOOL", "reason": probe["reason"],
+                      "backend": "none",
+                      "note": "DOM/client-side XSS execution requires Playwright; HTTP reflection test completed."},
+        }, source="xss_probe", confidence=0.6))
+        data["dom_check"] = "REQUIRES_TOOL"
+        result.structured_data = data
+        return result
+    # Playwright present: drive real browser observation (scope-gated).
+    try:
+        from horcrux.intel.browser import get_browser_adapter
+        state = ctx.get("state")
+        scope_check = None
+        if state is not None:
+            try:
+                policy = state.get_policy()
+                scope_check = lambda u: _url_in_scope(policy, u)  # noqa: E731
+            except Exception:
+                scope_check = None
+        adapter = get_browser_adapter("playwright", scope_check=scope_check)
+        launched = adapter.launch()
+        if not launched.get("launched"):
+            raise RuntimeError(launched.get("reason", "launch failed"))
+        try:
+            adapter.create_context(identity="anonymous")
+            obs = adapter.navigate(payload_url)
+            dom = adapter.inspect_dom()
+            console = adapter.capture_console()
+            links = [l for l in (dom.get("links") or []) if isinstance(l, str)]
+            sinks = [{"source": l, "sink": "dom-link", "triggered": False}
+                     for l in links if token in l]
+            sinks += [{"source": c[:200], "sink": "console", "triggered": False}
+                      for c in console if token in c]
+            dom_res = sv.validate_xss_dom(
+                " ".join(links)[:4000] + " " + " ".join(console)[:2000],
+                {"url": payload_url, "sinks": sinks}, token,
+                capability="xss_probe", test_id=str(data.get("test_id", "xss-dom")))
+            for e in dom_res.evidence:
+                result.evidence.append(_ev("validator_evidence", dict(e),
+                                           source="xss_probe",
+                                           confidence=float(dom_res.confidence)))
+            data["dom_check"] = f"browser:playwright:{dom_res.verdict}"
+            data["browser_backend"] = "playwright"
+            # Upgrade only on strictly stronger DOM confirmation.
+            if dom_res.verdict == "STRONG_XSS_EVIDENCE" and verdict != "STRONG_XSS_EVIDENCE":
+                data["verdict"] = "STRONG_XSS_EVIDENCE"
+                data["xss_confirmed"] = True
+                data["unescaped_payload_reflected"] = True
+                data["confirmed_via"] = "dom-sink"
+            result.structured_data = data
+        finally:
+            try:
+                adapter.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        result.evidence.append(_ev("validator_evidence", {
+            "capability": "xss_probe", "test_id": data.get("test_id", ""),
+            "stage": "INSUFFICIENT_EVIDENCE",
+            "extra": {"dom_check": "ERROR", "error": str(exc)[:200]},
+        }, source="xss_probe", confidence=0.4))
+    return result
 
 
 def _adapter_traversal_probe(ctx: dict) -> CapabilityResult:
@@ -1267,7 +1478,54 @@ def _adapter_authz_compare(ctx: dict) -> CapabilityResult:
             code_a = resp_anon.status_code
             body_a = resp_anon.text[:2000]
 
-            # Collection endpoints are never BOLA boundaries.
+            # Ownership boundary is established by private-field disclosure in
+            # the response itself, not by URL keywords alone (keywords are
+            # only a hint). Computed before any branch so the collection
+            # early-return cannot shadow it.
+            _body_lower = body_a.lower()
+            _disclosed = any(k in _body_lower for k in ("userid", "user_id", "email", "owner",
+                                                        "basket", "products", "password", "token",
+                                                        "address", "card"))
+            is_private_entity = any(k in endpoint.lower() for k in ("basket", "cart", "user", "order", "account", "profile", "wallet", "card", "address", "invoice", "payment", "whoami", "admin", "management", "privileged", "internal")) or _disclosed
+
+            # Collection endpoints are never BOLA boundaries — except an
+            # administrative surface under vertical review, which is judged
+            # on its own content (enforced / exposed / absent).
+            _admin_path = any(k in endpoint.lower() for k in ("admin", "management", "privileged", "internal"))
+            _vertical = str(ctx.get("matrix_family", "") or "") == "authz_vertical"
+            if not _is_instance and (_admin_path or _vertical):
+                _marks = sum(1 for m in ("dashboard", "user list", "admin panel",
+                                         "management console", "privilege", "user management",
+                                         "administration", "system configuration")
+                             if m in body_a.lower())
+                ms = int((time.monotonic() - t0) * 1000)
+                if code_a == 200 and _marks >= 2:
+                    ev = [_ev("authorization_observation", {
+                        "endpoint": endpoint, "anonymous": code_a,
+                        "admin_markers": _marks, "private_entity": True,
+                        "enforced": False,
+                    }, source="authz_compare", confidence=0.88)]
+                    print(f"AUTHZ TEST  anon -> {endpoint}  result: ADMIN-SURFACE-EXPOSED")
+                    return _ok("authz_compare", {
+                        "endpoint": endpoint, "status_anonymous": code_a,
+                        "status_user": code_b or code_a,
+                        "authorization_enforced": False, "potential_gap": True,
+                        "idor_confirmed": False, "private_entity": True,
+                        "affected_asset": endpoint, "admin_surface": True,
+                    }, evidence=ev, provenance="horcrux.agents.specialists:authz:live",
+                        duration_ms=ms)
+                ev = [_ev("authorization_observation", {
+                    "endpoint": endpoint, "status_code": code_a,
+                    "admin_surface_absent": True, "enforced": code_a in (401, 403),
+                }, source="authz_compare", confidence=0.8)]
+                return _ok("authz_compare", {
+                    "endpoint": endpoint, "status_anonymous": code_a,
+                    "status_user": code_b or code_a,
+                    "authorization_enforced": code_a in (401, 403),
+                    "potential_gap": False, "is_public_collection": False,
+                    "private_entity": False,
+                }, evidence=ev, provenance="horcrux.agents.specialists:authz:live",
+                    duration_ms=ms)
             if not _is_instance:
                 ms = int((time.monotonic() - t0) * 1000)
                 ev = [_ev("authorization_observation", {
@@ -1285,8 +1543,6 @@ def _adapter_authz_compare(ctx: dict) -> CapabilityResult:
                     "is_public_collection": True,
                     "private_entity": False,
                 }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
-
-            is_private_entity = any(k in endpoint.lower() for k in ("basket", "cart", "user", "order", "account", "profile", "wallet", "card", "address", "invoice", "payment", "whoami"))
 
             idor_confirmed = False
             mutated_path = ""
@@ -1344,9 +1600,9 @@ def _adapter_authz_compare(ctx: dict) -> CapabilityResult:
                     "private_entity": False,
                 }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
 
-            # Private entity check
-            body_lower = body_a.lower()
-            disclosed_private_data = any(k in body_lower for k in ("userid", "user_id", "email", "basket", "products", "password", "token", "address", "card"))
+            # Private entity check (is_private_entity already folds in
+            # response ownership disclosure; see above).
+            disclosed_private_data = _disclosed
             if is_private_entity and (idor_confirmed or disclosed_private_data):
                 ev = [_ev("authorization_observation", {
                     "endpoint": endpoint,
