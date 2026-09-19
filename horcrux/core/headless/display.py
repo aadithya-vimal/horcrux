@@ -54,7 +54,8 @@ class HeadlessDisplay:
         table.add_row("Authorized Scope", ", ".join(brief.scope) or brief.target)
         table.add_row("Assessment Profile", brief.profile)
         table.add_row("Mission Objectives", ", ".join(brief.objectives) or "Full Surface & Vulnerability Assessment")
-        table.add_row("Available Identities", ", ".join(brief.available_identities) or "Anonymous Only")
+        contexts = getattr(brief, "available_access_contexts", None) or brief.available_identities
+        table.add_row("Access Contexts", ", ".join(contexts) or "anonymous (default)")
         table.add_row("Local Capabilities", ", ".join(brief.available_capabilities[:8]) + ("..." if len(brief.available_capabilities) > 8 else ""))
         
         ext_status = ", ".join(f"{k}: {v}" for k, v in list(brief.external_integrations.items())[:5]) or "Native Horcrux Engine"

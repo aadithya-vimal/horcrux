@@ -20,17 +20,19 @@ def utcnow() -> datetime:
 
 
 class MissionStage(str, Enum):
+    PLANNING = "PLANNING"
     MISSION = "MISSION"
     SCOPE = "SCOPE"
     RECONNAISSANCE = "RECONNAISSANCE"
     MODELING = "MODELING"
-    AUTHENTICATION = "AUTHENTICATION"
     DISCOVERY = "DISCOVERY"
     HYPOTHESIS = "HYPOTHESIS"
     INVESTIGATION = "INVESTIGATION"
     CORRELATION = "CORRELATION"
     HANDOFF = "HANDOFF"
     COMPLETION = "COMPLETION"
+    PAUSED = "PAUSED"
+    ABORTED = "ABORTED"
 
 
 class MissionStatus(str, Enum):
@@ -45,34 +47,70 @@ class MissionStatus(str, Enum):
     COMPLETE_WITH_LIMITATIONS = "COMPLETE_WITH_LIMITATIONS"
 
 
-class IdentityProfile(BaseModel):
-    """Configured test identity for multi-perspective assessments.
+class AccessContextStatus(str, Enum):
+    CONFIGURED = "CONFIGURED"
+    VALID = "VALID"
+    EXPIRED = "EXPIRED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class AccessContext(BaseModel):
+    """Pre-established access context supplied by the tester.
     
-    Plaintext secrets are NEVER stored; credentials are referenced via env vars
-    or ephemeral runtime handles.
+    Authentication is an assessment INPUT, never a mission phase.
+    HORCRUX consumes pre-established sessions/tokens and does NOT attempt
+    login workflows or wait for credentials. Secrets are never logged.
     """
 
-    identity_id: str
+    context_id: str
     display_name: str = ""
-    role: str = "user"  # anonymous, user, privileged, admin, org_owner
-    credentials_ref: str = ""  # Environment variable name holding secret
-    auth_workflow: str = "login_form"  # login_form, api_token, cookie, basic_auth
-    login_url: str = ""
+    role_label: str = "user"  # anonymous, user, admin, privileged, org_owner, api_client
+    source: str = "provided"  # provided, browser_session, cookie_session, api_token, bearer_token
+    cookies: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    bearer_token_ref: str = ""  # Env var name or key reference holding secret
+    session_reference: str = ""
+    api_credential_reference: str = ""
+    scope: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    status: AccessContextStatus = AccessContextStatus.CONFIGURED
+    last_validated_at: Optional[datetime] = None
+    validation_endpoint: str = ""
+    failure_reason: str = ""
+
+    # Compatibility attributes for earlier identity profile usage
     username: str = ""
     password_env: str = ""
-    token_hashes: list[str] = Field(default_factory=list)
-    session_cookies: list[str] = Field(default_factory=list)
-    headers: dict[str, str] = Field(default_factory=dict)
-    permissions: list[str] = Field(default_factory=list)
-    scope: list[str] = Field(default_factory=list)
+    credentials_ref: str = ""
+    login_url: str = ""
+    auth_workflow: str = "provided"
     is_authenticated: bool = False
-    last_verified_at: Optional[datetime] = None
+
+    @property
+    def identity_id(self) -> str:
+        return self.context_id
+
+    @identity_id.setter
+    def identity_id(self, val: str) -> None:
+        self.context_id = val
+
+    @property
+    def role(self) -> str:
+        return self.role_label
+
+    @role.setter
+    def role(self, val: str) -> None:
+        self.role_label = val
 
     def resolve_credential(self) -> str:
-        env_var = self.credentials_ref or self.password_env
+        env_var = self.credentials_ref or self.password_env or self.bearer_token_ref or self.api_credential_reference
         if env_var and os.environ.get(env_var):
             return os.environ[env_var]
         return ""
+
+
+# Compatibility alias
+IdentityProfile = AccessContext
 
 
 class HeadlessExecutionPolicy(BaseModel):
@@ -140,6 +178,7 @@ class MissionBrief(BaseModel):
     scope: list[str] = Field(default_factory=list)
     profile: str = "standard"
     objectives: list[str] = Field(default_factory=list)
+    available_access_contexts: list[str] = Field(default_factory=list)
     available_identities: list[str] = Field(default_factory=list)
     available_capabilities: list[str] = Field(default_factory=list)
     external_integrations: dict[str, str] = Field(default_factory=dict)
@@ -159,6 +198,7 @@ class AssessmentMission(BaseModel):
     status: MissionStatus = MissionStatus.INITIALIZED
     policy: HeadlessExecutionPolicy = Field(default_factory=HeadlessExecutionPolicy)
     budget: BudgetTracker = Field(default_factory=BudgetTracker)
+    access_contexts: list[AccessContext] = Field(default_factory=list)
     identities: list[IdentityProfile] = Field(default_factory=list)
     current_investigation_id: str = ""
     current_objective: str = ""
@@ -170,6 +210,28 @@ class AssessmentMission(BaseModel):
     enabled_integrations: list[str] = Field(default_factory=list)
     narrative_timeline: list[dict[str, Any]] = Field(default_factory=list)
     checkpoints_count: int = 0
+
+    def get_all_contexts(self) -> list[AccessContext]:
+        """Returns consolidated list of access contexts and legacy identities."""
+        results: list[AccessContext] = list(self.access_contexts)
+        known_ids = {c.context_id for c in results}
+        for ident in self.identities:
+            if ident.context_id not in known_ids:
+                results.append(ident)
+                known_ids.add(ident.context_id)
+        return results
+
+    def get_context(self, context_id: str) -> Optional[AccessContext]:
+        for ctx in self.get_all_contexts():
+            if ctx.context_id == context_id or ctx.role_label == context_id:
+                return ctx
+        return None
+
+    def available_context_ids(self) -> list[str]:
+        return [
+            c.context_id for c in self.get_all_contexts()
+            if c.status in (AccessContextStatus.VALID, AccessContextStatus.CONFIGURED)
+        ] or ["anonymous"]
 
     def add_narrative(self, stage: str, header: str, detail: str, evidence_ref: str = "") -> None:
         self.narrative_timeline.append({

@@ -69,8 +69,21 @@ def markdown(ws, output: Path | None = None) -> Path:
         lines.append(f"- **Mission Status**: `{mission.status.value}`")
         lines.append(f"- **Completion Verdict**: `{mission.completion_verdict}`")
         lines.append(f"- **Runtime**: `{int(mission.budget.runtime_seconds)}s` (checkpoints: {mission.checkpoints_count})")
-        if mission.identities:
-            lines.append(f"- **Identities Tested**: {', '.join(f'{i.identity_id} ({i.role})' for i in mission.identities)}")
+        all_contexts = mission.get_all_contexts() if hasattr(mission, "get_all_contexts") else (getattr(mission, "access_contexts", None) or mission.identities)
+        if all_contexts:
+            lines.append("- **Assessment Access Contexts**:")
+            for ctx in all_contexts:
+                st = getattr(ctx.status, "value", str(ctx.status)) if hasattr(ctx, "status") else "AVAILABLE"
+                cid = getattr(ctx, "context_id", getattr(ctx, "identity_id", "ctx"))
+                role = getattr(ctx, "role_label", getattr(ctx, "role", "user"))
+                lines.append(f"  - `{cid}` ({role}): **{st}**")
+        
+        # Surface any access context limitations
+        invs_blocked_auth = [i for i in state.get_investigations() if "MISSING_ACCESS_CONTEXT" in (i.result_summary or "")]
+        if invs_blocked_auth:
+            lines.append("- **Authorization Coverage Limitations**:")
+            for inv_b in invs_blocked_auth[:3]:
+                lines.append(f"  - {inv_b.result_summary}")
     lines.append("")
 
     # 3. Application overview

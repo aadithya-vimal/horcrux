@@ -673,7 +673,7 @@ def merge_investigations(
             merged.append(cand)
     done_ids = {i.id for i in merged}
     for old in existing:
-        if old.id not in done_ids and old.state in _PARKED:
+        if old.id not in done_ids:
             merged.append(old)
     return merged
 

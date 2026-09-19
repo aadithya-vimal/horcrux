@@ -14,23 +14,67 @@ from typing import Any
 
 def _has_two_identities(state: Any) -> tuple[bool, str]:
     try:
+        mission = getattr(state, "get_mission", lambda: None)()
+        if mission and hasattr(mission, "get_all_contexts"):
+            valid_contexts = [
+                c for c in mission.get_all_contexts()
+                if getattr(c.status, "value", str(c.status)) in ("VALID", "CONFIGURED") and c.role_label != "anonymous"
+            ]
+            if len(valid_contexts) >= 2:
+                return True, ""
         labels = {i.label for i in state.get_application_model().identities}
         labels.discard("anonymous")
         if len(labels) >= 2:
             return True, ""
-        return False, "requires two distinct non-anonymous identities"
+        return False, "MISSING_ACCESS_CONTEXT: Cross-context authorization testing requires at least two supplied access contexts. No second context is available."
     except Exception:
         return False, "identity state unavailable"
 
 
 def _has_authenticated_session(state: Any) -> tuple[bool, str]:
     try:
+        mission = getattr(state, "get_mission", lambda: None)()
+        if mission and hasattr(mission, "get_all_contexts"):
+            valid_contexts = [
+                c for c in mission.get_all_contexts()
+                if getattr(c.status, "value", str(c.status)) in ("VALID", "CONFIGURED") and c.role_label != "anonymous"
+            ]
+            if valid_contexts:
+                return True, ""
         app = state.get_application_model()
         if app.sessions or any(i.role.value != "anonymous" for i in app.identities):
             return True, ""
-        return False, "requires an authenticated session"
+        return False, "MISSING_ACCESS_CONTEXT: Requires one authenticated access context, which was not supplied."
     except Exception:
         return False, "session state unavailable"
+
+
+def _has_admin_context(state: Any) -> tuple[bool, str]:
+    try:
+        mission = getattr(state, "get_mission", lambda: None)()
+        if mission and hasattr(mission, "get_all_contexts"):
+            if any(c.role_label == "admin" and getattr(c.status, "value", str(c.status)) in ("VALID", "CONFIGURED") for c in mission.get_all_contexts()):
+                return True, ""
+        app = state.get_application_model()
+        if any(i.role.value in ("admin", "privileged") for i in app.identities):
+            return True, ""
+        return False, "MISSING_ACCESS_CONTEXT: Requires admin access context, which was not supplied or is unavailable."
+    except Exception:
+        return False, "admin context state unavailable"
+
+
+def _has_user_context(state: Any) -> tuple[bool, str]:
+    try:
+        mission = getattr(state, "get_mission", lambda: None)()
+        if mission and hasattr(mission, "get_all_contexts"):
+            if any(c.role_label in ("user", "client-user") and getattr(c.status, "value", str(c.status)) in ("VALID", "CONFIGURED") for c in mission.get_all_contexts()):
+                return True, ""
+        app = state.get_application_model()
+        if any(i.role.value == "user" for i in app.identities):
+            return True, ""
+        return False, "MISSING_ACCESS_CONTEXT: Requires user access context, which was not supplied or is unavailable."
+    except Exception:
+        return False, "user context state unavailable"
 
 
 def _has_authenticated_api(state: Any) -> tuple[bool, str]:
@@ -95,7 +139,13 @@ def _has_objects(state: Any) -> tuple[bool, str]:
 
 PREREQUISITE_CHECKS = {
     "two_identities": _has_two_identities,
+    "two_contexts": _has_two_identities,
+    "context_count >= 2": _has_two_identities,
     "authenticated_session": _has_authenticated_session,
+    "authenticated_context": _has_authenticated_session,
+    "one_authenticated_context": _has_authenticated_session,
+    "admin_context": _has_admin_context,
+    "user_context": _has_user_context,
     "authenticated_api": _has_authenticated_api,
     "web_target": _has_web_target,
     "workflow_discovered": _has_workflow,

@@ -31,6 +31,8 @@ from horcrux.core.headless.display import HeadlessDisplay
 from horcrux.core.headless.events import HeadlessEventEmitter
 from horcrux.core.integrations.registry import IntegrationRegistry
 from horcrux.core.mission import (
+    AccessContext,
+    AccessContextStatus,
     AssessmentMission,
     IdentityProfile,
     MissionBrief,
@@ -137,27 +139,22 @@ class HeadlessMissionController:
             return self.mission
         self._stage_modeling()
 
-        # ── STAGE 4: ACTIVE AUTHENTICATION ────────────────────────────────
-        if not self._check_should_continue():
-            return self.mission
-        self._stage_authentication()
-
-        # ── STAGE 5: DISCOVERY & HYPOTHESIS ───────────────────────────────
+        # ── STAGE 4: DISCOVERY & HYPOTHESIS ───────────────────────────────
         if not self._check_should_continue():
             return self.mission
         self._stage_discovery_and_hypothesis()
 
-        # ── STAGE 6: AUTONOMOUS INVESTIGATION LOOP ────────────────────────
+        # ── STAGE 5: AUTONOMOUS INVESTIGATION LOOP ────────────────────────
         if not self._check_should_continue():
             return self.mission
         self._stage_investigation_loop()
 
-        # ── STAGE 7: CORRELATION & EXPLOIT HANDOFFS ───────────────────────
+        # ── STAGE 6: CORRELATION & EXPLOIT HANDOFFS ───────────────────────
         if not self._check_should_continue():
             return self.mission
         self._stage_correlation_and_handoffs()
 
-        # ── STAGE 8: CONVERGENCE & COMPLETION AUDIT ───────────────────────
+        # ── STAGE 7: CONVERGENCE & COMPLETION AUDIT ───────────────────────
         self._stage_completion()
 
         return self.mission
@@ -179,6 +176,9 @@ class HeadlessMissionController:
         self.display.render_stage_transition(MissionStage.MISSION, "started")
         self.events.emit("stage.started", {"stage": MissionStage.MISSION.value})
 
+        # Load and validate supplied access contexts (optional inputs, no login workflows)
+        self._initialize_access_contexts()
+
         # Capabilities and Integrations health checks
         reg = IntegrationRegistry()
         ext_status: dict[str, str] = {}
@@ -189,6 +189,8 @@ class HeadlessMissionController:
             else:
                 ext_status[meta.id] = "NOT_CONFIGURED"
 
+        available_ctx_ids = self.mission.available_context_ids()
+
         # Construct MissionBrief
         brief = MissionBrief(
             mission_id=self.mission.mission_id,
@@ -197,14 +199,14 @@ class HeadlessMissionController:
             profile=self.mission.profile,
             objectives=[
                 "application_structure_mapping",
-                "authentication_validation",
                 "authorization_differentiation",
                 "input_and_injection_analysis",
                 "api_and_business_logic_analysis",
                 "vulnerability_correlation",
                 "completeness_and_gap_auditing",
             ],
-            available_identities=[i.identity_id for i in self.mission.identities] or ["anonymous"],
+            available_access_contexts=available_ctx_ids,
+            available_identities=available_ctx_ids,
             available_capabilities=["http_probe", "nmap", "ffuf", "nuclei", "js_analyze", "authz_compare"],
             external_integrations=ext_status,
             safety_limits={
@@ -278,80 +280,92 @@ class HeadlessMissionController:
         self.display.render_stage_transition(MissionStage.MODELING, "completed")
         self._checkpoint()
 
-    def _stage_authentication(self) -> None:
-        self.mission.current_stage = MissionStage.AUTHENTICATION
-        self.display.render_stage_transition(MissionStage.AUTHENTICATION, "started")
-        self.events.emit("stage.started", {"stage": MissionStage.AUTHENTICATION.value})
+    def _initialize_access_contexts(self) -> None:
+        """Load and validate supplied access contexts (optional assessment input).
+        
+        Authentication is an assessment INPUT, never a mission phase.
+        HORCRUX consumes pre-established sessions/tokens/cookies and does NOT
+        attempt login workflows, wait for credentials, or loop on auth.
+        """
+        contexts = self.mission.get_all_contexts()
+        if not contexts:
+            anon = AccessContext(
+                context_id="anonymous",
+                display_name="Anonymous / Public Access",
+                role_label="anonymous",
+                source="default",
+                status=AccessContextStatus.VALID,
+                is_authenticated=False,
+            )
+            contexts = [anon]
+            self.mission.access_contexts = [anon]
+            self.mission.identities = [anon]
 
         state = self.workspace.load()
         app = state.get_application_model()
 
-        if self.mission.identities:
-            self.narrative(
-                "authentication",
-                f"Validating {len(self.mission.identities)} configured identity profiles",
-                "Establishing authenticated session contexts...",
+        for ctx in contexts:
+            is_forced_invalid = (
+                ctx.metadata.get("force_invalid", False)
+                or ctx.metadata.get("expired", False)
+                or ctx.status == AccessContextStatus.UNAVAILABLE
             )
-            for identity in self.mission.identities:
-                try:
-                    test_id = TestIdentity(
-                        label=identity.identity_id,
-                        role=identity.role,
-                        login_path=identity.login_url or "/login",
-                        username=identity.username,
-                        password_env=identity.credentials_ref or identity.password_env,
-                        headers=identity.headers,
-                    )
-                    register_test_identity(app, test_id)
-                    # Create simulated session record
+            if is_forced_invalid:
+                ctx.status = AccessContextStatus.UNAVAILABLE
+                ctx.failure_reason = "Supplied access context is invalid or expired"
+                ctx.is_authenticated = False
+            elif ctx.status in (AccessContextStatus.CONFIGURED, AccessContextStatus.VALID):
+                ctx.status = AccessContextStatus.VALID
+                ctx.last_validated_at = utcnow()
+                ctx.is_authenticated = (ctx.role_label != "anonymous")
+
+            # Emit redacted context registration event
+            self.events.emit("context.registered", {
+                "context_id": ctx.context_id,
+                "role": ctx.role_label,
+                "status": ctx.status.value,
+                "source": ctx.source,
+            })
+
+            # Register in application model if VALID
+            if ctx.status == AccessContextStatus.VALID:
+                role_str = ctx.role_label
+                if role_str in ("administrator",):
+                    role_str = "admin"
+                elif role_str in ("client-user",):
+                    role_str = "user"
+
+                test_id = TestIdentity(
+                    label=ctx.context_id,
+                    role=role_str,
+                    login_path=ctx.login_url or "/login",
+                    username=ctx.username,
+                    headers=ctx.headers,
+                )
+                register_test_identity(app, test_id)
+                if ctx.role_label != "anonymous":
                     begin_session(
                         app,
-                        identity_label=identity.identity_id,
-                        role=identity.role,
-                        login_endpoint=identity.login_url or "/login",
+                        identity_label=ctx.context_id,
+                        role=role_str,
+                        login_endpoint=ctx.login_url or "/login",
                     )
-                    identity.is_authenticated = True
-                    identity.last_verified_at = utcnow()
-                    self.events.emit("identity.established", {
-                        "identity_id": identity.identity_id,
-                        "role": identity.role,
-                    })
-                    self.narrative(
-                        "authentication",
-                        f"Identity '{identity.identity_id}' ({identity.role}) established",
-                        f"Session context registered in application model.",
-                    )
-                except Exception as exc:
-                    self.events.emit("identity.failed", {
-                        "identity_id": identity.identity_id,
-                        "error": str(exc),
-                    })
-
-            # Check multi-perspective authorization readiness
-            if len(self.mission.identities) >= 2:
-                self.narrative(
-                    "authentication",
-                    "Multi-perspective testing enabled",
-                    f"Configured perspectives: {', '.join(i.identity_id for i in self.mission.identities)}. Cross-identity matrix active.",
-                )
-            else:
-                self.narrative(
-                    "authentication",
-                    "Single authenticated perspective",
-                    "Cross-identity testing flagged as LIMITED/BLOCKED due to lack of distinct identities.",
-                )
-        else:
-            self.narrative(
-                "authentication",
-                "No authenticated test identities configured",
-                "Operating under anonymous perspective. Authenticated properties flagged accordingly.",
-            )
 
         state.set_application_model(app)
         self.workspace.save(state)
-        self.events.emit("stage.completed", {"stage": MissionStage.AUTHENTICATION.value})
-        self.display.render_stage_transition(MissionStage.AUTHENTICATION, "completed")
-        self._checkpoint()
+
+        valid_ids = [c.context_id for c in contexts if c.status == AccessContextStatus.VALID]
+        invalid_ids = [f"{c.context_id} ({c.failure_reason or 'UNAVAILABLE'})" for c in contexts if c.status != AccessContextStatus.VALID]
+
+        narrative_detail = f"Available: {', '.join(valid_ids) or 'none'}."
+        if invalid_ids:
+            narrative_detail += f" Unavailable: {', '.join(invalid_ids)}."
+
+        self.narrative(
+            "mission",
+            "Access contexts initialized",
+            narrative_detail,
+        )
 
     def _stage_discovery_and_hypothesis(self) -> None:
         self.mission.current_stage = MissionStage.DISCOVERY
@@ -546,6 +560,25 @@ class HeadlessMissionController:
             else:
                 self.mission.status = MissionStatus.COMPLETE_WITH_LIMITATIONS
                 self.mission.completion_verdict = verdict
+
+        # Check for unsupplied access context limitations
+        context_limitations = [
+            i.result_summary for i in invs
+            if "MISSING_ACCESS_CONTEXT" in (i.result_summary or "")
+        ]
+        if context_limitations:
+            unique_limitations = sorted(set(context_limitations))
+            for ul in unique_limitations:
+                if ul not in completeness.get("blocking_reasons", []):
+                    completeness.setdefault("blocking_reasons", []).append(ul)
+            if self.mission.status == MissionStatus.COMPLETE:
+                self.mission.status = MissionStatus.COMPLETE_WITH_LIMITATIONS
+                self.mission.completion_verdict = "COMPLETE_WITH_LIMITATIONS"
+            self.narrative(
+                "completion",
+                "Access context limitations noted",
+                f"{len(context_limitations)} investigation(s) limited by missing access contexts: {'; '.join(unique_limitations[:2])}",
+            )
 
         # 4. Generate Report
         try:

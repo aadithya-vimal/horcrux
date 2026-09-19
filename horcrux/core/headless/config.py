@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from horcrux.core.mission import (
+    AccessContext,
+    AccessContextStatus,
     AssessmentMission,
     HeadlessExecutionPolicy,
     IdentityProfile,
@@ -75,25 +77,33 @@ def build_mission_from_config(
     if effective_target not in scope_list:
         scope_list.append(effective_target)
 
-    # 3. Resolve Identities
-    identities: list[IdentityProfile] = []
-    ids_cfg = config.get("identities", []) or []
-    for id_item in ids_cfg:
-        if isinstance(id_item, dict) and (id_item.get("id") or id_item.get("identity_id") or id_item.get("label")):
-            iid = id_item.get("id") or id_item.get("identity_id") or id_item.get("label")
-            identities.append(
-                IdentityProfile(
-                    identity_id=str(iid),
-                    display_name=id_item.get("display_name", str(iid)),
-                    role=id_item.get("role", "user"),
-                    credentials_ref=id_item.get("credentials_ref", id_item.get("credential_reference", "")),
-                    auth_workflow=id_item.get("auth_workflow", "login_form"),
-                    login_url=id_item.get("login_url", id_item.get("login_path", "")),
-                    username=id_item.get("username", ""),
-                    password_env=id_item.get("password_env", ""),
-                    headers=id_item.get("headers", {}),
-                    permissions=id_item.get("permissions", []),
-                    scope=id_item.get("scope", []),
+    # 3. Resolve Access Contexts (optional assessment input)
+    access_contexts: list[AccessContext] = []
+    contexts_cfg = config.get("access_contexts", []) or config.get("identities", []) or []
+    for item in contexts_cfg:
+        if isinstance(item, dict) and (item.get("id") or item.get("context_id") or item.get("identity_id") or item.get("label")):
+            cid = str(item.get("id") or item.get("context_id") or item.get("identity_id") or item.get("label"))
+            role = item.get("role") or item.get("role_label") or ("admin" if "admin" in cid.lower() else ("anonymous" if "anon" in cid.lower() else "user"))
+            source = item.get("source") or item.get("type") or "provided"
+            cred_ref = item.get("credential_reference") or item.get("credentials_ref") or item.get("bearer_token_ref") or item.get("password_env") or ""
+            access_contexts.append(
+                AccessContext(
+                    context_id=cid,
+                    display_name=item.get("display_name", cid),
+                    role_label=role,
+                    source=source,
+                    cookies=item.get("cookies", {}),
+                    headers=item.get("headers", {}),
+                    bearer_token_ref=cred_ref if "token" in source.lower() or "bearer" in source.lower() else "",
+                    session_reference=item.get("session_reference", ""),
+                    api_credential_reference=cred_ref if "api" in source.lower() else "",
+                    scope=item.get("scope", []),
+                    metadata=item.get("metadata", {}),
+                    validation_endpoint=item.get("validation_endpoint", item.get("validation_url", "")),
+                    credentials_ref=cred_ref,
+                    username=item.get("username", ""),
+                    password_env=item.get("password_env", ""),
+                    login_url=item.get("login_url", item.get("login_path", "")),
                 )
             )
 
@@ -132,7 +142,8 @@ def build_mission_from_config(
         scope=scope_list,
         profile=selected_profile,
         policy=policy,
-        identities=identities,
+        access_contexts=access_contexts,
+        identities=access_contexts,
         current_stage=MissionStage.MISSION,
         status=MissionStatus.INITIALIZED,
     )
