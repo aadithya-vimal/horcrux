@@ -103,41 +103,120 @@ def build_capability_inputs(state: Any, investigation: Investigation,
     app = state.get_application_model()
     inputs: dict[str, Any] = {"target": state.target}
     # Endpoint context: prefer hypothesis-linked asset, else first object/admin endpoint.
+    # Check for matrix-derived test metadata (Phase B/C)
+    matrix_asset = ""
+    matrix_param = ""
+    matrix_method = ""
+    matrix_family = ""
+    for obs in getattr(investigation, "observations", []):
+        if obs.startswith("matrix_asset:") and obs.split(":", 1)[1]:
+            matrix_asset = obs.split(":", 1)[1]
+        elif obs.startswith("matrix_param:") and obs.split(":", 1)[1]:
+            matrix_param = obs.split(":", 1)[1]
+        elif obs.startswith("matrix_method:") and obs.split(":", 1)[1]:
+            matrix_method = obs.split(":", 1)[1]
+        elif obs.startswith("matrix_family:") and obs.split(":", 1)[1]:
+            matrix_family = obs.split(":", 1)[1]
+
     endpoint = "/"
-    if investigation.hypothesis_id:
+    if matrix_asset:
+        try:
+            from horcrux.intel.test_matrix import normalize_matrix_path
+            endpoint = normalize_matrix_path(matrix_asset)
+        except Exception:
+            endpoint = matrix_asset
+            if endpoint.startswith(("http://", "https://")):
+                try:
+                    from urllib.parse import urlparse as _urlparse
+                    endpoint = _urlparse(endpoint).path or "/"
+                except Exception:
+                    endpoint = "/"
+            if not endpoint.startswith("/"):
+                endpoint = "/" + endpoint
+    elif investigation.hypothesis_id:
         for h in state.get_hypotheses():
             if h.id == investigation.hypothesis_id and h.asset_refs:
-                for e in app.endpoints:
-                    if e.id == h.asset_refs[0]:
-                        endpoint = e.path
-                        break
-                break
+                matched_eps = [e for e in app.endpoints if e.id in h.asset_refs]
+                target_ep = None
+                h_class = str(getattr(h, "hypothesis_class", "")).lower()
+                if "idor" in h_class or "bola" in h_class or "authoriz" in h_class:
+                    try:
+                        from horcrux.intel.test_matrix import path_has_instance_id as _has_inst
+                    except Exception:
+                        _has_inst = lambda p: ("{id}" in p or ":id" in p)  # noqa: E731
+                    target_ep = next((e for e in matched_eps if e.has_object_reference or _has_inst(e.path)), None)
+                elif "privilege" in h_class or "admin" in h_class:
+                    target_ep = next((e for e in matched_eps if "admin" in e.path.lower()), None)
+                elif "graphql" in h_class:
+                    target_ep = next((e for e in matched_eps if "graphql" in e.path.lower()), None)
+
+                if not target_ep and matched_eps:
+                    target_ep = matched_eps[0]
+
+                if target_ep:
+                    try:
+                        from horcrux.intel.test_matrix import normalize_matrix_path as _norm
+                        endpoint = _norm(target_ep.path)
+                    except Exception:
+                        endpoint = target_ep.path
+                    break
+
     if endpoint == "/":
         for e in app.endpoints:
             if e.has_object_reference or "admin" in e.path.lower():
-                endpoint = e.path
+                try:
+                    from horcrux.intel.test_matrix import normalize_matrix_path as _norm2
+                    endpoint = _norm2(e.path)
+                except Exception:
+                    endpoint = e.path
                 break
         else:
             if app.endpoints:
-                endpoint = app.endpoints[0].path
-    inputs["path"] = endpoint
-    inputs["endpoint"] = endpoint
+                try:
+                    from horcrux.intel.test_matrix import normalize_matrix_path as _norm3
+                    endpoint = _norm3(app.endpoints[0].path)
+                except Exception:
+                    endpoint = app.endpoints[0].path
+
+    clean_path = endpoint.replace("{id}", "1").replace(":id", "1")
+    inputs["path"] = clean_path
+    inputs["endpoint"] = clean_path
     if app.web_targets:
         wt = app.web_targets[0]
         inputs["port"] = wt.port
         inputs["scheme"] = wt.scheme
         inputs["base_url"] = wt.base_url
-        inputs["url"] = wt.base_url.rstrip("/") + endpoint
+        inputs["url"] = wt.base_url.rstrip("/") + ("/" + clean_path.lstrip("/"))
     else:
-        inputs["port"] = 80
-        inputs["scheme"] = "http"
-        inputs["base_url"] = f"http://{state.target}"
-        inputs["url"] = f"http://{state.target}{endpoint}"
-    inputs["method"] = "GET"
+        web_services = [s for s in getattr(state, "services", []) if getattr(s, "service", "") == "http" or getattr(s, "port", None) in (80, 443, 3000, 8080)]
+        if web_services:
+            p = web_services[0].port
+            s = "https" if p in (443, 8443) else "http"
+            inputs["port"] = p
+            inputs["scheme"] = s
+            inputs["base_url"] = f"{s}://{state.target}:{p}"
+            inputs["url"] = f"{s}://{state.target}:{p}" + ("/" + clean_path.lstrip("/"))
+        else:
+            inputs["port"] = 80
+            inputs["scheme"] = "http"
+            inputs["base_url"] = f"http://{state.target}"
+            inputs["url"] = f"http://{state.target}" + ("/" + clean_path.lstrip("/"))
+    inputs["live_local"] = getattr(state, "execution_mode", "LOCAL") != "SYNTHETIC"
+    inputs["matrix_family"] = matrix_family
+    inputs["family"] = matrix_family
+    inputs["method"] = matrix_method if matrix_method else "GET"
     inputs["identity"] = "anonymous"
     if "authorization" in (investigation.objective or "").lower():
         inputs["identity"] = "user"
-    inputs["parameters"] = [p.name for p in app.parameters[:15]]
+    try:
+        from horcrux.intel.parameters import is_static_asset_endpoint as _is_static
+        _params = [p for p in app.parameters[:15]
+                   if not _is_static("/" + (p.endpoint or "").split("://")[-1].split("/", 1)[-1]
+                                      if "://" in (p.endpoint or "") else (p.endpoint or "/"))]
+    except Exception:
+        _params = list(app.parameters[:15])
+    inputs["parameters"] = [matrix_param] if matrix_param else [p.name for p in _params]
+    inputs["parameter"] = matrix_param
     inputs["from_identity"] = "anonymous"
     inputs["to_identity"] = "user"
     inputs["credentials_available"] = bool(getattr(state, "credentials", [])) or True
@@ -324,106 +403,12 @@ def _refresh_coverage(state: Any) -> None:
 
 def _assess_hypothesis_outcome(state: Any, investigation: Investigation,
                                result: Any, ingested: int) -> dict[str, Any]:
-    from horcrux.intel.hypotheses import HypothesisStatus
-    data = result.structured_data or {}
+    from horcrux.intel.vulnerability_adjudicator import adjudicate_capability_outcome
     hyps = {h.id: h for h in state.get_hypotheses()}
     hyp = hyps.get(investigation.hypothesis_id)
-
-    def _set_hyp(status: Any) -> None:
-        if hyp is not None:
-            hyp.status = status
-            all_h = state.get_hypotheses()
-            for idx, h in enumerate(all_h):
-                if h.id == hyp.id:
-                    all_h[idx] = hyp
-                    break
-            state.set_hypotheses(all_h)
-
-    # Authorization comparison carries direct support/refute signal.
-    if result.capability_id == "authz_compare":
-        if data.get("potential_gap"):
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_authz_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": "Cross-identity comparison suggests authorization gap",
-                    "finding_id": fid}
-        if data.get("authorization_enforced"):
-            _set_hyp(HypothesisStatus.REFUTED)
-            return {"state": InvestigationState.REFUTED,
-                    "summary": "Authorization enforced across tested identities"}
-    # Multi-identity comparison verdict.
-    if result.capability_id == "identity_compare":
-        if data.get("verdict") == "gap_suspected":
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_comparison_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": f"Identity comparison suggests access divergence "
-                               f"({data.get('identity_a')} x {data.get('identity_b')})",
-                    "finding_id": fid}
-        if data.get("verdict") == "enforced":
-            _set_hyp(HypothesisStatus.REFUTED)
-            return {"state": InvestigationState.REFUTED,
-                    "summary": "Identity comparison shows no access divergence"}
-    # param_fuzz signal.
-    if result.capability_id == "param_fuzz":
-        interesting = data.get("interesting", [])
-        if interesting and hyp is not None and getattr(hyp, "hypothesis_class", None) and hyp.hypothesis_class.value in ("injection", "sql_injection", "ssrf", "parameter_tampering"):
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_injection_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": f"Triage identified sensitive parameter(s): {', '.join(interesting[:3])}",
-                    "finding_id": fid}
-
-    # graphql_probe signal.
-    if result.capability_id == "graphql_probe":
-        if data.get("introspection"):
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_graphql_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": "GraphQL schema introspection enabled",
-                    "finding_id": fid}
-
-    # jwt_analyze signal.
-    if result.capability_id == "jwt_analyze":
-        if data.get("none_alg"):
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_jwt_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": "JWT insecure algorithm 'none' accepted or configured",
-                    "finding_id": fid}
-
-    # endpoint_validate signal.
-    if result.capability_id == "endpoint_validate":
-        path = str(data.get("path") or data.get("endpoint") or "")
-        if any(k in path.lower() for k in ("admin", "actuator", ".env", "swagger", "internal")):
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_endpoint_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": f"Sensitive endpoint verified accessible: {path}",
-                    "finding_id": fid}
-
-    # http_probe gap signal.
-    if result.capability_id == "http_probe":
-        if data.get("status_code") == 200 and data.get("object_bearing") \
-                and data.get("identity") == "anonymous":
-            _set_hyp(HypothesisStatus.SUPPORTED)
-            fid = _record_anonymous_access_finding(state, investigation, data)
-            return {"state": InvestigationState.SUPPORTED,
-                    "summary": "Object endpoint anonymously reachable; authorization review required",
-                    "finding_id": fid}
-    if ingested == 0 and not result.evidence:
-        return {"state": InvestigationState.INSUFFICIENT_EVIDENCE,
-                "summary": "Capability executed but returned no useful evidence"}
-    if hyp is not None and hyp.status == HypothesisStatus.OPEN:
-        hyp.status = HypothesisStatus.INVESTIGATING
-        all_h = state.get_hypotheses()
-        for idx, h in enumerate(all_h):
-            if h.id == hyp.id:
-                all_h[idx] = hyp
-                break
-        state.set_hypotheses(all_h)
-    return {"state": InvestigationState.COMPLETE,
-            "summary": f"Executed {result.capability_id}; ingested {ingested} evidence item(s)"}
+    if not hasattr(result, "data") or not result.data:
+        result.data = getattr(result, "structured_data", {}) or {}
+    return adjudicate_capability_outcome(result, investigation, hyp, state)
 
 
 def _record_comparison_finding(state: Any, investigation: Investigation, data: dict) -> str:
