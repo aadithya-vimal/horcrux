@@ -36,6 +36,7 @@ class TestFamily(str, Enum):
     AUTHZ_HORIZONTAL = "authz_horizontal"
     AUTHZ_VERTICAL = "authz_vertical"
     AUTH_ENFORCEMENT = "auth_enforcement"
+    API_SECURITY = "api_security"
     PARAM_SQLI = "param_sqli"
     PARAM_CMDI = "param_cmdi"
     PARAM_TRAVERSAL = "param_traversal"
@@ -166,6 +167,11 @@ def derive_applicable_tests(
                 "endpoint requires authentication or is state-changing",
                 ["http_probe: unauthenticated status code"],
                 "200 with protected content -> SUPPORTED; 401/403 -> REFUTED",
+            ),
+            TestFamily.API_SECURITY.value: (
+                "REST/API endpoint present",
+                ["api_probe: excessive-data / mass-assignment / method-tampering semantics"],
+                "sensitive fields or accepted privileged field -> SUPPORTED; clean -> REFUTED",
             ),
             TestFamily.PARAM_SQLI.value: (
                 "semantic input parameter (search/object/user/sort/query/body)",
@@ -399,6 +405,27 @@ def derive_applicable_tests(
                     prerequisites=["web_target"],
                     vulnerability_classes=["api_security"],
                     priority=0.76,
+                    evidence_refs=[ep.id],
+                )
+            )
+
+        # API security semantics on actual REST/API endpoints.
+        pl = path.lower()
+        if pl.startswith(("/api/", "/rest/", "/v1/", "/v2/", "/v3/")) and not is_graphql:
+            _add(
+                SecurityTestCase(
+                    family=TestFamily.API_SECURITY,
+                    name=f"API security semantics (excessive data / mass assignment / method tampering) on {method} {path}",
+                    asset_id=ep.id,
+                    asset_type="endpoint",
+                    target_path=path,
+                    target_method=method,
+                    specialist="WebAgent",
+                    candidate_tools=["api_probe", "http_probe"],
+                    required_capabilities=["http"],
+                    prerequisites=["web_target"],
+                    vulnerability_classes=["api_security"],
+                    priority=0.74,
                     evidence_refs=[ep.id],
                 )
             )
@@ -764,6 +791,7 @@ def compute_security_test_coverage(state: Any) -> dict[str, Any]:
         TestFamily.AUTHZ_HORIZONTAL: "Horizontal Authorization",
         TestFamily.AUTHZ_VERTICAL: "Vertical Authorization / Privileges",
         TestFamily.AUTH_ENFORCEMENT: "Authentication Enforcement",
+        TestFamily.API_SECURITY: "API Security Semantics",
         TestFamily.PARAM_SQLI: "SQL Injection",
         TestFamily.PARAM_CMDI: "Command Injection",
         TestFamily.PARAM_TRAVERSAL: "Path Traversal / LFI",
@@ -852,8 +880,9 @@ def compute_security_test_coverage(state: Any) -> dict[str, Any]:
         stats["applicable"] += 1
 
         inv = inv_by_tc_id.get(tc.id) or inv_by_family_asset.get((tc.family.value, tc.target_path, tc.target_parameter))
-        if inv is None:
-            inv = next((i for i in investigations if tc.name.lower() in i.objective.lower()), None)
+        # No fuzzy name fallback: substring matching misattributes terminals
+        # across tests sharing a family/parameter (e.g. "/" vs "/rest/admin").
+        # Unmatched tests are explicitly NOT_TESTED with a reason.
 
         satisfiable, block_reason = _prereq_satisfied(tc)
         if satisfiable:
@@ -934,6 +963,8 @@ def compute_security_test_coverage(state: Any) -> dict[str, Any]:
             fam_matched = TestFamily.CONFIG_EXPOSURE.value
         elif "graphql" in cat or "graphql" in title:
             fam_matched = TestFamily.GRAPHQL_INTROSPECTION.value
+        elif "api-security" in cat or "api security" in title:
+            fam_matched = TestFamily.API_SECURITY.value
         elif "smb" in title or "service" in cat:
             fam_matched = TestFamily.SERVICE_EXPLOIT_INTEL.value
         if fam_matched and fam_matched in family_stats:
