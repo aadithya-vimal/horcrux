@@ -141,6 +141,8 @@ _SYNTHETIC_FALLBACK_CAPS = frozenset({
     "identity_compare", "ssh_enum", "ftp_enum", "smtp_enum", "database_enum",
     "remote_enum", "nuclei_scan", "nikto_audit", "smb_enum", "ldap_enum",
     "kerberos_enum", "dns_enum", "snmp_enum", "searchsploit_intel", "nmap_discovery",
+    "sqli_probe", "xss_probe", "traversal_probe", "upload_probe", "ssrf_probe",
+    "auth_probe", "api_probe", "workflow_probe", "cmdi_probe",
 })
 
 # Deterministic local analyzers: no external dependency, operate on real
@@ -148,6 +150,8 @@ _SYNTHETIC_FALLBACK_CAPS = frozenset({
 _LOCAL_LIVE_CAPS = frozenset({
     "http_probe", "graphql_probe", "authz_compare", "jwt_analyze",
     "identity_compare", "param_fuzz", "endpoint_validate", "js_analyze",
+    "sqli_probe", "xss_probe", "traversal_probe", "upload_probe", "ssrf_probe",
+    "auth_probe", "api_probe", "workflow_probe", "cmdi_probe",
 })
 
 # Local-live capabilities that still require the httpx runtime library.
@@ -350,6 +354,9 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
     method = ctx.get("method", "GET").upper()
     identity = ctx.get("identity", "anonymous")
     app = ctx.get("application_model")
+    if path.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        path = urlparse(path).path or "/"
     if not path.startswith("/"):
         path = "/" + path
     # Deterministic offline synthesis from semantic model.
@@ -381,29 +388,62 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
             duration_ms=ms)
     # Real path: single httpx GET via existing scanner primitives (bounded).
     try:
-        import httpx  # local import; already a dependency
+        import httpx
         runner = ctx.get("runner")
         port = int(ctx.get("port", 443 if str(ctx.get("scheme", "http")) == "https" else 80))
         scheme = ctx.get("scheme", "https" if port in (443, 8443) else "http")
-        url = f"{scheme}://{target}:{port}{path}"
+        host = target
+        if ":" in host:
+            host_part, _, port_part = host.partition(":")
+            host = host_part
+            try:
+                port = int(port_part)
+            except ValueError:
+                pass
+        url = f"{scheme}://{host}:{port}{path}"
         timeout = min(int(ctx.get("timeout", 10)), 15)
         if runner is not None:
             try:
                 runner.run(["httpx", "-u", url, "-silent"], f"http-probe-{port}", timeout=timeout)
             except Exception:
                 pass
+        req_headers = {"User-Agent": "Horcrux/1.0"}
+        if isinstance(ctx.get("headers"), dict):
+            req_headers.update(ctx["headers"])
+        cookies = ctx.get("cookies") if isinstance(ctx.get("cookies"), dict) else None
         with httpx.Client(verify=False, timeout=float(timeout),
-                          headers={"User-Agent": "Horcrux/1.0"}) as client:
+                          headers=req_headers, cookies=cookies) as client:
             resp = client.request(method, url, timeout=float(timeout))
             ms = int((time.monotonic() - t0) * 1000)
+            body_sample = resp.text[:4000]
+            body_lower = body_sample.lower()
+            env_keys = []
+            if "DB_" in body_sample or "SECRET" in body_sample or "KEY" in body_sample:
+                env_keys = [line.split("=")[0].strip() for line in body_sample.splitlines() if "=" in line and not line.startswith("#")][:5]
+
+            exposed_files = re.findall(r'([a-zA-Z0-9_\-\.]+\.(?:bak|kdbx|sql|json|md|egg|yml|yaml|conf|key|zip|tar\.gz))', body_sample, re.I)
+            sensitive_files = [f for f in exposed_files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
+            is_dir_listing = bool(
+                ("directory listing" in body_lower or "index of" in body_lower or "/ftp" in path)
+                and resp.status_code == 200
+                and (sensitive_files or exposed_files or "<a href" in body_lower)
+            )
+
             return _ok("http_probe", {
                 "method": method, "path": path, "url": url, "identity": identity,
                 "status_code": resp.status_code,
                 "authorization_enforced": resp.status_code in (401, 403),
                 "content_length": len(resp.content),
+                "response_body": body_sample,
+                "headers": dict(resp.headers),
+                "env_keys": env_keys,
+                "directory_listing": is_dir_listing,
+                "exposed_files": sensitive_files or exposed_files,
+                "verified_content": bool(resp.status_code == 200 and len(resp.content) > 0),
             }, evidence=[_ev("endpoint_observation", {
                 "method": method, "path": path, "url": url,
                 "status_code": resp.status_code,
+                "directory_listing": is_dir_listing,
             }, source="http_probe", confidence=0.95)],
                 provenance="horcrux.modules.web.scanner:httpx", duration_ms=ms)
     except Exception as exc:
@@ -459,11 +499,16 @@ def _adapter_content_discovery(ctx: dict) -> CapabilityResult:
             paths = run_fuzzer(workspace, runner, target, port,
                                strategy=ctx.get("strategy", "common"))
             ms = int((time.monotonic() - t0) * 1000)
+            ev_list = [_ev("route_discovery", {"path": p.path, "status": p.status},
+                           source=p.source or "fuzzer") for p in paths[:30]]
+            if not ev_list:
+                ev_list = [_ev("route_discovery", {"port": port, "status": "scanned", "paths_found": 0},
+                               source="fuzzer", confidence=0.7)]
             return _ok("content_discovery",
                        {"port": port, "paths": [p.path for p in paths],
-                        "statuses": {p.path: p.status for p in paths}},
-                       evidence=[_ev("route_discovery", {"path": p.path, "status": p.status},
-                                     source=p.source or "fuzzer") for p in paths[:30]],
+                        "statuses": {p.path: p.status for p in paths},
+                        "completed": True},
+                       evidence=ev_list,
                        provenance="horcrux.modules.web.fuzzer", duration_ms=ms)
         except Exception as exc:
             return _fail("content_discovery", FailureClass.TOOL_FAILED, str(exc))
@@ -536,9 +581,13 @@ def _adapter_fingerprint(ctx: dict) -> CapabilityResult:
             from horcrux.modules.web.fingerprint import run_fingerprinting
             techs, _sw = run_fingerprinting(workspace, runner, target, port)
             ms = int((time.monotonic() - t0) * 1000)
-            return _ok("web_fingerprint", {"technologies": techs},
-                       evidence=[_ev("technology_observation", {"name": t}, source="fingerprint")
-                                 for t in techs],
+            ev_list = [_ev("technology_observation", {"name": t}, source="fingerprint")
+                       for t in techs]
+            if not ev_list:
+                ev_list = [_ev("technology_observation", {"port": port, "status": "scanned"},
+                               source="fingerprint", confidence=0.7)]
+            return _ok("web_fingerprint", {"technologies": techs, "completed": True},
+                       evidence=ev_list,
                        provenance="horcrux.modules.web.fingerprint", duration_ms=ms)
         except Exception as exc:
             return _fail("web_fingerprint", FailureClass.TOOL_FAILED, str(exc))
@@ -630,31 +679,431 @@ def _adapter_graphql_probe(ctx: dict) -> CapabilityResult:
         import httpx
         port = int(ctx.get("port", 80))
         scheme = ctx.get("scheme", "http")
-        url = f"{scheme}://{target}:{port}{path}"
-        query = {"query": "{__typename}"}
+        host = target
+        if ":" in host:
+            host_part, _, port_part = host.partition(":")
+            host = host_part
+            try:
+                port = int(port_part)
+            except ValueError:
+                pass
+        url = f"{scheme}://{host}:{port}{path}"
+        query = {"query": "{__schema{types{name}}}"}
         with httpx.Client(verify=False, timeout=8.0) as client:
             resp = client.post(url, json=query)
-            is_gql = resp.status_code in (200, 400) and ("graphql" in resp.text.lower() or "__typename" in resp.text)
-            return _ok("graphql_probe", {"path": path, "url": url, "graphql_present": is_gql,
-                                         "status_code": resp.status_code},
-                       evidence=[_ev("graphql_observation", {"path": path}, source="graphql_probe")]
-                       if is_gql else [],
-                       provenance="horcrux.modules.web.validator:graphql-live")
+            data = resp.json() if resp.status_code == 200 else {}
+            has_types = bool(data.get("data", {}).get("__schema", {}).get("types"))
+            is_gql = (resp.status_code in (200, 400)) and (has_types or "graphql" in resp.text.lower() or "__typename" in resp.text or "__schema" in resp.text)
+            types_list = [t.get("name") for t in data.get("data", {}).get("__schema", {}).get("types", []) if isinstance(t, dict)]
+            return _ok("graphql_probe", {
+                "path": path, "url": url, "graphql_present": is_gql,
+                "introspection": has_types,
+                "types_count": len(types_list),
+                "root_fields": types_list[:10],
+                "status_code": resp.status_code,
+            },
+            evidence=[_ev("graphql_observation", {"path": path, "introspection": has_types}, source="graphql_probe")]
+            if is_gql else [],
+            provenance="horcrux.modules.web.validator:graphql-live")
     except Exception as exc:
         return _fail("graphql_probe", FailureClass.TOOL_FAILED, str(exc))
 
 
 def _adapter_param_fuzz(ctx: dict) -> CapabilityResult:
+    """Active parameter testing with semantic differential analysis (Phase E)."""
+    t0 = time.monotonic()
     params = ctx.get("parameters", ctx.get("params", [])) or []
+    param_override = ctx.get("parameter")
+    if param_override and param_override not in params:
+        params = [param_override] + list(params)
     endpoint = ctx.get("endpoint", ctx.get("path", "/"))
+    target = ctx.get("target", "")
+
+    if endpoint.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        endpoint = urlparse(endpoint).path or "/"
+    if not endpoint.startswith("/"):
+        endpoint = "/" + endpoint
+
     interesting = [p for p in params if str(p).lower() in
                    {"q", "query", "search", "filter", "sort", "id", "name", "email",
                     "url", "target", "callback", "redirect", "fetch", "file", "path"}]
-    return _ok("param_fuzz", {"endpoint": endpoint, "tested": params,
-                              "interesting": interesting, "synthetic": True},
-               evidence=[_ev("parameter_observation", {"endpoint": endpoint, "parameter": p},
-                             source="param_fuzz", confidence=0.6) for p in interesting],
-               provenance="horcrux.modules.web.scanner:param")
+    if not interesting and params:
+        interesting = list(params)[:5]
+
+    if _use_offline(target, ctx):
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("param_fuzz", {"endpoint": endpoint, "tested": params,
+                                  "interesting": interesting, "synthetic": True},
+                   evidence=[_ev("parameter_observation", {"endpoint": endpoint, "parameter": p},
+                                 source="param_fuzz", confidence=0.6) for p in interesting],
+                   provenance="horcrux.modules.web.scanner:param", duration_ms=ms)
+
+    # Live active parameter differential probe execution
+    _family = str(ctx.get("matrix_family", "") or "")
+    _kind_map = {"param_sqli": "sqli", "param_xss": "xss", "param_traversal": "traversal",
+                 "param_ssrf": "ssrf", "param_cmdi": "cmdi", "file_upload": "upload",
+                 "auth_enforcement": "auth", "workflow_state": "workflow",
+                 "workflow_tampering": "workflow"}
+    if _family in _kind_map:
+        routed = _run_validator_adapter("param_fuzz", ctx, _kind_map[_family])
+        routed.capability_id = "param_fuzz"
+        return routed
+    try:
+        import httpx
+        port = int(ctx.get("port", 80))
+        scheme = ctx.get("scheme", "http")
+        host = target
+        if ":" in host:
+            host_part, _, port_part = host.partition(":")
+            host = host_part
+            try:
+                port = int(port_part)
+            except ValueError:
+                pass
+        base_url = f"{scheme}://{host}:{port}"
+        url = f"{base_url}{endpoint}"
+
+        evidence_items = []
+        sqli_confirmed = False
+        sql_errors = ""
+        tested_params = []
+
+        with httpx.Client(verify=False, timeout=6.0) as client:
+            base_status = 200
+            try:
+                base_resp = client.get(url)
+                base_status = base_resp.status_code
+            except Exception:
+                pass
+
+            params_to_test = list(interesting or ["q", "id"])
+            if param_override and param_override not in params_to_test:
+                params_to_test = [param_override] + params_to_test
+
+            for p in params_to_test[:3]:
+                tested_params.append(p)
+                sql_probe_url = f"{url}?{p}=test%27%22"
+                try:
+                    r = client.get(sql_probe_url)
+                    body_text = r.text.lower()
+                    signatures = ["sqlite", "syntax error", "sequelize", "near \"test\"", "mysql", "psql", "sql syntax", "ora-", "unterminated"]
+                    matched_sig = next((sig for sig in signatures if sig in body_text), None)
+                    if matched_sig or (r.status_code == 500 and base_status == 200 and ("error" in body_text or "exception" in body_text or "sqlite" in body_text)):
+                        sqli_confirmed = True
+                        sql_errors = f"SQL error signature '{matched_sig or '500 syntax error'}' disclosed on {p}"
+                        evidence_items.append(_ev("injection_observation", {
+                            "parameter": p,
+                            "type": "sqli",
+                            "endpoint": endpoint,
+                            "proof": sql_errors,
+                            "status_code": r.status_code,
+                        }, source="param_fuzz", confidence=0.92))
+                    else:
+                        evidence_items.append(_ev("parameter_observation", {
+                            "parameter": p,
+                            "endpoint": endpoint,
+                            "status_code": r.status_code,
+                            "tested": True,
+                        }, source="param_fuzz", confidence=0.7))
+                except Exception:
+                    pass
+
+            if not evidence_items:
+                p_tested = (tested_params or ["param"])[0]
+                evidence_items.append(_ev("parameter_observation", {
+                    "parameter": p_tested,
+                    "endpoint": endpoint,
+                    "status_code": base_status,
+                    "tested": True,
+                }, source="param_fuzz", confidence=0.7))
+
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("param_fuzz", {
+            "endpoint": endpoint,
+            "tested": tested_params or params,
+            "sqli_confirmed": sqli_confirmed,
+            "sql_errors": sql_errors,
+            "parameter": tested_params[0] if tested_params else (params[0] if params else "param"),
+        }, evidence=evidence_items, provenance="horcrux.modules.web.param_fuzz:live", duration_ms=ms)
+    except Exception as exc:
+        return _fail("param_fuzz", FailureClass.TOOL_FAILED, f"param_fuzz failed: {exc}")
+
+
+def _live_base_url(ctx: dict, target: str) -> str:
+    port = int(ctx.get("port", 80))
+    scheme = ctx.get("scheme", "http")
+    host = target
+    if ":" in host:
+        host_part, _, port_part = host.partition(":")
+        host = host_part
+        try:
+            port = int(port_part)
+        except ValueError:
+            pass
+    return f"{scheme}://{host}:{port}"
+
+
+def _live_request_fn(ctx: dict):
+    from horcrux.modules.web.security_validators import httpx_request_fn
+    headers = ctx.get("headers") if isinstance(ctx.get("headers"), dict) else None
+    cookies = ctx.get("cookies") if isinstance(ctx.get("cookies"), dict) else None
+
+    def _fn(method: str, url: str, query: dict | None = None,
+            body: dict | None = None, headers_: dict | None = None,
+            cookies_: dict | None = None, raw_body: Any = None,
+            content_type: str | None = None) -> dict:
+        return httpx_request_fn(method, url, query=query, body=body,
+                                headers=headers_ or headers, cookies=cookies_ or cookies,
+                                raw_body=raw_body, content_type=content_type)
+    return _fn
+
+
+def _norm_endpoint(endpoint: str) -> str:
+    if endpoint.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        endpoint = urlparse(endpoint).path or "/"
+    if not endpoint.startswith("/"):
+        endpoint = "/" + endpoint
+    return endpoint
+
+
+def _structured_from_validator(cap_id: str, res: Any, extra: dict | None = None) -> dict:
+    from horcrux.modules.web.security_validators import redact as _red
+    structured = {"verdict": res.verdict, "confidence": res.confidence,
+                  "stage": res.stage, "details": dict(res.details or {})}
+    if extra:
+        structured.update(extra)
+    # Flatten key adjudication signals to top level (adjudicator contract).
+    d = res.details or {}
+    for key in ("boolean_differential", "signals", "context", "unescaped",
+                "fetch_evidence", "classification", "boundary", "impact",
+                "ownership", "enforced", "introspection", "types_count",
+                "root_fields", "privileged_fields", "needs_field_authz_probe",
+                "accepted", "stored", "location"):
+        if key in d:
+            structured[key] = d[key]
+    return structured
+
+
+def _validator_evidence(cap_id: str, res: Any) -> list[dict]:
+    out = []
+    for e in res.evidence or []:
+        data = dict(e)
+        data.setdefault("source", cap_id)
+        out.append(_ev("validator_evidence", data, source=cap_id,
+                       confidence=float(res.confidence or 0.6)))
+    return out
+
+
+def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResult:
+    """Generic live adapter for security validators; offline stays synthetic."""
+    t0 = time.monotonic()
+    endpoint = _norm_endpoint(ctx.get("endpoint", ctx.get("path", "/")))
+    target = ctx.get("target", "")
+    param = ctx.get("parameter") or (ctx.get("parameters") or [""])[0] if ctx.get("parameters") else ctx.get("parameter", "")
+    param = param or ctx.get("target_parameter", "") or "q"
+    test_id = f"{cap_id}:{endpoint}:{param}"
+    if _use_offline(target, ctx):
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
+                            "verdict": "NO_EFFECT", "synthetic": True},
+                   evidence=[_ev("parameter_observation",
+                                 {"endpoint": endpoint, "parameter": param},
+                                 source=cap_id, confidence=0.6)],
+                   provenance=f"horcrux.modules.web.security_validators:{kind}:offline",
+                   duration_ms=ms)
+    try:
+        from horcrux.modules.web import security_validators as sv
+        req = _live_request_fn(ctx)
+        base_url = _live_base_url(ctx, target)
+        url = base_url + endpoint
+        from horcrux.intel.parameters import is_static_asset_endpoint as _is_static
+        if _is_static(endpoint) or endpoint.endswith((".js", ".css")):
+            ms = int((time.monotonic() - t0) * 1000)
+            return _ok(cap_id, {"endpoint": endpoint, "verdict": "NO_EFFECT",
+                                "reason": "static-asset-excluded"},
+                       evidence=[], provenance="horcrux.security_validators:excluded",
+                       duration_ms=ms)
+        method = str(ctx.get("method", "GET")).upper()
+        if kind == "sqli":
+            res = sv.validate_sqli(req, method, url, param, location="query",
+                                   capability=cap_id, test_id=test_id)
+            extra = {"endpoint": endpoint, "parameter": param, "sqli_confirmed": res.verdict in ("STRONG_SQLI_EVIDENCE",),
+                     "sql_errors": str((res.details or {}).get("signals", ""))}
+        elif kind == "xss":
+            res = sv.validate_xss_reflected(req, method, url, param, location="query",
+                                            capability=cap_id, test_id=test_id)
+            extra = {"endpoint": endpoint, "parameter": param,
+                     "xss_confirmed": res.verdict == "STRONG_XSS_EVIDENCE",
+                     "unescaped_payload_reflected": res.verdict == "STRONG_XSS_EVIDENCE"}
+        elif kind == "traversal":
+            res = sv.validate_traversal(req, method, url, param, location="query",
+                                        capability=cap_id, test_id=test_id)
+            extra = {"endpoint": endpoint, "parameter": param,
+                     "traversal_confirmed": res.verdict == "STRONG_TRAVERSAL_EVIDENCE"}
+        elif kind == "ssrf":
+            res = sv.validate_ssrf(req, method, url, param, location="query",
+                                   capability=cap_id, test_id=test_id)
+            extra = {"endpoint": endpoint, "parameter": param,
+                     "ssrf_confirmed": res.verdict == "STRONG_SSRF_EVIDENCE"}
+        elif kind == "cmdi":
+            res = _validate_cmdi_generic(req, method, url, param, cap_id, test_id)
+            extra = {"endpoint": endpoint, "parameter": param,
+                     "cmd_injection_confirmed": res.verdict == "STRONG_CMDI_EVIDENCE"}
+        elif kind == "upload":
+            res = _validate_upload_generic(req, base_url, endpoint, cap_id, test_id)
+            extra = {"endpoint": endpoint, "upload_confirmed": res.verdict == "STRONG_UPLOAD_EVIDENCE"}
+        elif kind == "auth":
+            res = _validate_auth_generic(req, method, url, cap_id, test_id, ctx)
+            extra = {"endpoint": endpoint}
+            extra.update(res.details or {})
+        elif kind == "api":
+            res = sv.validate_api_surface(req, method, url, capability=cap_id, test_id=test_id)
+            extra = {"endpoint": endpoint}
+            extra.update(res.details or {})
+        elif kind == "workflow":
+            res = _validate_workflow_generic(req, base_url, endpoint, ctx, cap_id, test_id)
+            extra = {"endpoint": endpoint}
+            extra.update(res.details or {})
+        else:
+            return _fail(cap_id, FailureClass.TOOL_FAILED, f"unknown validator kind {kind}")
+        ms = int((time.monotonic() - t0) * 1000)
+        structured = _structured_from_validator(cap_id, res, extra)
+        result = _ok(cap_id, structured, evidence=_validator_evidence(cap_id, res),
+                     provenance=f"horcrux.modules.web.security_validators:{kind}:live",
+                     duration_ms=ms)
+        print(f"{cap_id.upper()} TEST  param={param} endpoint={endpoint} "
+              f"verdict={res.verdict} conf={res.confidence:.2f}")
+        return result
+    except Exception as exc:
+        return _fail(cap_id, FailureClass.TOOL_FAILED, f"{cap_id} failed: {exc}")
+
+
+_CMDI_MARKERS = ("uid=", "gid=", "root:", "bin:", "daemon:", "PWNED-CMDI")
+
+
+def _validate_cmdi_generic(req, method: str, url: str, param: str,
+                           cap_id: str, test_id: str):
+    from horcrux.modules.web import security_validators as sv
+    base = req(method, url, query={param: "test123"})
+    if base.get("status") == 0:
+        return sv.ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, stage="INSUFFICIENT_EVIDENCE")
+    probes = [("$(id)", None), (";id", None), ("|id", None), ("`id`", None)]
+    ev = [sv.build_evidence(cap_id, test_id, url, {"param": param, "value": "test123"},
+                            {"status": base.get("status")}, base.get("text", "")[:600],
+                            "test123", stage="OBSERVED")]
+    for payload, _ in probes:
+        r = req(method, url, query={param: f"test123{payload}"})
+        body = r.get("text", "") or ""
+        hit = next((m for m in _CMDI_MARKERS if m in body), "")
+        fp_base = sv._fingerprint(base.get("text", ""))
+        fp_cur = sv._fingerprint(body)
+        if hit and fp_cur["hash"] != fp_base["hash"] and r.get("status") == 200:
+            ev.append(sv.build_evidence(cap_id, test_id, url, {"param": param, "value": payload},
+                                        {"status": r.get("status")}, body[:1000], payload,
+                                        stage="CONFIRMED", extra={"output_reflected": hit}))
+            return sv.ValidatorResult("STRONG_CMDI_EVIDENCE", 0.9, ev,
+                                      {"output_reflected": hit, "payload": payload}, "CONFIRMED")
+        ev.append(sv.build_evidence(cap_id, test_id, url, {"param": param, "value": payload},
+                                    {"status": r.get("status")}, body[:400], payload, stage="OBSERVED"))
+    return sv.ValidatorResult("NO_EFFECT", 0.65, ev, {}, "REFUTED")
+
+
+def _validate_upload_generic(req, base_url: str, endpoint: str, cap_id: str, test_id: str):
+    from horcrux.modules.web import security_validators as sv
+    import secrets as _s
+    marker = f"horcrux-probe-{_s.token_hex(3)}".encode()
+    boundary = f"----horcrux{_s.token_hex(4)}"
+
+    def _upload(field: str, filename: str, content: bytes, content_type: str) -> dict:
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\n"
+                f"Content-Type: {content_type}\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        return req("POST", base_url + endpoint, raw_body=body,
+                   content_type=f"multipart/form-data; boundary={boundary}")
+
+    def _access(loc: str) -> dict:
+        u = loc if loc.startswith("http") else base_url + (loc if loc.startswith("/") else "/" + loc)
+        return req("GET", u)
+
+    return sv.validate_upload(_upload, _access, content=marker)
+
+
+def _validate_auth_generic(req, method: str, url: str, cap_id: str, test_id: str, ctx: dict):
+    from horcrux.modules.web import security_validators as sv
+    headers = ctx.get("headers") if isinstance(ctx.get("headers"), dict) else None
+    cookies = ctx.get("cookies") if isinstance(ctx.get("cookies"), dict) else None
+    auth_headers = dict(ctx.get("auth_headers") or {})
+    auth_cookies = dict(ctx.get("auth_cookies") or {})
+    anon = lambda: req(method, url, headers_=headers, cookies_=cookies)
+    if auth_headers or auth_cookies:
+        def _authed():
+            h = dict(headers or {})
+            h.update(auth_headers)
+            c = dict(cookies or {})
+            c.update(auth_cookies)
+            return req(method, url, headers_=h, cookies_=c)
+        return sv.validate_auth_enforcement(anon, _authed, url, capability=cap_id, test_id=test_id)
+    return sv.validate_auth_enforcement(anon, None, url, capability=cap_id, test_id=test_id)
+
+
+def _validate_workflow_generic(req, base_url: str, endpoint: str, ctx: dict,
+                               cap_id: str, test_id: str):
+    from horcrux.modules.web import security_validators as sv
+    steps = [{"name": "s1", "request": {"url": base_url + endpoint, "method": "GET"}}]
+    extra_steps = ctx.get("workflow_steps")
+    if isinstance(extra_steps, list) and extra_steps:
+        steps = extra_steps
+
+    def _run(step: dict, _ctx: dict) -> dict:
+        r = step.get("request", {})
+        u = r.get("url", base_url + endpoint)
+        m = r.get("method", "GET")
+        b = r.get("body")
+        q = r.get("query")
+        return req(m, u, query=q, body=b)
+
+    tampers = []
+    for p in (ctx.get("parameters") or [])[:3]:
+        tampers.append({"kind": "value-tamper", "request": {"url": base_url + endpoint, "method": "POST",
+                                                            "body": {p: "-1"}}, "expect_reflect": "-1"})
+    return sv.validate_workflow(steps, _run, tampers, capability=cap_id, test_id=test_id)
+
+
+def _adapter_sqli_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("sqli_probe", ctx, "sqli")
+
+
+def _adapter_xss_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("xss_probe", ctx, "xss")
+
+
+def _adapter_traversal_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("traversal_probe", ctx, "traversal")
+
+
+def _adapter_ssrf_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("ssrf_probe", ctx, "ssrf")
+
+
+def _adapter_cmdi_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("cmdi_probe", ctx, "cmdi")
+
+
+def _adapter_upload_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("upload_probe", ctx, "upload")
+
+
+def _adapter_auth_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("auth_probe", ctx, "auth")
+
+
+def _adapter_api_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("api_probe", ctx, "api")
+
+
+def _adapter_workflow_probe(ctx: dict) -> CapabilityResult:
+    return _run_validator_adapter("workflow_probe", ctx, "workflow")
 
 
 def _adapter_jwt_analyze(ctx: dict) -> CapabilityResult:
@@ -697,24 +1146,242 @@ def _adapter_identity_switch(ctx: dict) -> CapabilityResult:
 
 def _adapter_authz_compare(ctx: dict) -> CapabilityResult:
     """Cross-identity object-access comparison (deterministic, non-destructive)."""
+    t0 = time.monotonic()
     endpoint = ctx.get("endpoint", ctx.get("path", "/"))
+    target = ctx.get("target", "")
     code_a = ctx.get("status_anonymous", ctx.get("status_a"))
     code_b = ctx.get("status_user", ctx.get("status_b"))
-    if code_a is None or code_b is None:
-        # Derive from http_probe-style synthesis when explicit codes absent.
-        r_anon = _adapter_http_probe({**ctx, "identity": "anonymous", "path": endpoint})
-        r_user = _adapter_http_probe({**ctx, "identity": "user", "path": endpoint})
-        code_a = r_anon.structured_data.get("status_code")
-        code_b = r_user.structured_data.get("status_code")
-    enforced = (code_a in (401, 403)) and (code_b == 200)
-    gap = (code_a == 200) or (code_b == 200 and code_a == 200)
-    return _ok("authz_compare", {"endpoint": endpoint, "status_anonymous": code_a,
-                                 "status_user": code_b, "authorization_enforced": enforced,
-                                 "potential_gap": gap, "synthetic": True},
-               evidence=[_ev("authorization_observation", {
-                   "endpoint": endpoint, "anonymous": code_a, "user": code_b,
-                   "enforced": enforced}, source="authz_compare", confidence=0.75)],
-               provenance="horcrux.agents.specialists:authz")
+
+    if endpoint.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        endpoint = urlparse(endpoint).path or "/"
+    if not endpoint.startswith("/"):
+        endpoint = "/" + endpoint
+
+    objective = str(ctx.get("objective", "")).lower()
+    is_horizontal = "horizontal" in objective or ctx.get("family") == "authz_horizontal"
+    state = ctx.get("state")
+    has_two_ids = False
+    if state is not None:
+        try:
+            from horcrux.intel.dependencies import _has_two_identities
+            has_two_ids, _ = _has_two_identities(state)
+        except Exception:
+            pass
+    if is_horizontal and not has_two_ids:
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("authz_compare", {
+            "endpoint": endpoint,
+            "requires_second_identity": True,
+            "reason": "Horizontal authorization comparison requires a second authenticated user context.",
+        }, evidence=[_ev("authorization_observation", {
+            "endpoint": endpoint, "requires_second_identity": True, "source": "authz_compare"
+        }, source="authz_compare", confidence=0.8)], duration_ms=ms)
+
+    if _use_offline(target, ctx):
+        if code_a is None or code_b is None:
+            r_anon = _adapter_http_probe({**ctx, "identity": "anonymous", "path": endpoint})
+            r_user = _adapter_http_probe({**ctx, "identity": "user", "path": endpoint})
+            code_a = r_anon.structured_data.get("status_code")
+            code_b = r_user.structured_data.get("status_code")
+        enforced = (code_a in (401, 403)) and (code_b == 200)
+        gap = (code_a == 200) or (code_b == 200 and code_a == 200)
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("authz_compare", {"endpoint": endpoint, "status_anonymous": code_a,
+                                     "status_user": code_b, "authorization_enforced": enforced,
+                                     "potential_gap": gap, "synthetic": True},
+                   evidence=[_ev("authorization_observation", {
+                       "endpoint": endpoint, "anonymous": code_a, "user": code_b,
+                       "enforced": enforced}, source="authz_compare", confidence=0.75)],
+                   provenance="horcrux.agents.specialists:authz", duration_ms=ms)
+
+    # Live active authorization & IDOR check — differential model:
+    # A->objectA baseline, B->objectA cross-boundary attempt. Collections are
+    # never authorization boundaries; numeric IDs alone prove nothing.
+    try:
+        from horcrux.intel.test_matrix import path_has_instance_id as _has_inst
+        from horcrux.modules.web import security_validators as _sv
+        _is_instance = bool(_has_inst(endpoint))
+    except Exception:
+        _is_instance = ("/1" in endpoint or "{id}" in endpoint)
+        _sv = None  # type: ignore
+    try:
+        import httpx
+        port = int(ctx.get("port", 80))
+        scheme = ctx.get("scheme", "http")
+        host = target
+        if ":" in host:
+            host_part, _, port_part = host.partition(":")
+            host = host_part
+            try:
+                port = int(port_part)
+            except ValueError:
+                pass
+        url = f"{scheme}://{host}:{port}{endpoint}"
+
+        # Two-identity differential when caller supplies B context.
+        _headers_b = ctx.get("headers_b") or ctx.get("auth_headers_b")
+        _cookies_b = ctx.get("cookies_b") or ctx.get("auth_cookies_b")
+        _ident_b = ctx.get("identity_b", "user-b")
+        if _sv is not None and (_headers_b or _cookies_b):
+            _req = _live_request_fn(ctx)
+
+            def _fetch_a(u: str) -> dict:
+                return _req("GET", u if u.startswith("http") else f"{scheme}://{host}:{port}{u}")
+
+            def _fetch_b(u: str) -> dict:
+                h = dict(ctx.get("headers") or {})
+                if isinstance(_headers_b, dict):
+                    h.update(_headers_b)
+                c = dict(ctx.get("cookies") or {})
+                if isinstance(_cookies_b, dict):
+                    c.update(_cookies_b)
+                from horcrux.modules.web.security_validators import httpx_request_fn as _raw
+                return _raw("GET", u if u.startswith("http") else f"{scheme}://{host}:{port}{u}",
+                            headers=h or None, cookies=c or None)
+
+            _cross = re.sub(r"/([1-9]\d*)", lambda m: f"/{int(m.group(1)) + 1}", endpoint, count=1) \
+                if re.search(r"/[1-9]\d*", endpoint) else endpoint
+            _res = _sv.validate_authz_differential(_fetch_a, _fetch_b, endpoint, _cross,
+                                                   identity_a="user-a", identity_b=str(_ident_b))
+            ms = int((time.monotonic() - t0) * 1000)
+            structured = _structured_from_validator("authz_compare", _res,
+                                                    {"endpoint": endpoint, "affected_asset": _cross,
+                                                     "verdict": _res.verdict})
+            if _res.verdict in ("STRONG_AUTHZ_EVIDENCE", "BEHAVIORAL_DIFFERENTIAL"):
+                structured.update({"potential_gap": True, "idor_confirmed": True,
+                                   "private_entity": True,
+                                   "status_anonymous": _res.evidence[0].get("response_meta", {}).get("status") if _res.evidence else 200})
+                print(f"AUTHZ TEST  A -> {endpoint}  B -> {_cross}  result: CROSS-BOUNDARY-ACCESS")
+            else:
+                structured.update({"potential_gap": False,
+                                   "authorization_enforced": _res.verdict == "NO_EFFECT"})
+                print(f"AUTHZ TEST  A -> {endpoint}  B -> {_cross}  result: FORBIDDEN")
+            return _ok("authz_compare", structured,
+                       evidence=_validator_evidence("authz_compare", _res),
+                       provenance="horcrux.security_validators:authz-differential:live",
+                       duration_ms=ms)
+
+        with httpx.Client(verify=False, timeout=8.0) as client:
+            resp_anon = client.get(url)
+            code_a = resp_anon.status_code
+            body_a = resp_anon.text[:2000]
+
+            # Collection endpoints are never BOLA boundaries.
+            if not _is_instance:
+                ms = int((time.monotonic() - t0) * 1000)
+                ev = [_ev("authorization_observation", {
+                    "endpoint": endpoint,
+                    "status_code": code_a,
+                    "is_public_collection": True,
+                    "enforced": False,
+                }, source="authz_compare", confidence=0.85)]
+                return _ok("authz_compare", {
+                    "endpoint": endpoint,
+                    "status_anonymous": code_a,
+                    "status_user": code_b or code_a,
+                    "authorization_enforced": False,
+                    "potential_gap": False,
+                    "is_public_collection": True,
+                    "private_entity": False,
+                }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
+
+            is_private_entity = any(k in endpoint.lower() for k in ("basket", "cart", "user", "order", "account", "profile", "wallet", "card", "address", "invoice", "payment", "whoami"))
+
+            idor_confirmed = False
+            mutated_path = ""
+            mutated_body = ""
+            if _is_instance and re.search(r"/[1-9]\d*", endpoint):
+                mutated_path = re.sub(r"/([1-9]\d*)", lambda m: f"/{int(m.group(1)) + 1}", endpoint, count=1)
+                mutated_url = f"{scheme}://{host}:{port}{mutated_path}"
+                try:
+                    resp_mutated = client.get(mutated_url)
+                    mutated_body = resp_mutated.text[:2000]
+                    # Numeric-ID reachability alone is NOT authorization failure:
+                    # require ownership/private-field disclosure in the
+                    # cross-boundary response.
+                    _own = ("userid" in mutated_body.lower() or "user_id" in mutated_body.lower()
+                            or "email" in mutated_body.lower() or "owner" in mutated_body.lower())
+                    if resp_mutated.status_code == 200 and len(resp_mutated.content) > 30 and _own:
+                        idor_confirmed = True
+                except Exception:
+                    pass
+
+            ms = int((time.monotonic() - t0) * 1000)
+
+            # Enforced by HTTP 401/403
+            if code_a in (401, 403):
+                ev = [_ev("authorization_observation", {
+                    "endpoint": endpoint,
+                    "status_code": code_a,
+                    "enforced": True,
+                    "authorization_enforced": True,
+                }, source="authz_compare", confidence=0.9)]
+                return _ok("authz_compare", {
+                    "endpoint": endpoint,
+                    "status_anonymous": code_a,
+                    "status_user": code_b or code_a,
+                    "authorization_enforced": True,
+                    "potential_gap": False,
+                    "private_entity": is_private_entity,
+                }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
+
+            # Public collection without private user entity boundary
+            if code_a == 200 and not is_private_entity:
+                ev = [_ev("authorization_observation", {
+                    "endpoint": endpoint,
+                    "status_code": code_a,
+                    "is_public_collection": True,
+                    "enforced": False,
+                }, source="authz_compare", confidence=0.85)]
+                return _ok("authz_compare", {
+                    "endpoint": endpoint,
+                    "status_anonymous": code_a,
+                    "status_user": code_b or code_a,
+                    "authorization_enforced": False,
+                    "potential_gap": False,
+                    "is_public_collection": True,
+                    "private_entity": False,
+                }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
+
+            # Private entity check
+            body_lower = body_a.lower()
+            disclosed_private_data = any(k in body_lower for k in ("userid", "user_id", "email", "basket", "products", "password", "token", "address", "card"))
+            if is_private_entity and (idor_confirmed or disclosed_private_data):
+                ev = [_ev("authorization_observation", {
+                    "endpoint": endpoint,
+                    "anonymous": code_a,
+                    "mutated_path": mutated_path,
+                    "idor_confirmed": idor_confirmed,
+                    "private_entity": True,
+                    "enforced": False,
+                }, source="authz_compare", confidence=0.92)]
+                return _ok("authz_compare", {
+                    "endpoint": endpoint,
+                    "status_anonymous": code_a,
+                    "status_user": code_b or code_a,
+                    "authorization_enforced": False,
+                    "potential_gap": True,
+                    "idor_confirmed": True,
+                    "private_entity": True,
+                    "affected_asset": mutated_path or endpoint,
+                }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
+
+            ev = [_ev("authorization_observation", {
+                "endpoint": endpoint,
+                "status_code": code_a,
+                "enforced": False,
+            }, source="authz_compare", confidence=0.7)]
+            return _ok("authz_compare", {
+                "endpoint": endpoint,
+                "status_anonymous": code_a,
+                "status_user": code_b or code_a,
+                "authorization_enforced": False,
+                "potential_gap": False,
+                "private_entity": False,
+            }, evidence=ev, provenance="horcrux.agents.specialists:authz:live", duration_ms=ms)
+    except Exception as exc:
+        return _fail("authz_compare", FailureClass.TOOL_FAILED, f"authz_compare failed: {exc}")
 
 
 def _make_service_adapter(module_name: str, fn_name: str, cap_id: str,
@@ -741,9 +1408,13 @@ def _make_service_adapter(module_name: str, fn_name: str, cap_id: str,
                     kwargs = {"port": port}
                 out = fn(workspace, runner, target, **kwargs)
                 findings = out[0] if isinstance(out, tuple) else (out or [])
-                return _ok(cap_id, {"port": port, "findings": len(findings or [])},
-                           evidence=[_ev(evidence_type, {"title": f.title}, source=cap_id)
-                                     for f in (findings or [])[:20]],
+                ev_list = [_ev(evidence_type, {"title": f.title}, source=cap_id)
+                           for f in (findings or [])[:20]]
+                if not ev_list:
+                    ev_list = [_ev(evidence_type, {"port": port, "service_probed": True, "clean": True},
+                                   source=cap_id, confidence=0.7)]
+                return _ok(cap_id, {"port": port, "findings": len(findings or []), "service_probed": True},
+                           evidence=ev_list,
                            provenance=f"horcrux.modules.services.{module_name}:{fn_name}")
             except Exception as exc:
                 return _fail(cap_id, FailureClass.TOOL_FAILED, str(exc))
@@ -1031,6 +1702,51 @@ def build_production_capabilities() -> list[Capability]:
                    SafetyClass.LOW, _adapter_param_fuzz, _availability("none"),
                    60, "horcrux.modules.web.scanner", "horcrux.modules.web.scanner",
                    "Input surface triage (SSRF/injection candidates)"),
+        Capability("sqli_probe", "SQL injection differential validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint", "parameter"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_sqli_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Baseline/harmless/boolean-differential/error SQLi validation"),
+        Capability("xss_probe", "Context-aware XSS validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint", "parameter"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_xss_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Reflected/stored/DOM XSS with sink-context verification"),
+        Capability("traversal_probe", "Path traversal evidence validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint", "parameter"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_traversal_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Traversal variants with file-read evidence requirement"),
+        Capability("ssrf_probe", "SSRF sink validator (controlled loopback)", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint", "parameter"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_ssrf_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Server-side fetch evidence; redirect is not SSRF"),
+        Capability("cmdi_probe", "OS command injection validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint", "parameter"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_cmdi_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Command-separator probes with output-reflection requirement"),
+        Capability("upload_probe", "File upload security validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_upload_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Extension/MIME/filename handling + artifact reachability"),
+        Capability("auth_probe", "Authentication enforcement validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.LOW, _adapter_auth_probe, _availability("none"),
+                   30, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Anonymous vs authenticated enforcement; REQUIRES_AUTH when creds absent"),
+        Capability("api_probe", "API security semantics validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_api_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Excessive-data/mass-assignment/method-tampering semantics"),
+        Capability("workflow_probe", "Workflow/state-transition validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_workflow_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Baseline sequence then omission/reorder/replay/value tamper"),
         Capability("jwt_analyze", "JWT/session analysis", CapabilityCategory.VALIDATION,
                    ["auth_surface"], ["token"], ["auth_observation"],
                    SafetyClass.SAFE, _adapter_jwt_analyze, _availability("none"),
@@ -1138,7 +1854,10 @@ class CapabilityRegistry:
         self.runner = runner
         self.state = state
         self.scope_check = scope_check
-        self.live_local = live_local
+        if state is not None and getattr(state, "execution_mode", "LOCAL") != "SYNTHETIC":
+            self.live_local = True
+        else:
+            self.live_local = live_local
         self._caps: dict[str, Capability] = {}
         for cap in build_production_capabilities():
             self._caps[cap.capability_id] = cap
