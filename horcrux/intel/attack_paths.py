@@ -59,6 +59,24 @@ class AttackNode(BaseModel):
     investigation_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     finding_id: str = ""
+    # Canonical severity: populated ONLY from Finding.severity for FINDING
+    # nodes. No subsystem may independently calculate a second severity.
+    severity: str = ""
+
+
+def graph_node_severity(node: AttackNode, findings_by_id: dict[str, Any]) -> str:
+    """Authoritative node severity — reads canonical Finding.severity."""
+    if node.finding_id and node.finding_id in findings_by_id:
+        try:
+            from horcrux.models import canonical_finding_severity
+            return canonical_finding_severity(findings_by_id[node.finding_id])
+        except Exception:
+            pass
+    return (node.severity or "").lower()
+
+
+def attack_path_severities(path: "AttackPath", findings_by_id: dict[str, Any]) -> list[str]:
+    return [graph_node_severity(n, findings_by_id) for n in path.nodes if n.finding_id]
 
 
 class AttackEdge(BaseModel):
@@ -361,6 +379,11 @@ def build_attack_paths(state: WorkspaceState) -> list[AttackPath]:
         except Exception:
             fvs = str(finding.validation_state)
         if str(fvs).lower() in {"confirmed", "likely"}:
+            try:
+                from horcrux.models import canonical_finding_severity as _canon
+                _sev = _canon(finding)
+            except Exception:
+                _sev = str(getattr(finding, "severity", "info")).lower()
             path = AttackPath(
                 name=f"Confirmed: {finding.title[:60]}",
                 probability="HIGH",
@@ -375,7 +398,7 @@ def build_attack_paths(state: WorkspaceState) -> list[AttackPath]:
                     AttackNode(id=finding.id, node_type=AttackNodeType.FINDING, label=finding.title, ref_id=finding.id,
                                status=PATH_STATUS_CONFIRMED, hypothesis_id=finding.hypothesis_id,
                                investigation_ids=[finding.investigation_id] if finding.investigation_id else [],
-                               finding_id=finding.id),
+                               finding_id=finding.id, severity=_sev),
                 ],
                 edges=[],
             )

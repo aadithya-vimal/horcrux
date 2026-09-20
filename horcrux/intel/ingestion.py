@@ -200,10 +200,16 @@ def _add_technology(app: ApplicationModel, name: str, category: str, version: st
 
 def _ingest_discovered_paths(state: WorkspaceState, app: ApplicationModel) -> None:
     for path in state.discovered_paths:
+        # status=0/size=0 is never HTTP evidence — source-only candidate.
+        is_http = int(getattr(path, "status", 0) or 0) > 0
+        dstate = getattr(path, "discovery_state", "") or ("OBSERVED_HTTP" if is_http else "DISCOVERED_FROM_SOURCE")
+        if not is_http and dstate == "OBSERVED_HTTP":
+            dstate = "DISCOVERED_FROM_SOURCE"
         route = SemanticRoute(
             path=path.path,
             source=path.source or EvidenceSource.FUZZER.value,
             evidence_refs=[path.url],
+            discovery_state=dstate,
         )
         app.upsert_route(route)
 
@@ -223,12 +229,14 @@ def _ingest_discovered_paths(state: WorkspaceState, app: ApplicationModel) -> No
             path=path.path,
             sources=[path.source or EvidenceSource.FUZZER.value],
             evidence_refs=[path.url],
+            discovery_state=dstate,
         )
         _enrich_endpoint_from_path(endpoint, path.path)
         app.upsert_endpoint(endpoint)
 
 
 def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
+    from horcrux.intel.parameters import provenance_for_source
     for param in state.parameters:
         if not (param.name or "").strip():
             continue
@@ -239,8 +247,22 @@ def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
             source=param.source,
             evidence_refs=[f"param:{param.name}@{param.endpoint}"],
             param_class=classify_parameter(param.name, param.location, param.endpoint),
+            endpoint_id=getattr(param, "endpoint_id", "") or "",
+            provenance=provenance_for_source(param.source, getattr(param, "provenance", "")),
+            confidence=float(getattr(param, "confidence", 0.8) or 0.8),
+            first_seen=getattr(param, "first_seen", "") or f"param:{param.name}@{param.endpoint}",
         )
         sem.ensure_id()
+        if not sem.endpoint_id:
+            # Bind endpoint_id when the endpoint is already modeled.
+            try:
+                for _e in app.endpoints:
+                    from horcrux.intel.test_matrix import normalize_matrix_path as _np
+                    if _np(_e.path) == _np(sem.endpoint or ""):
+                        sem.endpoint_id = _e.id or _e.ensure_id()
+                        break
+            except Exception:
+                pass
         if not any(p.id == sem.id for p in app.parameters):
             app.parameters.append(sem)
 
@@ -486,12 +508,19 @@ def ingest_javascript_routes(
     parameters: list,
     source: str = "javascript",
 ) -> None:
-    """Ingest JS-analyzed routes into application model."""
+    """Ingest JS-analyzed routes into application model.
+
+    JS-derived routes with no HTTP response are DISCOVERED_FROM_SOURCE —
+    never live HTTP observations.
+    """
+    from horcrux.intel.parameters import provenance_for_source
     for route in routes:
         path = route if route.startswith("/") else f"/{route}"
-        sem_route = SemanticRoute(path=path, source=source, evidence_refs=[f"js:{path}"])
+        sem_route = SemanticRoute(path=path, source=source, evidence_refs=[f"js:{path}"],
+                                  discovery_state="DISCOVERED_FROM_SOURCE")
         app.upsert_route(sem_route)
-        ep = SemanticEndpoint(method="GET", path=path, sources=[source], evidence_refs=[f"js:{path}"])
+        ep = SemanticEndpoint(method="GET", path=path, sources=[source], evidence_refs=[f"js:{path}"],
+                              discovery_state="DISCOVERED_FROM_SOURCE")
         _enrich_endpoint_from_path(ep, path)
         app.upsert_endpoint(ep)
 
@@ -504,6 +533,9 @@ def ingest_javascript_routes(
             endpoint=endpoint,
             source=source,
             evidence_refs=[f"js:param:{name}"],
+            provenance=provenance_for_source(source, getattr(param, "provenance", "")),
+            confidence=float(getattr(param, "confidence", 0.75) or 0.75),
+            first_seen=f"js:{name}",
         )
         sem.ensure_id()
         if not any(p.id == sem.id for p in app.parameters):
@@ -565,10 +597,15 @@ def ingest_crawler_paths(app: ApplicationModel, paths: list, source: str = "craw
         path = p.path if hasattr(p, "path") else str(p.get("path", "/") if isinstance(p, dict) else p)
         url = p.url if hasattr(p, "url") else (p.get("url", "") if isinstance(p, dict) else "")
         status = int(getattr(p, "status", p.get("status", 0) if isinstance(p, dict) else 0) or 0)
-        route = SemanticRoute(path=path, source=source, evidence_refs=[url or f"{source}:{path}"])
+        dstate = str(getattr(p, "discovery_state", "") or "") if not isinstance(p, dict) else str(p.get("discovery_state", "") or "")
+        if not dstate:
+            dstate = "OBSERVED_HTTP" if status > 0 else "DISCOVERED_FROM_SOURCE"
+        route = SemanticRoute(path=path, source=source, evidence_refs=[url or f"{source}:{path}"],
+                              discovery_state=dstate)
         app.upsert_route(route)
         ep = SemanticEndpoint(method="GET", path=path, sources=[source],
-                              evidence_refs=[url or f"{source}:{path}"])
+                              evidence_refs=[url or f"{source}:{path}"],
+                              discovery_state=dstate)
         _enrich_endpoint_from_path(ep, path)
         app.upsert_endpoint(ep)
         count += 1

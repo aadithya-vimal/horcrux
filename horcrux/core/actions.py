@@ -4,6 +4,92 @@ from horcrux.models import Action, SubsystemState, ValidationState, WorkspaceSta
 from horcrux.modules.web.scanner import WEB_PORTS
 
 
+def get_authoritative_assessment_state(state: WorkspaceState) -> dict:
+    """One authoritative assessment completion state.
+
+    `next`, `assess`, `scan`, status display, and report generation must all
+    consume this. If queue executable == 0, callers must return the
+    exhausted payload — never fabricate a generic action.
+    """
+    investigations = state.get_investigations()
+    executable = [i for i in investigations
+                  if getattr(i.state, "value", str(i.state)) in {"READY", "PENDING", "RUNNING"}]
+    by_state: dict[str, int] = {}
+    blocked_details: list[str] = []
+    insufficient = 0
+    unavailable: list[str] = []
+    for inv in investigations:
+        sv = getattr(inv.state, "value", str(inv.state))
+        by_state[sv] = by_state.get(sv, 0) + 1
+        if sv in {"BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE", "FAILED",
+                  "APPROVAL_REQUIRED", "OUT_OF_SCOPE", "NOT_APPLICABLE"}:
+            blocked_details.append(f"{inv.objective[:80]} [{sv}]")
+        if sv == "INSUFFICIENT_EVIDENCE":
+            insufficient += 1
+        if sv in {"UNAVAILABLE", "REQUIRES_TOOL"}:
+            unavailable.append(inv.objective[:80])
+    try:
+        hyps = state.get_hypotheses()
+    except Exception:
+        hyps = []
+    unresolved = [h for h in hyps
+                  if getattr(getattr(h, "status", ""), "value", str(getattr(h, "status", ""))) in {"OPEN", "INVESTIGATING"}]
+    # Required operator inputs: auth contexts, second identity, tools.
+    required_inputs: list[str] = []
+    needs_second = any("two_identities" in (getattr(i, "prerequisites", []) or []) for i in executable)
+    if needs_second:
+        required_inputs.append("second identity context for horizontal authorization comparison")
+    needs_auth = any("REQUIRES_AUTH" in str(getattr(i.state, "value", i.state)) for i in investigations)
+    if needs_auth or not any(getattr(a, "label", "") != "anonymous" for a in ([{}])):
+        pass
+    try:
+        from horcrux.intel.coverage import assessment_completeness
+        comp = assessment_completeness(state)
+        blocking = list(comp.get("blocking_reasons", []))
+    except Exception:
+        blocking = []
+    exhausted = len(executable) == 0
+    return {
+        "exhausted": exhausted,
+        "queue_executable": len(executable),
+        "executable_ids": [i.id for i in executable],
+        "by_state": by_state,
+        "total_investigations": len(investigations),
+        "blocked": blocked_details[:10],
+        "blocked_count": len(blocked_details),
+        "insufficient": insufficient,
+        "unavailable_capabilities": unavailable[:10],
+        "unresolved_hypotheses": len(unresolved),
+        "required_operator_inputs": required_inputs,
+        "blocking_reasons": blocking,
+        "findings": len(state.findings),
+    }
+
+
+def _exhausted_action(state: WorkspaceState, auth: dict) -> Action:
+    parts = [
+        f"{auth['total_investigations']} investigations",
+        f"{auth['queue_executable']} executable",
+        f"{auth['blocked_count']} blocked",
+        f"{auth['insufficient']} insufficient",
+        f"{auth['unresolved_hypotheses']} unresolved hypotheses",
+        f"{auth['findings']} canonical findings",
+    ]
+    if auth.get("unavailable_capabilities"):
+        parts.append(f"unavailable: {'; '.join(auth['unavailable_capabilities'][:2])}")
+    if auth.get("required_operator_inputs"):
+        parts.append(f"required inputs: {'; '.join(auth['required_operator_inputs'][:2])}")
+    if auth.get("blocking_reasons"):
+        parts.append(f"blocking: {auth['blocking_reasons'][0][:100]}")
+    return Action(
+        id="assessment_exhausted",
+        title="Assessment exhausted — no executable investigations remain.",
+        reason="; ".join(parts) + ". See status.",
+        score=0.0,
+        command="status",
+    )
+
+
 def compute_investigation_actions(state: WorkspaceState) -> list[Action]:
     """Next actions sourced ONLY from materialized executable investigations.
 
@@ -35,25 +121,15 @@ def compute_investigation_actions(state: WorkspaceState) -> list[Action]:
                 unique[a.id] = a
         return list(unique.values())
 
-    # Queue drained: never manufacture an unrelated action from raw
-    # application-model parameters. Only materialized executable
-    # investigations may appear in next().
-    invs = state.get_investigations()
-    by_state: dict[str, int] = {}
-    for inv in invs:
-        by_state[inv.state.value] = by_state.get(inv.state.value, 0) + 1
-    hyps = state.get_hypotheses()
-    open_hyps = sum(1 for h in hyps if h.status.value in {"OPEN", "INVESTIGATING"})
+    # Queue drained: authoritative exhausted state. Never manufacture an
+    # unrelated action from raw application-model parameters. Only
+    # materialized executable investigations may appear in next().
+    auth = get_authoritative_assessment_state(state)
+    ex = _exhausted_action(state, auth)
     return [Action(
         id="queue_drained",
-        title="No executable investigations remain.",
-        reason=(f"Assessment state: {len(invs)} investigations "
-                f"({by_state.get('SUPPORTED', 0)} supported, "
-                f"{by_state.get('REFUTED', 0)} refuted, "
-                f"{by_state.get('INSUFFICIENT_EVIDENCE', 0)} insufficient, "
-                f"{by_state.get('BLOCKED', 0)} blocked), "
-                f"{open_hyps} open hypotheses, "
-                f"{len(state.findings)} canonical findings. See status."),
+        title="No executable investigations remain. Assessment exhausted.",
+        reason=ex.reason,
         score=0.0,
         command="status",
     )]
@@ -331,8 +407,19 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
                 )
             )
 
-    # 11. Fallback if initial stages complete and no immediate exposures
+    # 11. Authoritative fallback: if no materialized work exists, return the
+    # exhausted state — never fabricate a generic deep_recon action that
+    # contradicts assessment state.
     if not actions:
+        auth = get_authoritative_assessment_state(state)
+        if auth["exhausted"]:
+            return [Action(
+                id="queue_drained",
+                title="No executable investigations remain. Assessment exhausted.",
+                reason=_exhausted_action(state, auth).reason,
+                score=0.0,
+                command="status",
+            )]
         actions.append(
             Action(
                 id="deep_recon",

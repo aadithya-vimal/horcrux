@@ -131,12 +131,66 @@ class ResponseFamily(BaseModel):
     evidence_references: list[str] = Field(default_factory=list)
 
 
+class ParameterProvenance(str, Enum):
+    OBSERVED_REQUEST = "OBSERVED_REQUEST"
+    HTML_FORM = "HTML_FORM"
+    JS_REQUEST_CONSTRUCTION = "JS_REQUEST_CONSTRUCTION"
+    OPENAPI = "OPENAPI"
+    GRAPHQL_SCHEMA = "GRAPHQL_SCHEMA"
+    BROWSER_NETWORK = "BROWSER_NETWORK"
+    OPERATOR = "OPERATOR"
+    UNKNOWN = "UNKNOWN"
+
+
+class DiscoveryState(str, Enum):
+    OBSERVED_HTTP = "OBSERVED_HTTP"
+    DISCOVERED_FROM_SOURCE = "DISCOVERED_FROM_SOURCE"
+    INFERRED = "INFERRED"
+
+
 class Parameter(BaseModel):
     name: str
-    location: str = "query"  # query, path, body, header, cookie
+    location: str = "query"  # query, path, header, body, json, form, multipart
     source: str = "url"      # form, javascript, url, openapi, graphql, json_schema
     endpoint: str = ""
     confidence: float = Field(default=0.8, ge=0, le=1)
+    # --- Semantic ownership provenance (endpoint-specific binding) ---
+    provenance: str = "UNKNOWN"  # ParameterProvenance value
+    endpoint_id: str = ""
+    first_seen: str = ""
+
+    @property
+    def parameter_name(self) -> str:
+        return self.name
+
+    def is_owned_for(self, endpoint_path: str) -> bool:
+        """True only with endpoint-specific evidence linking this parameter
+        to the given endpoint path. Global discovery never implies ownership."""
+        from urllib.parse import urlparse as _up
+        mine = (self.endpoint or "").strip()
+        if "://" in mine:
+            try:
+                mine = _up(mine).path or "/"
+            except Exception:
+                mine = "/"
+        mine = mine.split("?")[0].split("#")[0] or "/"
+        want = (endpoint_path or "").strip().split("?")[0].split("#")[0] or "/"
+        if not mine or not want:
+            return False
+        # Static-asset endpoints can never own server parameters.
+        ml = mine.lower()
+        if ml.endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".svg",
+                         ".ico", ".woff", ".woff2", ".ttf", ".map")):
+            return False
+        if self.location == "client_state":
+            return False
+        if (self.provenance or "UNKNOWN") == ParameterProvenance.UNKNOWN.value:
+            # Legacy records: source acts as weak provenance only when the
+            # endpoint matches exactly (never a global promotion).
+            if mine != want:
+                return False
+            return bool(mine and self.name)
+        return mine == want
 
 
 class NormalizedTechnology(BaseModel):
@@ -169,6 +223,13 @@ class DiscoveredPath(BaseModel):
     response_family_id: str = ""
     fingerprint: Optional[ResponseFingerprint] = None
     timestamp: datetime = Field(default_factory=utcnow)
+    # --- Source-vs-observation classification ---
+    discovery_state: str = "OBSERVED_HTTP"  # DiscoveryState value
+
+    @property
+    def is_http_evidence(self) -> bool:
+        """status=0/size=0 is never HTTP evidence (unprobed candidate)."""
+        return int(self.status or 0) > 0
 
 
 class WebTarget(BaseModel):
@@ -325,6 +386,20 @@ class Finding(BaseModel):
             self.source_tools = [self.source_tool]
         elif self.source_tools and not self.source_tool:
             self.source_tool = self.source_tools[0]
+
+
+def canonical_finding_severity(finding: "Finding") -> str:
+    """Single authoritative severity reader. All renderers (graph, report,
+    CLI table, attack-path, export, API) must use this — never recompute."""
+    sev = getattr(finding, "severity", Severity.info)
+    try:
+        return sev.value if hasattr(sev, "value") else str(sev).lower()
+    except Exception:
+        return "info"
+
+
+def finding_display_severity(finding: "Finding") -> str:
+    return canonical_finding_severity(finding).upper()
 
 
 class Action(BaseModel):

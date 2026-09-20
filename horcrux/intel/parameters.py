@@ -25,6 +25,97 @@ class ParameterSemanticRole(str, Enum):
     GENERIC_INPUT = "generic_input"
 
 
+class ParameterProvenance(str, Enum):
+    OBSERVED_REQUEST = "OBSERVED_REQUEST"
+    HTML_FORM = "HTML_FORM"
+    JS_REQUEST_CONSTRUCTION = "JS_REQUEST_CONSTRUCTION"
+    OPENAPI = "OPENAPI"
+    GRAPHQL_SCHEMA = "GRAPHQL_SCHEMA"
+    BROWSER_NETWORK = "BROWSER_NETWORK"
+    OPERATOR = "OPERATOR"
+    UNKNOWN = "UNKNOWN"
+
+
+PARAMETER_LOCATIONS = frozenset({"query", "path", "header", "body", "json", "form", "multipart"})
+
+_SOURCE_TO_PROVENANCE: dict[str, ParameterProvenance] = {
+    "url": ParameterProvenance.OBSERVED_REQUEST,
+    "proxy": ParameterProvenance.OBSERVED_REQUEST,
+    "http": ParameterProvenance.OBSERVED_REQUEST,
+    "browser": ParameterProvenance.BROWSER_NETWORK,
+    "browser_network": ParameterProvenance.BROWSER_NETWORK,
+    "html_form": ParameterProvenance.HTML_FORM,
+    "form": ParameterProvenance.HTML_FORM,
+    "html": ParameterProvenance.HTML_FORM,
+    "javascript": ParameterProvenance.JS_REQUEST_CONSTRUCTION,
+    "js": ParameterProvenance.JS_REQUEST_CONSTRUCTION,
+    "js_analysis": ParameterProvenance.JS_REQUEST_CONSTRUCTION,
+    "openapi": ParameterProvenance.OPENAPI,
+    "swagger": ParameterProvenance.OPENAPI,
+    "api_discovery": ParameterProvenance.OPENAPI,
+    "graphql": ParameterProvenance.GRAPHQL_SCHEMA,
+    "operator": ParameterProvenance.OPERATOR,
+}
+
+
+def provenance_for_source(source: str, explicit: str = "") -> str:
+    """Resolve explicit provenance, else map legacy source strings."""
+    if explicit and explicit in {p.value for p in ParameterProvenance}:
+        return explicit
+    return _SOURCE_TO_PROVENANCE.get((source or "").lower(), ParameterProvenance.UNKNOWN).value
+
+
+def _norm_path(p: str) -> str:
+    ep = (p or "").strip().split("?")[0].split("#")[0]
+    if "://" in ep:
+        try:
+            from urllib.parse import urlparse as _urlparse
+            ep = _urlparse(ep).path or "/"
+        except Exception:
+            ep = "/"
+    if ep and not ep.startswith("/"):
+        ep = "/" + ep
+    return ep or ""
+
+
+def has_endpoint_specific_provenance(param: object, endpoint_path: str) -> bool:
+    """A parameter may ONLY generate parameter security tests when it has
+    endpoint-specific provenance: its recorded endpoint equals the target
+    endpoint, it is not client_state/static-asset bound, and its provenance
+    is endpoint-evidence (never a global promotion)."""
+    name = str(getattr(param, "name", "") or "").strip()
+    if not name:
+        return False
+    if str(getattr(param, "location", "") or "").lower() == "client_state":
+        return False
+    mine = _norm_path(str(getattr(param, "endpoint", "") or ""))
+    want = _norm_path(endpoint_path or "")
+    if not mine or not want or mine != want:
+        return False
+    if is_static_asset_endpoint(mine):
+        return False
+    prov = str(getattr(param, "provenance", "") or "").upper() or "UNKNOWN"
+    if prov in {p.value for p in ParameterProvenance if p != ParameterProvenance.UNKNOWN}:
+        # JS_REQUEST_CONSTRUCTION bound to a JS bundle URL is not ownership:
+        # the bundle is not the server endpoint.
+        if prov == ParameterProvenance.JS_REQUEST_CONSTRUCTION.value and mine != want:
+            return False
+        return True
+    # Legacy fallback: exact endpoint match is endpoint-specific evidence
+    # (never a cross-endpoint promotion). JS bundle sources and empty
+    # sources without any evidence are excluded.
+    src = str(getattr(param, "source", "") or "").lower()
+    if src in ("javascript", "js", "js_analysis"):
+        # JS tokens anchored to a bundle URL are not server ownership.
+        return False
+    if mine != want:
+        return False
+    ev = list(getattr(param, "evidence_refs", []) or [])
+    if src or ev or getattr(param, "endpoint", ""):
+        return True
+    return False
+
+
 _OBJECT_ID_PATTERNS = re.compile(r"^(id|uuid|uid|guid|basket_?id|product_?id|order_?id|item_?id|entity_?id)$", re.IGNORECASE)
 _USER_ID_PATTERNS = re.compile(r"^(user_?id|account_?id|owner_?id|creator_?id|profile_?id|client_?id)$", re.IGNORECASE)
 _REDIRECT_PATTERNS = re.compile(r"^(redirect|redirect_?url|return|return_?url|next|forward|dest|destination|goto)$", re.IGNORECASE)

@@ -49,6 +49,17 @@ class Orchestrator:
         profile = self.profile
         if deep:
             profile = get_profile("deep")
+        # Persist assessment profile so the semantic matrix (standard vs
+        # deep) derives from the same authoritative state everywhere.
+        try:
+            _st = self.workspace.load()
+            _cfg = _st.get_engagement_config()
+            _d = _cfg.model_dump() if hasattr(_cfg, "model_dump") else dict(_cfg or {})
+            _d["assessment_profile"] = profile.name
+            _st.set_engagement_config(_d)
+            self.workspace.save(_st)
+        except Exception:
+            pass
 
         if self.identity:
             try:

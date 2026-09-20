@@ -34,7 +34,7 @@ from horcrux.core.settings import (
 from horcrux.core.storage import Workspace
 from horcrux.intel.ai.manager import AIManager
 from horcrux.intel.search import searchsploit_workspace
-from horcrux.models import AuditStatus, SubsystemState, ValidationState
+from horcrux.models import AuditStatus, SubsystemState, ValidationState, canonical_finding_severity
 
 from horcrux.modules.local import enumerate_linux
 from horcrux.reporting.reports import markdown
@@ -1008,7 +1008,7 @@ class ConsoleApp:
             key=lambda item: -item.confidence,
         ):
             table.add_row(
-                get_severity_badge(finding.severity.value),
+                get_severity_badge(canonical_finding_severity(finding)),
                 get_confidence_meter(finding.confidence),
                 finding.title,
                 get_validation_badge(finding.validation_state.value),
@@ -1055,7 +1055,7 @@ class ConsoleApp:
         cards = [
             Panel(
                 header_text,
-                title=f"[bold bright_red]✦ {get_severity_badge(match.severity.value)} ✦[/bold bright_red]",
+                title=f"[bold bright_red]✦ {get_severity_badge(canonical_finding_severity(match))} ✦[/bold bright_red]",
                 box=box.ROUNDED,
                 border_style="red",
             ),
@@ -1203,7 +1203,7 @@ class ConsoleApp:
             for finding in state.findings:
                 if f":{service.port}" in finding.title or service.service and service.service.lower() in finding.title.lower():
                     svc_node.add(
-                        f"{get_severity_badge(finding.severity.value)} [bright_white]{finding.title}[/bright_white]"
+                        f"{get_severity_badge(canonical_finding_severity(finding))} [bright_white]{finding.title}[/bright_white]"
                     )
 
         # Findings branch
@@ -1214,7 +1214,7 @@ class ConsoleApp:
             )
             for finding in state.findings:
                 findings_branch.add(
-                    f"{get_severity_badge(finding.severity.value)} "
+                    f"{get_severity_badge(canonical_finding_severity(finding))} "
                     f"[bright_white]{finding.title}[/bright_white] "
                     f"[dim]({finding.status.value})[/dim]"
                 )

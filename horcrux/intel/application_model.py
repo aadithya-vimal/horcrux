@@ -117,6 +117,9 @@ class SemanticRoute(BaseModel):
     path: str = ""
     source: str = "unknown"
     evidence_refs: list[str] = Field(default_factory=list)
+    # OBSERVED_HTTP | DISCOVERED_FROM_SOURCE | INFERRED. A JS-derived route
+    # with no HTTP response must never read as a live HTTP observation.
+    discovery_state: str = "OBSERVED_HTTP"
 
     def ensure_id(self) -> str:
         if not self.id:
@@ -138,6 +141,8 @@ class SemanticEndpoint(BaseModel):
     is_mutation: bool = False  # POST/PUT/PATCH/DELETE or state-changing keyword
     api_version: str = ""
     response_hints: list[str] = Field(default_factory=list)  # json, html, redirect...
+    # --- Source-vs-observation classification ---
+    discovery_state: str = "OBSERVED_HTTP"  # OBSERVED_HTTP | DISCOVERED_FROM_SOURCE | INFERRED
 
     def ensure_id(self) -> str:
         if not self.id:
@@ -190,12 +195,27 @@ class SemanticEndpoint(BaseModel):
 class SemanticParameter(BaseModel):
     id: str = ""
     name: str = ""
-    location: str = "query"
+    location: str = "query"  # query/path/header/body/json/form/multipart
     endpoint: str = ""
     source: str = "unknown"
     evidence_refs: list[str] = Field(default_factory=list)
     # --- Phase 8 parameter class (object_id, pagination, filter, url_fetch...) ---
     param_class: str = ""
+    # --- Explicit ownership provenance (endpoint-specific binding) ---
+    endpoint_id: str = ""
+    provenance: str = "UNKNOWN"  # OBSERVED_REQUEST|HTML_FORM|JS_REQUEST_CONSTRUCTION|OPENAPI|GRAPHQL_SCHEMA|BROWSER_NETWORK|OPERATOR
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    first_seen: str = ""
+
+    @property
+    def parameter_name(self) -> str:
+        return self.name
+
+    def owned_by(self, endpoint_path: str) -> bool:
+        """Invariant: parameter(endpoint A) != parameter(endpoint B) unless
+        endpoint-specific evidence links the parameter to that endpoint."""
+        from horcrux.intel.parameters import has_endpoint_specific_provenance
+        return has_endpoint_specific_provenance(self, endpoint_path)
 
     def ensure_id(self) -> str:
         if not self.id:

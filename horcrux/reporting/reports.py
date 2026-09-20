@@ -14,6 +14,7 @@ from horcrux.models import AuditStatus, ValidationState
 
 
 def markdown(ws, output: Path | None = None) -> Path:
+    from horcrux.models import canonical_finding_severity as _canon
     state = ws.load()
     output = output or (ws.reports / "report.md")
     app = state.get_application_model()
@@ -250,7 +251,7 @@ def markdown(ws, output: Path | None = None) -> Path:
     potential = [f for f in state.findings if f.validation_state == ValidationState.potential]
     if confirmed:
         for f in confirmed:
-            lines.append(f"### [{f.severity.value.upper()}] {f.title} (CONFIRMED)")
+            lines.append(f"### [{_canon(f).upper()}] {f.title} (CONFIRMED)")
             lines.append(f"- **Asset**: `{f.affected_asset or f.target}` — "
                          f"confidence {f.confidence:.0%}")
             for ev in f.evidence[:6]:
@@ -260,13 +261,13 @@ def markdown(ws, output: Path | None = None) -> Path:
             lines.append("")
     if likely:
         for f in likely:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+            lines.append(f"- **[{_canon(f).upper()}]** {f.title} "
                          f"(LIKELY, {f.confidence:.0%})")
             for ev in f.evidence[:4]:
                 lines.append(f"  - {redact_secrets(str(ev))}")
     if potential:
         for f in potential:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+            lines.append(f"- **[{_canon(f).upper()}]** {f.title} "
                          f"(POTENTIAL, {f.confidence:.0%})")
     if not (confirmed or likely or potential):
         lines.append("- *No findings requiring action. See §19 for what this means.*")
@@ -274,7 +275,7 @@ def markdown(ws, output: Path | None = None) -> Path:
     lines += ["## Likely Findings", ""]
     if likely:
         for f in likely:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+            lines.append(f"- **[{_canon(f).upper()}]** {f.title} "
                          f"(LIKELY, {f.confidence:.0%})")
             for ev in f.evidence[:4]:
                 lines.append(f"  - {redact_secrets(str(ev))}")
@@ -283,7 +284,7 @@ def markdown(ws, output: Path | None = None) -> Path:
     lines += ["", "## Potential Findings", ""]
     if potential:
         for f in potential:
-            lines.append(f"- **[{f.severity.value.upper()}]** {f.title} "
+            lines.append(f"- **[{_canon(f).upper()}]** {f.title} "
                          f"(POTENTIAL, {f.confidence:.0%})")
             for ev in f.evidence[:4]:
                 lines.append(f"  - {redact_secrets(str(ev))}")
@@ -422,15 +423,28 @@ def markdown(ws, output: Path | None = None) -> Path:
             lines.append(f"- {idx}. **{action.title}** (Score: {int(action.score)}): {action.reason}")
     lines += [""]
 
-    # 19. Assessment completeness
+    # 19. Assessment completeness (authoritative state: same as next/assess/scan/status)
     lines += ["## 19. Assessment Completeness", ""]
     try:
         from horcrux.intel.coverage import assessment_completeness
+        from horcrux.core.actions import get_authoritative_assessment_state
         comp = assessment_completeness(state)
+        auth = get_authoritative_assessment_state(state)
         lines.append(f"- **Sufficient**: `{comp['sufficient']}`")
         lines.append(f"- **High-value surfaces**: {comp['high_value_surfaces']}")
         lines.append(f"- **Open hypotheses**: {comp['open_hypotheses']}")
         lines.append(f"- **Pending high-value investigations**: {comp['pending_high_investigations']}")
+        lines.append(f"- **Authoritative queue**: executable={auth['queue_executable']} "
+                     f"blocked={auth['blocked_count']} insufficient={auth['insufficient']} "
+                     f"unresolved_hypotheses={auth['unresolved_hypotheses']} "
+                     f"exhausted={auth['exhausted']}")
+        if auth["exhausted"]:
+            lines.append("- **Assessment state**: `EXHAUSTED` — no executable investigations remain. "
+                         "Blocked/insufficient items and required operator inputs are listed in §14–§15.")
+        if auth.get("required_operator_inputs"):
+            lines.append(f"- **Required operator inputs**: {'; '.join(auth['required_operator_inputs'][:3])}")
+        if auth.get("unavailable_capabilities"):
+            lines.append(f"- **Unavailable capabilities**: {'; '.join(auth['unavailable_capabilities'][:3])}")
         if comp.get("external_engine_verdict") and comp["external_engine_verdict"] != "NOT_ASSESSED":
             lines.append(f"- **External engine verdict**: `{comp['external_engine_verdict']}` "
                          f"(executed: {', '.join(comp.get('external_engines_executed', [])) or 'none'}; "

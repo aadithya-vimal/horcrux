@@ -323,7 +323,11 @@ def validate_admin_surface(response: httpx.Response, baseline: BaselineFingerpri
 
 
 def validate_robots_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
-    """Validates robots.txt formatting."""
+    """Robots.txt is RECONNAISSANCE, never a CONFIRMED vulnerability.
+
+    Existence alone discloses crawler policy; a finding requires a
+    security-property-specific oracle (validated artifact access).
+    """
     if response.status_code != 200 or baseline.is_similar(response):
         return ValidationResult(
             is_valid=False,
@@ -337,16 +341,17 @@ def validate_robots_content(response: httpx.Response, baseline: BaselineFingerpr
     if re.search(r"(?im)^\s*(?:user-agent|disallow|allow|sitemap)\s*:", text):
         disallows = re.findall(r"(?im)^\s*disallow\s*:\s*(\S+)", text)
         return ValidationResult(
-            is_valid=True,
-            confidence=0.99,
-            validation_state=ValidationState.confirmed,
+            is_valid=False,
+            confidence=0.60,
+            validation_state=ValidationState.unverified,
             audit_status=AuditStatus.audited,
             evidence=[
-                "Valid robots.txt discovered.",
+                "robots.txt is reconnaissance (crawler policy), not a vulnerability.",
                 f"Disallowed entries ({len(disallows)}): {', '.join(disallows[:5])}",
+                "Requires artifact-specific oracle before any finding.",
             ],
-            why_it_matters="Discloses hidden paths, administrative consoles, or developer assets intended to be unindexed.",
-            recommended_next_action="Investigate paths disclosed in Disallow directives.",
+            why_it_matters="Discloses paths operators chose not to index; probe each artifact individually.",
+            recommended_next_action="Probe each Disallow artifact with its own validator; do not file a finding for robots.txt itself.",
         )
 
     return ValidationResult(
@@ -429,7 +434,9 @@ def validate_backup_content(response: httpx.Response, baseline: BaselineFingerpr
 
 
 def validate_ftp_directory_listing(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
-    """Validates exposed /ftp directory listing and sensitive backup files."""
+    """Route existence alone != directory listing. Requires actual
+    directory/index evidence (Index of + parent/last-modified markers or
+    explicit directory-listing title) plus disclosed files."""
     if response.status_code != 200 or baseline.is_similar(response):
         return ValidationResult(
             is_valid=False,
@@ -441,7 +448,11 @@ def validate_ftp_directory_listing(response: httpx.Response, baseline: BaselineF
     text = response.text.lower()
     files = re.findall(r'<a\s+href="[^"]*\/([^"\/]+)">', response.text, re.I) or re.findall(r'([a-zA-Z0-9_\-\.]+\.(?:bak|kdbx|sql|json|md|egg|yml|yaml|conf|key|zip|tar\.gz))', response.text, re.I)
     sensitive = [f for f in files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
-    is_listing = ("directory listing" in text or "index of" in text or "<title>directory listing" in text or bool(sensitive))
+    has_index_markers = (
+        "index of /" in text and ("parent directory" in text or "last modified" in text)
+    ) or re.search(r"<title>\s*index of\s+[^<]+</title>", response.text, re.I) is not None
+    has_listing_title = "directory listing" in text or "<title>directory listing" in text
+    is_listing = bool((has_index_markers or has_listing_title) and (files or sensitive))
     if is_listing and response.status_code == 200:
         return ValidationResult(
             is_valid=True,

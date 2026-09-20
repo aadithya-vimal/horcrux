@@ -597,6 +597,16 @@ def _render_security_coverage(target: str):
                   f"([blue]{cov['total_executed']}[/blue] executed / [white]{cov['total_applicable']}[/white] applicable derived tests)")
     console.print(f"[dim]Executable: {total_executable} | Blocked/requirements: {cov['total_blocked']} | "
                   f"Insufficient evidence: {total_insufficient} | Not tested: {total_not_tested}[/dim]")
+    try:
+        _dd = cov.get("deep_delta", {}) or {}
+        if _dd:
+            console.print(f"[dim]Matrix: applicable={cov.get('total_applicable', 0)} executable={total_executable} "
+                          f"executed={cov.get('total_executed', 0)} blocked={cov.get('total_blocked', 0)} "
+                          f"not_applicable={cov.get('total_not_applicable', 0)} | "
+                          f"deep delta: standard={_dd.get('standard_applicable', 0)} "
+                          f"deep={_dd.get('deep_applicable', 0)} added={_dd.get('added', 0)}[/dim]")
+    except Exception:
+        pass
     console.print("[bold yellow]⚠ INVARIANT:[/bold yellow] [dim]NOT TESTED != SECURE. Absence of evidence is not evidence of absence.[/dim]\n")
 
 

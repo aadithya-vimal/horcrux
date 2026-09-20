@@ -132,8 +132,9 @@ def run(
         if def_url not in seen_urls:
             seen_urls.add(def_url)
             # status=0: unprobed candidate; the validation loop below probes
-            # each URL live and records the real status.
-            combined_paths.append(DiscoveredPath(url=def_url, path=def_path, status=0, source="known_targets"))
+            # each URL live and records the real status. Never HTTP evidence.
+            combined_paths.append(DiscoveredPath(url=def_url, path=def_path, status=0, source="known_targets",
+                                                 discovery_state="DISCOVERED_FROM_SOURCE"))
 
     # 4. Endpoint Validation Pipeline
     ws.set_subsystem_state("web_validation", SubsystemState.RUNNING)
@@ -179,7 +180,8 @@ def run(
                 d_url = f"{scheme}://{target}:{port}{d_clean}"
                 if d_url not in seen_urls:
                     seen_urls.add(d_url)
-                    combined_paths.append(DiscoveredPath(url=d_url, path=d_clean, status=0, source="robots.txt"))
+                    combined_paths.append(DiscoveredPath(url=d_url, path=d_clean, status=0, source="robots.txt",
+                                                         discovery_state="DISCOVERED_FROM_SOURCE"))
 
         specific_validator = registry.get(clean_path)
         if specific_validator:

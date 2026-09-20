@@ -163,6 +163,7 @@ def analyze_javascript_and_routes(
                             validated=False,
                             validation_state=ValidationState.potential,
                             evidence_classification=EvidenceClassification.CANDIDATE,
+                            discovery_state="DISCOVERED_FROM_SOURCE",
                         )
                     )
                     observations.append(

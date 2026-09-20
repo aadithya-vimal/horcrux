@@ -437,8 +437,9 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
                 re.match(r"^ref:\s*refs/heads/[A-Za-z0-9_.\-]+", _head_text)
                 or re.match(r"^[0-9a-f]{40}$", _head_text)))
             sensitive_files = [f for f in exposed_files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
+            has_index = ("index of /" in body_lower and ("parent directory" in body_lower or "last modified" in body_lower))
             is_dir_listing = bool(
-                ("directory listing" in body_lower or "index of" in body_lower or "/ftp" in path)
+                ("directory listing" in body_lower or has_index)
                 and resp.status_code == 200
                 and (sensitive_files or exposed_files or "<a href" in body_lower)
             )

@@ -94,6 +94,73 @@ class SecurityTestCase(BaseModel):
         return self.id
 
 
+class EndpointSecurityTest(SecurityTestCase):
+    """Endpoint-bound property test. MUST NOT require a synthetic parameter.
+
+    Examples: authentication requirement, authorization boundary, excessive
+    data exposure, method tampering, content-type behavior, security
+    headers, CORS, cache behavior, error handling, endpoint exposure.
+    """
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.asset_type != "endpoint":
+            raise ValueError("EndpointSecurityTest requires asset_type='endpoint'")
+        # Binding enforcement (no synthetic parameter) is applied in
+        # derive_applicable_tests._add; construction stays lenient so
+        # invalid candidates filter instead of crashing derivation.
+
+
+class ParameterSecurityTest(SecurityTestCase):
+    """Parameter-bound test. Requires an owned parameter binding:
+    endpoint-specific provenance linking parameter -> endpoint."""
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.asset_type != "parameter":
+            raise ValueError("ParameterSecurityTest requires asset_type='parameter'")
+        # Ownership enforcement lives in derive_applicable_tests._add.
+
+
+# Families that `scan --deep` additionally enables. Deep must expand the
+# *applicable executable test set*, never just enumeration/retries/waits.
+DEEP_EXTRA_FAMILIES: tuple[str, ...] = (
+    TestFamily.API_SECURITY.value,  # method-tampering / content-type / headers / CORS / cache / error semantics
+    TestFamily.AUTH_ENFORCEMENT.value,  # unauthenticated probing beyond protected/mutation endpoints
+    TestFamily.CONFIG_EXPOSURE.value,  # backup/config artifact oracles on API-adjacent paths
+)
+
+
+def _is_deep(state: Any | None) -> bool:
+    try:
+        cfg = state.get_engagement_config() if state is not None and hasattr(state, "get_engagement_config") else None
+        prof = ""
+        if cfg is not None:
+            prof = str(getattr(cfg, "assessment_profile", "") or "")
+            if hasattr(cfg, "model_dump"):
+                prof = str((cfg.model_dump().get("assessment_profile") or prof))
+            elif isinstance(cfg, dict):
+                prof = str(cfg.get("assessment_profile", prof))
+        if prof.lower() in ("deep", "full"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def matrix_summary(tests: list[SecurityTestCase]) -> dict[str, int]:
+    return {"applicable": len(tests)}
+
+
+def matrix_delta(standard: list[SecurityTestCase], deep: list[SecurityTestCase]) -> dict[str, Any]:
+    s_ids = {t.ensure_id() for t in standard}
+    d_ids = {t.ensure_id() for t in deep}
+    return {
+        "standard_applicable": len(s_ids),
+        "deep_applicable": len(d_ids),
+        "added": len(d_ids - s_ids),
+        "added_ids": sorted(d_ids - s_ids)[:50],
+    }
+
+
 # Instance-identifier match on a NORMALIZED path only (never on scheme/host,
 # so 127.0.0.1 octets can never read as "/1"). Collections such as
 # GET /api/Products are not instance references.
@@ -131,15 +198,59 @@ def path_has_instance_id(path: str) -> bool:
 def derive_applicable_tests(
     app: ApplicationModel,
     state: Any | None = None,
+    profile: str = "",
 ) -> list[SecurityTestCase]:
-    """Derive all applicable security test cases from the current application model."""
+    """Derive all applicable security test cases from the current application model.
+
+    Only semantically bound tests are emitted:
+    - endpoint tests never carry a synthetic parameter;
+    - parameter tests require endpoint-specific ownership provenance.
+    `profile="deep"` (or engagement assessment_profile deep/full) expands
+    the applicable executable set with additional endpoint families.
+    """
     test_cases: list[SecurityTestCase] = []
     seen_ids: set[str] = set()
+    deep = (profile or "").lower() in ("deep", "full") or _is_deep(state)
 
     def _normalize_path(p: str) -> str:
         return normalize_matrix_path(p)
 
+    _known_endpoint_paths: set[str] = set()
+    try:
+        for _e in app.endpoints:
+            _known_endpoint_paths.add(_normalize_path(_e.path))
+    except Exception:
+        pass
+
+    def _owned(pname: str, epath: str) -> bool:
+        try:
+            from horcrux.intel.parameters import has_endpoint_specific_provenance
+            for _p in app.parameters:
+                if (_p.name or "") != pname:
+                    continue
+                if _normalize_path(_p.endpoint or "") != epath:
+                    continue
+                if has_endpoint_specific_provenance(_p, epath):
+                    return True
+            return False
+        except Exception:
+            return False
+
     def _add(tc: SecurityTestCase) -> None:
+        # Semantic binding enforcement (no silent synthetic tests):
+        # - endpoint tests must not carry a parameter;
+        # - parameter tests require endpoint-specific ownership.
+        if tc.asset_type == "endpoint" and (tc.target_parameter or "").strip():
+            return
+        if tc.asset_type == "parameter":
+            if not (tc.target_parameter or "").strip():
+                return
+            if not (tc.target_path or "").strip():
+                return
+            if tc.target_path not in _known_endpoint_paths:
+                return
+            if not _owned(tc.target_parameter, tc.target_path):
+                return
         _contract_for(tc)
         tc.ensure_id()
         if tc.id not in seen_ids:
@@ -315,8 +426,7 @@ def derive_applicable_tests(
         if has_obj or has_param_obj_ref:
             bola_suffix = "" if has_obj else f" via object parameter(s) {', '.join(bound_obj_params[:2])}"
             _add(
-                SecurityTestCase(
-                    family=TestFamily.BOLA_IDOR,
+                EndpointSecurityTest(family=TestFamily.BOLA_IDOR,
                     name=f"BOLA / IDOR authorization boundary check on {method} {path}{bola_suffix}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -332,8 +442,7 @@ def derive_applicable_tests(
                 )
             )
             _add(
-                SecurityTestCase(
-                    family=TestFamily.AUTHZ_HORIZONTAL,
+                EndpointSecurityTest(family=TestFamily.AUTHZ_HORIZONTAL,
                     name=f"Horizontal authorization comparison on {method} {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -352,8 +461,7 @@ def derive_applicable_tests(
         # Admin / Privileged Endpoints
         if is_admin:
             _add(
-                SecurityTestCase(
-                    family=TestFamily.AUTHZ_VERTICAL,
+                EndpointSecurityTest(family=TestFamily.AUTHZ_VERTICAL,
                     name=f"Privilege boundary enforcement on administrative endpoint {method} {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -372,8 +480,7 @@ def derive_applicable_tests(
         # Authentication Enforcement on Protected or State-Changing Endpoints
         if ep.authentication == "required" or ep.is_mutation or is_admin:
             _add(
-                SecurityTestCase(
-                    family=TestFamily.AUTH_ENFORCEMENT,
+                EndpointSecurityTest(family=TestFamily.AUTH_ENFORCEMENT,
                     name=f"Test unauthenticated and anonymous access to {method} {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -392,8 +499,7 @@ def derive_applicable_tests(
         # GraphQL Tests
         if is_graphql:
             _add(
-                SecurityTestCase(
-                    family=TestFamily.GRAPHQL_INTROSPECTION,
+                EndpointSecurityTest(family=TestFamily.GRAPHQL_INTROSPECTION,
                     name=f"GraphQL introspection and schema validation on {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -413,8 +519,7 @@ def derive_applicable_tests(
         pl = path.lower()
         if pl.startswith(("/api/", "/rest/", "/v1/", "/v2/", "/v3/")) and not is_graphql:
             _add(
-                SecurityTestCase(
-                    family=TestFamily.API_SECURITY,
+                EndpointSecurityTest(family=TestFamily.API_SECURITY,
                     name=f"API security semantics (excessive data / mass assignment / method tampering) on {method} {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -433,8 +538,7 @@ def derive_applicable_tests(
         # Sensitive Directory / Information Exposure Tests
         if path in ("/ftp", "/ftp/", "/robots.txt", "/sitemap.xml") or path.endswith((".env", ".git", ".bak", ".kdbx")):
             _add(
-                SecurityTestCase(
-                    family=TestFamily.CONFIG_EXPOSURE,
+                EndpointSecurityTest(family=TestFamily.CONFIG_EXPOSURE,
                     name=f"Inspect sensitive directory or configuration exposure at {path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -477,8 +581,7 @@ def derive_applicable_tests(
         # Injection probes for semantic query/search/filter/object parameters
         if role in (ParameterSemanticRole.SEARCH_QUERY, ParameterSemanticRole.OBJECT_ID, ParameterSemanticRole.USER_ID, ParameterSemanticRole.SORT_ORDER) or param.location in ("body",):
             _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_SQLI,
+                ParameterSecurityTest(family=TestFamily.PARAM_SQLI,
                     name=f"Test SQL/NoSQL injection semantics on parameter '{p_name}' at {endpoint_path}",
                     asset_id=param.id,
                     asset_type="parameter",
@@ -497,8 +600,7 @@ def derive_applicable_tests(
         # Command-injection probes on the same semantic input surface
         if is_input:
             _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_CMDI,
+                ParameterSecurityTest(family=TestFamily.PARAM_CMDI,
                     name=f"Test OS command injection semantics on parameter '{p_name}' at {endpoint_path}",
                     asset_id=param.id,
                     asset_type="parameter",
@@ -517,8 +619,7 @@ def derive_applicable_tests(
         # Cross-site scripting probes on text-bearing parameters
         if role in (ParameterSemanticRole.SEARCH_QUERY, ParameterSemanticRole.GENERIC_INPUT) or p_name.lower() in ("q", "query", "search", "keyword", "term", "filter", "message", "feedback", "comment", "name", "email"):
             _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_XSS,
+                ParameterSecurityTest(family=TestFamily.PARAM_XSS,
                     name=f"Test reflected XSS context on parameter '{p_name}' at {endpoint_path}",
                     asset_id=param.id,
                     asset_type="parameter",
@@ -537,8 +638,7 @@ def derive_applicable_tests(
         # SSRF probes
         if role in (ParameterSemanticRole.TARGET_URL, ParameterSemanticRole.REDIRECT_URL):
             _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_SSRF,
+                ParameterSecurityTest(family=TestFamily.PARAM_SSRF,
                     name=f"Validate server-side request behavior (SSRF) on parameter '{p_name}' at {endpoint_path}",
                     asset_id=param.id,
                     asset_type="parameter",
@@ -557,8 +657,7 @@ def derive_applicable_tests(
         # Path Traversal probes
         if role in (ParameterSemanticRole.FILE_PATH, ParameterSemanticRole.SEARCH_QUERY):
             _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_TRAVERSAL,
+                ParameterSecurityTest(family=TestFamily.PARAM_TRAVERSAL,
                     name=f"Test path traversal and file disclosure on parameter '{p_name}' at {endpoint_path}",
                     asset_id=param.id,
                     asset_type="parameter",
@@ -574,46 +673,9 @@ def derive_applicable_tests(
                 )
             )
 
-    # Discovered Search Endpoints with implied query parameters
-    for ep in app.endpoints:
-        ep_path = _normalize_path(ep.path)
-        if is_static_asset_endpoint(ep_path):
-            continue
-        if any(k in ep_path.lower() for k in ("search", "find", "query", "filter")):
-            _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_SQLI,
-                    name=f"Test SQL/NoSQL injection semantics on parameter 'q' at {ep_path}",
-                    asset_id=f"param-{fingerprint(ep_path, 'q')}",
-                    asset_type="parameter",
-                    target_path=ep_path,
-                    target_parameter="q",
-                    specialist="WebAgent",
-                    candidate_tools=["sqli_probe", "param_fuzz"],
-                    required_capabilities=["http"],
-                    prerequisites=["web_target"],
-                    vulnerability_classes=["injection"],
-                    priority=0.88,
-                    evidence_refs=[ep.id],
-                )
-            )
-            _add(
-                SecurityTestCase(
-                    family=TestFamily.PARAM_XSS,
-                    name=f"Test reflected XSS context on parameter 'q' at {ep_path}",
-                    asset_id=f"param-{fingerprint(ep_path, 'q-xss')}",
-                    asset_type="parameter",
-                    target_path=ep_path,
-                    target_parameter="q",
-                    specialist="WebAgent",
-                    candidate_tools=["xss_probe", "param_fuzz"],
-                    required_capabilities=["http"],
-                    prerequisites=["web_target"],
-                    vulnerability_classes=["xss"],
-                    priority=0.84,
-                    evidence_refs=[ep.id],
-                )
-            )
+    # NOTE: synthetic `q` injection removed. A parameter test is emitted
+    # only for endpoint-owned parameters (see _add ownership gate). Route
+    # text ("search"/"filter") never implies parameter ownership.
 
     # GraphQL authorization boundary tests (generic: any GraphQL surface)
     for ep in app.endpoints:
@@ -622,8 +684,7 @@ def derive_applicable_tests(
             continue
         if "graphql" in ep_path.lower():
             _add(
-                SecurityTestCase(
-                    family=TestFamily.GRAPHQL_AUTHZ,
+                EndpointSecurityTest(family=TestFamily.GRAPHQL_AUTHZ,
                     name=f"GraphQL object/field authorization boundary check on {ep_path}",
                     asset_id=ep.id,
                     asset_type="endpoint",
@@ -646,8 +707,7 @@ def derive_applicable_tests(
         anchor = _normalize_path(_upload_eps[0].path) if _upload_eps else (getattr(_upload_forms[0], "action", "") or "/upload")
         anchor_id = _upload_eps[0].id if _upload_eps else fingerprint("form", anchor)
         _add(
-            SecurityTestCase(
-                family=TestFamily.FILE_UPLOAD,
+            EndpointSecurityTest(family=TestFamily.FILE_UPLOAD,
                 name=f"Test file upload validation and storage exposure at {anchor}",
                 asset_id=anchor_id,
                 asset_type="endpoint",
@@ -662,6 +722,65 @@ def derive_applicable_tests(
                 evidence_refs=[anchor_id],
             )
         )
+
+    # 2b. Deep-profile expansion: additional *executable* endpoint families.
+    # Deep enables more work, not more enumeration/retries/waits: method
+    # tampering, content-type, security headers, CORS, cache, and error
+    # handling semantics on every applicable endpoint.
+    if deep:
+        for ep in app.endpoints:
+            ep_path = _normalize_path(ep.path)
+            if is_static_asset_endpoint(ep_path):
+                continue
+            method = ep.method.upper()
+            _add(
+                EndpointSecurityTest(family=TestFamily.API_SECURITY,
+                    name=f"Deep method-tampering and content-type semantics on {method} {ep_path}",
+                    asset_id=ep.id,
+                    asset_type="endpoint",
+                    target_path=ep_path,
+                    target_method=method,
+                    specialist="WebAgent",
+                    candidate_tools=["api_probe", "http_probe"],
+                    required_capabilities=["http"],
+                    prerequisites=["web_target"],
+                    vulnerability_classes=["api_security"],
+                    priority=0.70,
+                    evidence_refs=[ep.id],
+                )
+            )
+            _add(
+                EndpointSecurityTest(family=TestFamily.AUTH_ENFORCEMENT,
+                    name=f"Deep unauthenticated and header-trust probe on {method} {ep_path}",
+                    asset_id=ep.id,
+                    asset_type="endpoint",
+                    target_path=ep_path,
+                    target_method=method,
+                    specialist="AuthenticationAgent",
+                    candidate_tools=["auth_probe", "http_probe"],
+                    required_capabilities=["http"],
+                    prerequisites=["web_target"],
+                    vulnerability_classes=["authentication"],
+                    priority=0.68,
+                    evidence_refs=[ep.id],
+                )
+            )
+            _add(
+                EndpointSecurityTest(family=TestFamily.CONFIG_EXPOSURE,
+                    name=f"Deep headers/CORS/cache/error-handling exposure review on {ep_path}",
+                    asset_id=ep.id,
+                    asset_type="endpoint",
+                    target_path=ep_path,
+                    target_method="GET",
+                    specialist="WebAgent",
+                    candidate_tools=["http_probe", "endpoint_validate"],
+                    required_capabilities=["http"],
+                    prerequisites=["web_target"],
+                    vulnerability_classes=["information_disclosure"],
+                    priority=0.66,
+                    evidence_refs=[ep.id],
+                )
+            )
 
     # 3. Workflows & Business Logic
     for wf in getattr(app, "workflows", []):
@@ -980,6 +1099,14 @@ def compute_security_test_coverage(state: Any) -> dict[str, Any]:
 
     completeness_pct = (total_executed / total_applicable * 100.0) if total_applicable > 0 else 0.0
 
+    # Deep delta: standard vs deep applicable sets on the same model.
+    try:
+        _std = derive_applicable_tests(app, None, profile="standard")
+        _deep = derive_applicable_tests(app, None, profile="deep")
+        _delta = matrix_delta(_std, _deep)
+    except Exception:
+        _delta = {"standard_applicable": total_applicable, "deep_applicable": total_applicable, "added": 0, "added_ids": []}
+
     return {
         "surface_elements": surface_elements,
         "total_applicable": total_applicable,
@@ -992,8 +1119,17 @@ def compute_security_test_coverage(state: Any) -> dict[str, Any]:
         "total_failed": total_failed,
         "total_pending": total_pending,
         "total_not_tested": total_pending,
+        "total_not_applicable": 0,
+        "applicable": total_applicable,
+        "executable": total_executable,
+        "executed": total_executed,
+        "blocked": total_blocked,
+        "not_applicable": 0,
         "completeness_percentage": completeness_pct,
         "family_breakdown": list(family_stats.values()),
         "test_details": test_details,
+        "deep_delta": _delta,
+        "standard_applicable": _delta.get("standard_applicable", total_applicable),
+        "deep_applicable": _delta.get("deep_applicable", total_applicable),
     }
 
