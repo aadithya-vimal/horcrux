@@ -596,14 +596,14 @@ def validate_api_surface(request_fn: RequestFn, method: str, url: str,
     tampered = request_fn("PUT" if method == "GET" else "GET", url)
     if tampered.get("status") == 200 and len(tampered.get("text", "")) > 50:
         details["method_tampering"] = {"status": tampered.get("status")}
-        ev.append(build_evidence(capability, test_id, url, {"method": "PUT-tamper"}, tampered,
+        ev.append(build_evidence(capability, test_id, url, {"method": "PUT", "probe": "method-tamper"}, tampered,
                                  tampered.get("text", "")[:600], "", stage="SUPPORTED"))
     # mass-assignment probe: non-destructive privileged-field guess
     guess = request_fn("POST", url, body={"role": "admin", "isAdmin": True, "probe_only": True})
     gbody = guess.get("text", "") or ""
     if guess.get("status") in (200, 201) and re.search(r'"role"\s*:\s*"admin"|isAdmin"?\s*:\s*true', gbody, re.I):
         details["mass_assignment"] = True
-        ev.append(build_evidence(capability, test_id, url, {"method": "POST-mass-assign"}, guess,
+        ev.append(build_evidence(capability, test_id, url, {"method": "POST", "probe": "mass-assign"}, guess,
                                  gbody[:600], "role=admin", stage="SUPPORTED"))
     if details.get("excessive_data") or details.get("mass_assignment"):
         return ValidatorResult("STRONG_API_EVIDENCE", 0.85, ev, details, "SUPPORTED")

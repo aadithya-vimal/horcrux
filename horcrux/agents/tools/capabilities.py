@@ -417,11 +417,25 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
             ms = int((time.monotonic() - t0) * 1000)
             body_sample = resp.text[:4000]
             body_lower = body_sample.lower()
+            # Strict env-file evidence: HTML documents (e.g. SPA fallback on
+            # /.env) are never environment configuration, no matter which
+            # substrings they contain. Require KEY=VALUE line syntax.
+            _ctype = resp.headers.get("content-type", "").lower()
+            _is_html = ("html" in _ctype or "<html" in body_lower
+                        or "<body" in body_lower or "<!doctype html" in body_lower)
             env_keys = []
-            if "DB_" in body_sample or "SECRET" in body_sample or "KEY" in body_sample:
-                env_keys = [line.split("=")[0].strip() for line in body_sample.splitlines() if "=" in line and not line.startswith("#")][:5]
+            if not _is_html and ("DB_" in body_sample or "SECRET" in body_sample or "KEY" in body_sample):
+                kv_lines = [ln.strip() for ln in body_sample.splitlines()[:60]
+                            if re.match(r"^[A-Za-z0-9_]{2,64}\s*=\s*.+$", ln.strip())]
+                if len(kv_lines) >= 2:
+                    env_keys = [ln.split("=")[0].strip() for ln in kv_lines][:5]
 
             exposed_files = re.findall(r'([a-zA-Z0-9_\-\.]+\.(?:bak|kdbx|sql|json|md|egg|yml|yaml|conf|key|zip|tar\.gz))', body_sample, re.I)
+            # Strict git-HEAD evidence: ref line or 40-hex SHA, never HTML.
+            _head_text = body_sample.strip()
+            git_head = bool(resp.status_code == 200 and not _is_html and (
+                re.match(r"^ref:\s*refs/heads/[A-Za-z0-9_.\-]+", _head_text)
+                or re.match(r"^[0-9a-f]{40}$", _head_text)))
             sensitive_files = [f for f in exposed_files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
             is_dir_listing = bool(
                 ("directory listing" in body_lower or "index of" in body_lower or "/ftp" in path)
@@ -437,6 +451,7 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
                 "response_body": body_sample,
                 "headers": dict(resp.headers),
                 "env_keys": env_keys,
+                "git_head": git_head,
                 "directory_listing": is_dir_listing,
                 "exposed_files": sensitive_files or exposed_files,
                 "verified_content": bool(resp.status_code == 200 and len(resp.content) > 0),

@@ -771,12 +771,17 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
                     vpath = raw_target.split("?")[0] or "/"
                 if not vpath.startswith("/"):
                     vpath = "/" + vpath
-                ingest_http_request(app, method=str(req.get("method", "GET") or "GET"),
+                vmethod = str(req.get("method", "GET") or "GET").upper()
+                if vmethod not in ("GET", "POST", "PUT", "PATCH", "DELETE",
+                                   "HEAD", "OPTIONS"):
+                    vmethod = "GET"
+                ingest_http_request(app, method=vmethod,
                                     path=vpath, identity=str(data.get("authentication_context", "anonymous") or "anonymous"),
                                     source=source)
-                vparam = str(req.get("param", "") or data.get("payload", "") or "")
-                # payload may be a full value; only anchor plausible param names.
-                if vparam and len(vparam) <= 64 and " " not in vparam and "/" not in vparam:
+                vparam = str(req.get("param", "") or "")
+                # Anchor plausible server-side identifiers only: payload
+                # values (e.g. "role=admin") must never become parameters.
+                if vparam and re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$", vparam):
                     sem = SemanticParameter(name=vparam, location="query",
                                             endpoint=vpath, source=source,
                                             evidence_refs=[f"{source}:param:{vparam}"])
@@ -790,6 +795,8 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
                     except Exception:
                         continue
                 for pname in (extra.get("discovered_params") or [])[:10]:
+                    if not re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$", str(pname)):
+                        continue
                     try:
                         sem2 = SemanticParameter(name=str(pname), location="query",
                                                  endpoint=vpath, source=source,
