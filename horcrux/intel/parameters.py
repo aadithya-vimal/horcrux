@@ -38,6 +38,44 @@ class ParameterProvenance(str, Enum):
 
 PARAMETER_LOCATIONS = frozenset({"query", "path", "header", "body", "json", "form", "multipart"})
 
+_OWNING_SOURCES = frozenset({
+    "url", "proxy", "http", "browser", "browser_network",
+    "html_form", "form", "html", "openapi", "swagger", "api_discovery",
+    "graphql", "operator", "observed_request", "fixture",
+})
+
+
+def is_owned_in_model(app_params: object, name: str, endpoint_path: str) -> bool:
+    """True only when the application model carries endpoint-specific
+    evidence for (name, endpoint) from a non-probe source.
+
+    Probe/fuzz observations corroborate but never create ownership:
+    a parameter sprayed by param_fuzz onto an endpoint does not become
+    owned by that endpoint.
+    """
+    want = _norm_path(endpoint_path or "")
+    if not want or not (name or "").strip() or is_static_asset_endpoint(want):
+        return False
+    try:
+        items = list(app_params or [])
+    except TypeError:
+        return False
+    for p in items:
+        if str(getattr(p, "name", "") or "").lower() != str(name).lower():
+            continue
+        if str(getattr(p, "location", "") or "").lower() == "client_state":
+            continue
+        mine = _norm_path(str(getattr(p, "endpoint", "") or ""))
+        if not mine or mine != want or is_static_asset_endpoint(mine):
+            continue
+        prov = str(getattr(p, "provenance", "") or "").upper()
+        if prov and prov != "UNKNOWN":
+            return True
+        if str(getattr(p, "source", "") or "").lower() in _OWNING_SOURCES:
+            return True
+    return False
+
+
 _SOURCE_TO_PROVENANCE: dict[str, ParameterProvenance] = {
     "url": ParameterProvenance.OBSERVED_REQUEST,
     "proxy": ParameterProvenance.OBSERVED_REQUEST,

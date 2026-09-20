@@ -103,7 +103,7 @@ def _assessment_state(port: int):
     for ep in eps:
         ep.ensure_id()
     params = [SemanticParameter(name=n, location="query", endpoint=e,
-                                source="synthetic", evidence_refs=[f"synthetic:{n}"],
+                                source="operator", evidence_refs=[f"synthetic:{n}"],
                                 provenance="OBSERVED_REQUEST", confidence=0.9,
                                 first_seen="synthetic")
               for n, e in [("q", "/search"), ("q", "/reflect"), ("file", "/files"),

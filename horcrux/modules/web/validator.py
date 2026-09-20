@@ -451,7 +451,9 @@ def validate_ftp_directory_listing(response: httpx.Response, baseline: BaselineF
     has_index_markers = (
         "index of /" in text and ("parent directory" in text or "last modified" in text)
     ) or re.search(r"<title>\s*index of\s+[^<]+</title>", response.text, re.I) is not None
-    has_listing_title = "directory listing" in text or "<title>directory listing" in text
+    has_listing_title = ("directory listing" in text or "<title>directory listing" in text
+                         or "listing directory" in text
+                         or ('id="files"' in text and '<a href' in text))
     is_listing = bool((has_index_markers or has_listing_title) and (files or sensitive))
     if is_listing and response.status_code == 200:
         return ValidationResult(

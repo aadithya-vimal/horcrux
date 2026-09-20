@@ -541,6 +541,56 @@ def _ownership_fields(body: str) -> dict:
     return out
 
 
+_TOKEN_RE = re.compile(
+    r"\"(?:token|accessToken|access_token|id_token|jwt|authToken|authentication)\"\s*:",
+    re.I)
+
+
+def validate_auth_bypass_sqli(login_fn: Callable[[dict], dict], url: str,
+                               capability: str = "auth_probe",
+                               test_id: str = "auth-bypass",
+                               auth_context: str = "anonymous") -> ValidatorResult:
+    """Authentication-bypass via SQL injection on login surfaces.
+
+    Baseline (invalid creds, no token) -> controlled bypass mutations in
+    the login identity field -> oracle: HTTP 200 + auth token issued
+    where the baseline received none. Repeatability required.
+    A token for the bypass but none for baseline is confirmation; token
+    for both is a broken oracle (report INSUFFICIENT, never confirm).
+    """
+    base = login_fn({"email": "horcrux-nonexistent-user", "password": "horcrux-invalid"})
+    ev = [build_evidence(capability, test_id, url, {"email": "horcrux-nonexistent-user"},
+                         base, (base.get("text", "") or "")[:800], "",
+                         auth_context=auth_context, stage="OBSERVED")]
+    if base.get("status") == 0:
+        return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, ev, {}, "INSUFFICIENT_EVIDENCE")
+    if _TOKEN_RE.search(base.get("text", "") or ""):
+        ev.append(build_evidence(capability, test_id, url, {"note": "baseline issued token"},
+                                 base, "", "", stage="OBSERVED"))
+        return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.4, ev,
+                               {"oracle_broken": True}, "INSUFFICIENT_EVIDENCE")
+    for payload in ("' OR 1=1--", "admin'--"):
+        mutated = login_fn({"email": payload, "password": "horcrux-invalid"})
+        body = mutated.get("text", "") or ""
+        m = _TOKEN_RE.search(body)
+        fp_base = _fingerprint(base.get("text", "") or "")
+        fp_mut = _fingerprint(body)
+        if mutated.get("status") == 200 and m and fp_mut["hash"] != fp_base["hash"]:
+            repeat = login_fn({"email": payload, "password": "horcrux-invalid"})
+            if repeat.get("status") == 200 and _TOKEN_RE.search(repeat.get("text", "") or ""):
+                ev.append(build_evidence(capability, test_id, url, {"email": payload},
+                                         mutated, body[:1500], payload,
+                                         auth_context=auth_context, stage="CONFIRMED",
+                                         extra={"token_issued": True, "repeatable": True}))
+                return ValidatorResult("STRONG_AUTH_BYPASS_EVIDENCE", 0.92, ev,
+                                       {"auth_bypass": True, "token_issued": True,
+                                        "payload": payload}, "CONFIRMED")
+        ev.append(build_evidence(capability, test_id, url, {"email": payload},
+                                 mutated, body[:600], payload,
+                                 auth_context=auth_context, stage="OBSERVED"))
+    return ValidatorResult("NO_EFFECT", 0.75, ev, {"bypass_rejected": True}, "REFUTED")
+
+
 def validate_authz_differential(fetch_a: Callable[[str], dict], fetch_b: Callable[[str], dict],
                                 object_url_a: str, object_url_b_cross: str,
                                 identity_a: str = "user-a", identity_b: str = "user-b",
@@ -588,10 +638,27 @@ def validate_api_surface(request_fn: RequestFn, method: str, url: str,
     ev = [build_evidence(capability, test_id, url, {"method": "GET"}, base, body[:1200],
                          "", stage="OBSERVED")]
     details: dict[str, Any] = {}
-    # excessive data exposure: sensitive keys in a list/object response
+    # Excessive data exposure: sensitive keys in a list/object response.
+    # Schema/specification documents (OpenAPI/Swagger) describe field
+    # names by design — a "secret" property in a schema is documentation,
+    # not unauthorized data disclosure. Never flag the spec itself.
+    try:
+        _lower_url = (url or "").lower()
+        _is_spec_path = _lower_url.endswith((
+            "openapi.json", "openapi.yaml", "openapi.yml",
+            "swagger.json", "swagger.yaml", "swagger.yml",
+            "swagger-ui.html", "api-docs", "/docs"))
+    except Exception:
+        _is_spec_path = False
+    _is_spec_body = bool(re.search(r'"openapi"\s*:\s*"3|"swagger"\s*:\s*"2', body))
     sens = re.findall(r'"(password|ssn|credit_?card|secret|private_?key|salary)"\s*:', body, re.I)
-    if sens and base.get("status") == 200:
+    if sens and base.get("status") == 200 and not (_is_spec_path or _is_spec_body):
         details["excessive_data"] = sorted(set(s.lower() for s in sens))
+    elif sens and (_is_spec_path or _is_spec_body):
+        ev.append(build_evidence(capability, test_id, url, {"method": "GET"}, base,
+                                 "schema document describes sensitive fields; not data disclosure",
+                                 "", stage="OBSERVED",
+                                 extra={"schema_fields_noted": sorted(set(s.lower() for s in sens))}))
     # method tampering: try unexpected verb on same URL
     tampered = request_fn("PUT" if method == "GET" else "GET", url)
     if tampered.get("status") == 200 and len(tampered.get("text", "")) > 50:

@@ -184,6 +184,21 @@ def test_api_object_exposure_and_mass_assignment():
     assert "excessive_data" in res.details or "mass_assignment" in res.details
 
 
+def test_api_schema_document_is_not_excessive_data():
+    """An OpenAPI schema mentioning "secret" documents the API; it does
+    not disclose unauthorized data (VAmPI /openapi.json false positive)."""
+    spec = ('{"openapi": "3.0.0", "paths": {}, "components": {"schemas": '
+            '{"User": {"properties": {"secret": {"type": "string"}}}}}}')
+
+    def req(method, url, query=None, body=None, **kw):
+        if method == "GET":
+            return _resp(200, spec)
+        return _resp(404, "no")
+    res = sv.validate_api_surface(req, "GET", "http://t.local/openapi.json")
+    assert "excessive_data" not in res.details
+    assert res.verdict in ("NO_EFFECT", "BEHAVIORAL_DIFFERENTIAL"), res.verdict
+
+
 def test_graphql_introspection_needs_field_authz():
     def req(method, url, query=None, body=None, **kw):
         import json as _j

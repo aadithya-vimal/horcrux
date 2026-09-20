@@ -438,8 +438,13 @@ def _adapter_http_probe(ctx: dict) -> CapabilityResult:
                 or re.match(r"^[0-9a-f]{40}$", _head_text)))
             sensitive_files = [f for f in exposed_files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
             has_index = ("index of /" in body_lower and ("parent directory" in body_lower or "last modified" in body_lower))
+            # serve-index style listings (e.g. "<title>listing directory /ftp/</title>"
+            # with <ul id="files"> entries) are directory listings too.
+            has_serve_index = ("listing directory" in body_lower
+                               or ("<title>index of" in body_lower)
+                               or ('id="files"' in body_lower and "<a href" in body_lower))
             is_dir_listing = bool(
-                ("directory listing" in body_lower or has_index)
+                ("directory listing" in body_lower or has_index or has_serve_index)
                 and resp.status_code == 200
                 and (sensitive_files or exposed_files or "<a href" in body_lower)
             )
@@ -747,6 +752,28 @@ def _adapter_param_fuzz(ctx: dict) -> CapabilityResult:
     if not interesting and params:
         interesting = list(params)[:5]
 
+    # Ownership gate: never spray globally discovered or default parameter
+    # names onto unrelated endpoints. Only endpoint-owned parameters may
+    # be fuzzed; otherwise refuse (no requests, no model contamination).
+    try:
+        from horcrux.intel.parameters import is_owned_in_model as _owned_in_model
+        _app = ctx.get("application_model")
+        _model_params = getattr(_app, "parameters", []) if _app is not None else []
+        interesting = [p for p in interesting
+                       if _owned_in_model(_model_params, str(p), endpoint)]
+    except Exception:
+        pass
+    if not interesting:
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("param_fuzz", {"endpoint": endpoint,
+                                  "verdict": "INSUFFICIENT_EVIDENCE",
+                                  "reason": "unowned-parameter: no endpoint-owned parameter; refusing synthetic spray",
+                                  "test_id": f"param_fuzz:{endpoint}:unowned",
+                                  "matrix_family": str(ctx.get("matrix_family", "") or ""),
+                                  "target": target, "access_context": "anonymous"},
+                   evidence=[], provenance="horcrux.security:ownership-gate",
+                   duration_ms=ms)
+
     if _use_offline(target, ctx):
         ms = int((time.monotonic() - t0) * 1000)
         return _ok("param_fuzz", {"endpoint": endpoint, "tested": params,
@@ -793,9 +820,18 @@ def _adapter_param_fuzz(ctx: dict) -> CapabilityResult:
             except Exception:
                 pass
 
-            params_to_test = list(interesting or ["q", "id"])
+            params_to_test = list(interesting)
+            # param_override is honored only when owned; others never
+            # promote a global name onto this endpoint.
             if param_override and param_override not in params_to_test:
-                params_to_test = [param_override] + params_to_test
+                try:
+                    from horcrux.intel.parameters import is_owned_in_model as _owned2
+                    _app2 = ctx.get("application_model")
+                    _mp2 = getattr(_app2, "parameters", []) if _app2 is not None else []
+                    if _owned2(_mp2, str(param_override), endpoint):
+                        params_to_test = [param_override] + params_to_test
+                except Exception:
+                    pass
 
             for p in params_to_test[:3]:
                 tested_params.append(p)
@@ -948,6 +984,10 @@ def _resolve_param_location(ctx: dict, endpoint: str, param: str) -> str | None:
         if loc in ("query", "body", "path"):
             return loc
         return "query"
+    # Model present but no endpoint-specific entry: unresolvable, never
+    # assume "query" (that assumption is the synthetic-spray vector).
+    if param:
+        return None
     return "query"
 
 
@@ -970,9 +1010,9 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
     endpoint = _norm_endpoint(ctx.get("endpoint", ctx.get("path", "/")))
     target = ctx.get("target", "")
     param = ctx.get("parameter") or (ctx.get("parameters") or [""])[0] if ctx.get("parameters") else ctx.get("parameter", "")
-    param = param or ctx.get("target_parameter", "") or "q"
+    param = param or ctx.get("target_parameter", "") or ""
     matrix_family = str(ctx.get("matrix_family", "") or "")
-    test_id = f"{cap_id}:{endpoint}:{param}"
+    test_id = f"{cap_id}:{endpoint}:{param}" if param else f"{cap_id}:{endpoint}:endpoint-only"
     if _use_offline(target, ctx):
         ms = int((time.monotonic() - t0) * 1000)
         return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
@@ -1003,7 +1043,22 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
                        duration_ms=ms)
         location = _resolve_param_location(ctx, endpoint, param)
         if location is None and kind in ("sqli", "xss", "traversal", "ssrf", "cmdi"):
+            try:
+                from horcrux.intel.parameters import is_owned_in_model as _owned4
+                _app4 = ctx.get("application_model")
+                _mp4 = getattr(_app4, "parameters", []) if _app4 is not None else []
+                _is_owned = _owned4(_mp4, param, endpoint) if param else False
+            except Exception:
+                _is_owned = False
             ms = int((time.monotonic() - t0) * 1000)
+            if param and not _is_owned:
+                return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
+                                    "verdict": "INSUFFICIENT_EVIDENCE",
+                                    "reason": "unowned-parameter: parameter has no endpoint-specific evidence; refusing synthetic spray",
+                                    "test_id": test_id, "matrix_family": matrix_family,
+                                    "target": target, "access_context": "anonymous"},
+                           evidence=[], provenance="horcrux.security:ownership-gate",
+                           duration_ms=ms)
             return _ok(cap_id, {"endpoint": endpoint, "parameter": param,
                                 "verdict": "NO_EFFECT",
                                 "reason": "client-state-only-parameter",
@@ -1011,6 +1066,28 @@ def _run_validator_adapter(cap_id: str, ctx: dict, kind: str) -> CapabilityResul
                                 "target": target, "access_context": "anonymous"},
                        evidence=[], provenance="horcrux.security_validators:excluded",
                        duration_ms=ms)
+        if not param and kind in ("sqli", "xss", "traversal", "ssrf", "cmdi"):
+            # No bound parameter: refuse the synthetic spray. Endpoint-level
+            # kinds (auth/api/workflow/upload) proceed without a parameter.
+            try:
+                from horcrux.intel.parameters import is_owned_in_model as _owned3
+                _app3 = ctx.get("application_model")
+                _mp3 = getattr(_app3, "parameters", []) if _app3 is not None else []
+                _owned_names = [str(getattr(p, "name", "")) for p in _mp3
+                                if _owned3(_mp3, str(getattr(p, "name", "")), endpoint)]
+            except Exception:
+                _owned_names = []
+            if not _owned_names:
+                ms = int((time.monotonic() - t0) * 1000)
+                return _ok(cap_id, {"endpoint": endpoint, "parameter": "",
+                                    "verdict": "INSUFFICIENT_EVIDENCE",
+                                    "reason": "unowned-parameter: no endpoint-owned parameter; refusing synthetic spray",
+                                    "test_id": test_id, "matrix_family": matrix_family,
+                                    "target": target, "access_context": "anonymous"},
+                           evidence=[], provenance="horcrux.security:ownership-gate",
+                           duration_ms=ms)
+            param = _owned_names[0]
+            test_id = f"{cap_id}:{endpoint}:{param}"
         location = location or "query"
         method = str(ctx.get("method", "GET")).upper()
         if kind == "sqli":
@@ -1153,7 +1230,28 @@ def _validate_auth_generic(req, method: str, url: str, cap_id: str, test_id: str
             c.update(auth_cookies)
             return req(method, url, headers_=h, cookies_=c)
         return sv.validate_auth_enforcement(anon, _authed, url, capability=cap_id, test_id=test_id)
-    return sv.validate_auth_enforcement(anon, None, url, capability=cap_id, test_id=test_id)
+    enforced = sv.validate_auth_enforcement(anon, None, url, capability=cap_id, test_id=test_id)
+    # Login surfaces get an authentication-bypass attempt: SQL injection
+    # in the identity field with an auth-token oracle (deterministic,
+    # no AI). Only login-ish endpoints; never sprayed elsewhere.
+    try:
+        from urllib.parse import urlparse as _up
+        _path = _up(url).path.lower() if "://" in url else url.lower()
+    except Exception:
+        _path = (url or "").lower()
+    if any(k in _path for k in ("login", "signin", "sign-in", "authenticate", "session")):
+        try:
+            def _login(fields: dict) -> dict:
+                return req("POST", url, body=dict(fields))
+            bypass = sv.validate_auth_bypass_sqli(_login, url, capability=cap_id,
+                                                  test_id=f"{test_id}:bypass")
+            if bypass.verdict == "STRONG_AUTH_BYPASS_EVIDENCE":
+                return bypass
+            # Preserve bypass negative evidence alongside enforcement result.
+            enforced.evidence = list(enforced.evidence or []) + list(bypass.evidence or [])
+        except Exception:
+            pass
+    return enforced
 
 
 def _validate_workflow_generic(req, base_url: str, endpoint: str, ctx: dict,
@@ -1223,7 +1321,7 @@ def _augment_xss_with_browser(ctx: dict, result: CapabilityResult) -> Capability
         return result
     verdict = str(data.get("verdict", ""))
     endpoint = str(data.get("endpoint", ctx.get("endpoint", "/")))
-    param = str(data.get("parameter", ctx.get("parameter", "q")))
+    param = str(data.get("parameter", ctx.get("parameter", "")) or "")
     target = str(ctx.get("target", ""))
     if verdict == "STRONG_XSS_EVIDENCE":
         result.evidence.append(_ev("validator_evidence", {
@@ -1233,6 +1331,16 @@ def _augment_xss_with_browser(ctx: dict, result: CapabilityResult) -> Capability
         }, source="xss_probe", confidence=0.6))
         return result
     base_url = _live_base_url(ctx, target)
+    if not param:
+        # No owned parameter: never invent ?q= for the DOM probe either.
+        result.evidence.append(_ev("validator_evidence", {
+            "capability": "xss_probe", "test_id": data.get("test_id", ""),
+            "stage": "OBSERVED",
+            "extra": {"dom_check": "skipped-no-owned-parameter"},
+        }, source="xss_probe", confidence=0.6))
+        data["dom_check"] = "skipped-no-owned-parameter"
+        result.structured_data = data
+        return result
     token = f"hdom{endpoint.replace('/', '-')[:12]}"
     payload_url = base_url + endpoint
     sep = "&" if "?" in payload_url else "?"

@@ -31,7 +31,10 @@ def _app_with(*endpoints, params=None):
     for path, method in endpoints:
         app.endpoints.append(SemanticEndpoint(path=path, method=method))
     for name, ep in (params or []):
-        p = SemanticParameter(name=name, endpoint=ep, location="query")
+        # Fixture parameters model operator-observed evidence (owned).
+        p = SemanticParameter(name=name, endpoint=ep, location="query",
+                              source="operator", evidence_refs=[f"fixture:{name}"],
+                              provenance="OBSERVED_REQUEST")
         p.ensure_id()
         app.parameters.append(p)
     return app

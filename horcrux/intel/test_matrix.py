@@ -224,15 +224,8 @@ def derive_applicable_tests(
 
     def _owned(pname: str, epath: str) -> bool:
         try:
-            from horcrux.intel.parameters import has_endpoint_specific_provenance
-            for _p in app.parameters:
-                if (_p.name or "") != pname:
-                    continue
-                if _normalize_path(_p.endpoint or "") != epath:
-                    continue
-                if has_endpoint_specific_provenance(_p, epath):
-                    return True
-            return False
+            from horcrux.intel.parameters import is_owned_in_model
+            return is_owned_in_model(app.parameters, pname, epath)
         except Exception:
             return False
 

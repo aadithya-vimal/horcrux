@@ -41,7 +41,7 @@ def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     coverage = state.get_security_coverage()
     coverage.ensure_domains()
     coverage_gaps = {d: coverage.get(d).value for d in coverage.domains}
-    candidates = generate_investigations(app, hypotheses, coverage_gaps)
+    candidates = generate_investigations(app, hypotheses, coverage_gaps, state)
     existing = state.get_investigations()
     merged = merge_investigations(existing, candidates)
     # Continuous replenishment pruning: retire matrix work whose test no

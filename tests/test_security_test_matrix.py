@@ -23,9 +23,12 @@ def test_matrix_derivation_from_rich_application():
         SemanticEndpoint(path="/api/Feedbacks", method="POST", is_mutation=True),
     ])
     app.parameters.extend([
-        SemanticParameter(name="q", endpoint="/rest/products/search"),
-        SemanticParameter(name="id", endpoint="/api/BasketItems/1"),
-        SemanticParameter(name="url", endpoint="/rest/redirect"),
+        SemanticParameter(name="q", endpoint="/rest/products/search", source="operator",
+                          evidence_refs=["fixture:q"], provenance="OBSERVED_REQUEST"),
+        SemanticParameter(name="id", endpoint="/api/BasketItems/1", source="operator",
+                          evidence_refs=["fixture:id"], provenance="OBSERVED_REQUEST"),
+        SemanticParameter(name="url", endpoint="/rest/redirect", source="operator",
+                          evidence_refs=["fixture:url"], provenance="OBSERVED_REQUEST"),
     ])
     app.object_lifecycles.append(
         ObjectLifecycle(object_type="BasketItem", identifier="1")

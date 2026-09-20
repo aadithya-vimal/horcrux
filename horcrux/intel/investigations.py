@@ -507,6 +507,7 @@ def generate_investigations(
     app: ApplicationModel,
     hypotheses: list[Hypothesis],
     coverage_gaps: dict[str, str] | None = None,
+    state: Any | None = None,
 ) -> list[Investigation]:
     """Generate candidate investigations from hypotheses and application state."""
     from horcrux.agents.tools.capabilities import canonical_tool_id
@@ -602,7 +603,7 @@ def generate_investigations(
     # Deterministic test-matrix investigations derived from ApplicationModel assets (Phase B/C)
     try:
         from horcrux.intel.test_matrix import derive_applicable_tests, test_case_to_investigation
-        matrix_tests = derive_applicable_tests(app)
+        matrix_tests = derive_applicable_tests(app, state)
         for tc in matrix_tests:
             inv = test_case_to_investigation(tc)
             if inv.objective.lower() not in seen_objectives:

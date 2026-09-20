@@ -154,6 +154,7 @@ def run(
     )
 
     idx = 0
+    openapi_docs: list[dict] = []
     while idx < len(combined_paths):
         p = combined_paths[idx]
         idx += 1
@@ -182,6 +183,19 @@ def run(
                     seen_urls.add(d_url)
                     combined_paths.append(DiscoveredPath(url=d_url, path=d_clean, status=0, source="robots.txt",
                                                          discovery_state="DISCOVERED_FROM_SOURCE"))
+
+        # Served API schemas are endpoint-specific evidence: parse live
+        # OpenAPI/Swagger documents into modeled operations (dead-code fix:
+        # schemas were fetched but never ingested).
+        if clean_path.lower().endswith(("openapi.json", "swagger.json", "swagger.yaml",
+                                        "openapi.yaml", "openapi.yml", "swagger.yml")) \
+                and resp.status_code == 200:
+            try:
+                _doc = resp.json()
+                if isinstance(_doc, dict) and isinstance(_doc.get("paths"), dict):
+                    openapi_docs.append(_doc)
+            except Exception:
+                pass
 
         specific_validator = registry.get(clean_path)
         if specific_validator:
@@ -264,14 +278,21 @@ def run(
 
     # Feed semantic application model from discovery evidence
     try:
-        from horcrux.intel.ingestion import ingest_javascript_routes, ingest_workspace_state
+        from horcrux.intel.ingestion import (ingest_javascript_routes,
+                                             ingest_openapi_document,
+                                             ingest_workspace_state)
         state = ws.load()
         app = ingest_workspace_state(state)
         if js_candidate_paths:
             js_routes = [p.path for p in js_candidate_paths]
             ingest_javascript_routes(app, js_routes, web_target.parameters, source="javascript")
-            state.set_application_model(app)
-            ws.save(state)
+        for _doc in openapi_docs:
+            try:
+                ingest_openapi_document(app, _doc, source="openapi")
+            except Exception:
+                continue
+        state.set_application_model(app)
+        ws.save(state)
     except Exception:
         pass
 

@@ -640,6 +640,77 @@ def ingest_api_discovery(app: ApplicationModel, endpoints: list,
     return count
 
 
+def ingest_openapi_document(app: ApplicationModel, doc: dict,
+                            source: str = "openapi") -> int:
+    """Parse a live OpenAPI/Swagger document into endpoints + owned params.
+
+    A served schema is endpoint-specific evidence: every documented
+    operation yields an OBSERVED_HTTP endpoint candidate and every
+    documented parameter yields OPENAPI-provenance ownership for exactly
+    that path. Returns number of operations ingested (0 when not a schema).
+    """
+    from horcrux.intel.parameters import provenance_for_source
+    if not isinstance(doc, dict):
+        return 0
+    paths = doc.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return 0
+    count = 0
+    for raw_path, ops in paths.items():
+        if not isinstance(raw_path, str) or not raw_path.startswith("/") or not isinstance(ops, dict):
+            continue
+        path_params: list[dict] = []
+        for maybe in (ops.get("parameters") or []):
+            if isinstance(maybe, dict) and maybe.get("name"):
+                path_params.append(maybe)
+        for method, op in ops.items():
+            if str(method).lower() not in ("get", "post", "put", "patch", "delete", "head", "options"):
+                continue
+            op_params = list(path_params)
+            if isinstance(op, dict):
+                for maybe in (op.get("parameters") or []):
+                    if isinstance(maybe, dict) and maybe.get("name"):
+                        op_params.append(maybe)
+                # requestBody JSON properties are writable body fields.
+                try:
+                    content = ((op.get("requestBody") or {}).get("content") or {})
+                    schema = ((content.get("application/json") or {}).get("schema") or {})
+                    for prop in (schema.get("properties") or {}):
+                        op_params.append({"name": str(prop), "in": "body"})
+                except Exception:
+                    pass
+            ep = SemanticEndpoint(
+                method=str(method).upper(), path=raw_path,
+                parameters=[str(p.get("name")) for p in op_params if p.get("name")],
+                sources=[source],
+                evidence_refs=[f"{source}:{method}:{raw_path}"],
+                discovery_state="OBSERVED_HTTP",
+            )
+            _enrich_endpoint_from_path(ep, raw_path)
+            app.upsert_endpoint(ep)
+            for p in op_params:
+                pname = str(p.get("name") or "").strip()
+                if not pname:
+                    continue
+                loc = str(p.get("in", "query") or "query").lower()
+                if loc not in ("query", "path", "header", "cookie", "body"):
+                    loc = "query" if loc != "cookie" else "header"
+                sem = SemanticParameter(
+                    name=pname, location=loc, endpoint=raw_path,
+                    source=source,
+                    evidence_refs=[f"{source}:param:{pname}@{raw_path}"],
+                    provenance=provenance_for_source(source, ""),
+                    confidence=0.9,
+                    first_seen=f"{source}:{raw_path}",
+                )
+                sem.ensure_id()
+                if not any(q.id == sem.id for q in app.parameters):
+                    app.parameters.append(sem)
+            count += 1
+    _infer_object_types(app)
+    return count
+
+
 def ingest_auth_observation(app: ApplicationModel, mechanism_type: str,
                             login_endpoint: str = "", evidence: str = "",
                             source: str = "auth_probe") -> AuthenticationMechanism:
@@ -776,6 +847,19 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
             elif etype in ("parameter_observation",):
                 pname = data.get("parameter", data.get("name", ""))
                 if pname:
+                    # Corroborate-only: probe/fuzz observations never create
+                    # ownership. A sprayed (name, endpoint) pair must not
+                    # enter the model as a discovered parameter.
+                    from horcrux.intel.parameters import _OWNING_SOURCES, _norm_path
+                    _want = _norm_path(str(data.get("endpoint", "")))
+                    _exists = any(
+                        str(p.name or "").lower() == str(pname).lower()
+                        and _norm_path(p.endpoint or "") == _want
+                        and (str(getattr(p, "provenance", "") or "").upper() not in ("", "UNKNOWN")
+                             or str(p.source or "").lower() in _OWNING_SOURCES)
+                        for p in app.parameters)
+                    if not _exists:
+                        continue
                     sem = SemanticParameter(name=str(pname), location="query",
                                             endpoint=str(data.get("endpoint", "")),
                                             source=source,
@@ -818,13 +902,17 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
                 vparam = str(req.get("param", "") or "")
                 # Anchor plausible server-side identifiers only: payload
                 # values (e.g. "role=admin") must never become parameters.
+                # Corroborate-only: the probed (name, endpoint) pair must
+                # already be owned; validator runs never create ownership.
                 if vparam and re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$", vparam):
-                    sem = SemanticParameter(name=vparam, location="query",
-                                            endpoint=vpath, source=source,
-                                            evidence_refs=[f"{source}:param:{vparam}"])
-                    sem.ensure_id()
-                    if not any(p.id == sem.id for p in app.parameters):
-                        app.parameters.append(sem)
+                    from horcrux.intel.parameters import is_owned_in_model
+                    if is_owned_in_model(app.parameters, vparam, vpath):
+                        sem = SemanticParameter(name=vparam, location="query",
+                                                endpoint=vpath, source=source,
+                                                evidence_refs=[f"{source}:param:{vparam}"])
+                        sem.ensure_id()
+                        if not any(p.id == sem.id for p in app.parameters):
+                            app.parameters.append(sem)
                 extra = data.get("extra", {}) or {}
                 for route in (extra.get("discovered_routes") or [])[:10]:
                     try:
