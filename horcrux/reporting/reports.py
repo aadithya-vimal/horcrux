@@ -183,6 +183,36 @@ def markdown(ws, output: Path | None = None) -> Path:
     likely = [f for f in state.findings if f.validation_state == ValidationState.likely]
     potential = [f for f in state.findings if f.validation_state == ValidationState.potential]
 
+    # 8c. Security-property ledger (deterministic engine state).
+    lines += ["## Property Ledger (Security Properties Evaluated)", ""]
+    try:
+        from horcrux.engine.ledger import ledger_from_matrix_tests
+        from horcrux.intel.test_matrix import derive_applicable_tests
+        _app = state.get_application_model()
+        _tests = derive_applicable_tests(_app, state)
+        _exec_ids = {i.id for i in state.get_investigations()
+                     if getattr(getattr(i, "state", ""), "value", str(getattr(i, "state", ""))) in
+                     {"SUPPORTED", "REFUTED", "COMPLETE", "INSUFFICIENT_EVIDENCE", "FAILED", "BLOCKED"}}
+        _verdicts: dict[str, str] = {}
+        for _inv in state.get_investigations():
+            _sv = getattr(getattr(_inv, "state", ""), "value", str(getattr(_inv, "state", "")))
+            for _obs in (getattr(_inv, "observations", []) or []):
+                if _obs.startswith("matrix_tc_id:"):
+                    _tid = _obs.split(":", 1)[1]
+                    _verdicts[_tid] = {"SUPPORTED": "CONFIRMED", "REFUTED": "REFUTED",
+                                       "INSUFFICIENT_EVIDENCE": "INSUFFICIENT"}.get(_sv, "BLOCKED" if "BLOCK" in _sv or "REQUIRE" in _sv else "")
+        _ledger = ledger_from_matrix_tests(_tests, _exec_ids, _verdicts)
+        _sum = _ledger.summary()
+        lines.append(f"- **Applicable**: {_sum['applicable']}, **Executable**: {_sum['executable']}, "
+                     f"**Executed**: {_sum['executed']}, **Confirmed**: {_sum['confirmed']}, "
+                     f"**Refuted**: {_sum['refuted']}, **Insufficient**: {_sum['insufficient']}, "
+                     f"**Blocked**: {_sum['blocked']}")
+        for _gl in _ledger.gap_lines()[:40]:
+            lines.append(f"- `{_gl}`")
+    except Exception:
+        lines.append("- *Property ledger unavailable.*")
+    lines += [""]
+
     # 8b. Vulnerability engine coverage (external fabric — spec §32).
     lines += ["## Vulnerability Engine Coverage", ""]
     try:

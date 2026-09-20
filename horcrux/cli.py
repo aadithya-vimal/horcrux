@@ -175,6 +175,7 @@ def replay(
 @app.command()
 def benchmark(
     fixture: str = typer.Argument("", help="Fixture name or 'all' (default: all)"),
+    properties: bool = typer.Option(False, "--properties", help="Run the deterministic security-property benchmark (gap report)"),
 ):
     """Run the synthetic benchmark suite (fully offline, no external targets)."""
     import tempfile
@@ -182,6 +183,17 @@ def benchmark(
     from horcrux.bench.fixtures import FIXTURES
     from horcrux.bench.runner import run_suite
     console = Console()
+    if properties:
+        from horcrux.engine.benchmark import gap_report_text, run_benchmark
+        report = run_benchmark()
+        console.print("\n[bold bright_magenta]PROPERTY GAP REPORT[/bold bright_magenta] "
+                      f"(deterministic oracles, no AI)\n")
+        for line in gap_report_text(report).splitlines():
+            console.print(f"  [dim]{line}[/dim]")
+        console.print(f"\n[bold]Properties:[/bold] {report['passed']}/{report['total']} PASS "
+                      f"(TP={report['tp']} FP={report['fp']} FN={report['fn']} "
+                      f"BLOCKED={report['blocked']} NOT_IMPLEMENTED={report['not_implemented']})")
+        raise typer.Exit(code=0 if report["fn"] == 0 and report["fp"] == 0 else 1)
     names = sorted(FIXTURES) if fixture in ("", "all") else [fixture]
     unknown = [n for n in names if n not in FIXTURES]
     if unknown:

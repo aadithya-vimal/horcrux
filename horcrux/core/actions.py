@@ -4,6 +4,59 @@ from horcrux.models import Action, SubsystemState, ValidationState, WorkspaceSta
 from horcrux.modules.web.scanner import WEB_PORTS
 
 
+def completion_verdict(state: WorkspaceState) -> dict:
+    """Assessment completion from the property ledger (Part 27).
+
+    COMPLETED: all applicable properties executed (or explicitly blocked
+    with reasons). LIMITED: executed with gaps. BLOCKED: nothing
+    executable. INCONCLUSIVE: no applicable properties modeled yet.
+    Never collapses not-tested into not-vulnerable.
+    """
+    try:
+        from horcrux.engine.ledger import ledger_from_matrix_tests
+        from horcrux.intel.test_matrix import derive_applicable_tests
+        app = state.get_application_model()
+        tests = derive_applicable_tests(app, state)
+        if not tests:
+            return {"verdict": "INCONCLUSIVE", "reason": "no applicable security tests modeled"}
+        invs = state.get_investigations()
+        exec_ids = {i.id for i in invs
+                    if getattr(getattr(i, "state", ""), "value", str(getattr(i, "state", ""))) in
+                    {"SUPPORTED", "REFUTED", "COMPLETE", "INSUFFICIENT_EVIDENCE",
+                     "FAILED", "BLOCKED", "SCOPE_BLOCKED", "UNAVAILABLE"}}
+        ledger = ledger_from_matrix_tests(tests, exec_ids, {})
+        s = ledger.summary()
+        if s["executed"] == 0:
+            return {"verdict": "BLOCKED" if s["applicable"] else "INCONCLUSIVE",
+                    "reason": f"{s['applicable']} applicable, 0 executed", "summary": s}
+        if s["executed"] >= s["applicable"]:
+            return {"verdict": "COMPLETED", "reason": "all applicable properties evaluated", "summary": s}
+        return {"verdict": "LIMITED",
+                "reason": f"{s['applicable'] - s['executed']} of {s['applicable']} applicable tests not executed",
+                "summary": s}
+    except Exception as exc:
+        return {"verdict": "INCONCLUSIVE", "reason": f"ledger unavailable: {exc}"}
+
+
+def ledger_next_reasons(state: WorkspaceState, limit: int = 3) -> list[str]:
+    """Concrete remaining security work from the property ledger (Part 28)."""
+    try:
+        from horcrux.engine.ledger import ledger_from_matrix_tests
+        from horcrux.intel.test_matrix import derive_applicable_tests
+        app = state.get_application_model()
+        tests = derive_applicable_tests(app, state)
+        inv_ids = {i.id for i in state.get_investigations()}
+        pending: dict[str, int] = {}
+        for t in tests:
+            if f"inv-{t.id}" not in inv_ids and t.id not in inv_ids:
+                fam = t.family.value if hasattr(t.family, "value") else str(t.family)
+                pending[fam] = pending.get(fam, 0) + 1
+        top = sorted(pending.items(), key=lambda kv: -kv[1])[:limit]
+        return [f"{fam}: {n} unexecuted test(s)" for fam, n in top]
+    except Exception:
+        return []
+
+
 def get_authoritative_assessment_state(state: WorkspaceState) -> dict:
     """One authoritative assessment completion state.
 
@@ -81,6 +134,11 @@ def _exhausted_action(state: WorkspaceState, auth: dict) -> Action:
         parts.append(f"required inputs: {'; '.join(auth['required_operator_inputs'][:2])}")
     if auth.get("blocking_reasons"):
         parts.append(f"blocking: {auth['blocking_reasons'][0][:100]}")
+    try:
+        for _lr in ledger_next_reasons(state):
+            parts.append(f"remaining: {_lr}")
+    except Exception:
+        pass
     return Action(
         id="assessment_exhausted",
         title="Assessment exhausted — no executable investigations remain.",

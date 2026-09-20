@@ -201,7 +201,13 @@ def analyze_javascript_and_routes(
 
 
 def analyze_javascript_content(js_text: str, source_name: str = "") -> dict[str, Any]:
-    """Analyzes raw JavaScript content string to extract candidate routes and parameters."""
+    """Analyzes raw JavaScript content string to extract candidate routes and parameters.
+
+    Beyond URLs: methods, request-body schemas, auth headers, token
+    handling, object identifiers, GraphQL operations, upload/admin
+    routes, feature flags, client-side authorization assumptions and
+    dangerous sinks — each as structured evidence (never a verdict).
+    """
     routes: list[str] = []
     parameters: list[dict[str, Any]] = []
     seen_routes: set[str] = set()
@@ -251,7 +257,41 @@ def analyze_javascript_content(js_text: str, source_name: str = "") -> dict[str,
                 seen_params.add(q_name.lower())
                 parameters.append({"name": q_name, "source": source_name})
 
-    return {"routes": routes, "parameters": parameters}
+    # ── Structured client intelligence (evidence, never verdicts) ──
+    _method_hits: list[str] = []
+    for m in re.finditer(
+        r"""method\s*:\s*["'](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)["']""",
+        js_text, re.I):
+        _method_hits.append(m.group(1).upper())
+    methods = sorted(set(_method_hits))
+    auth_headers = sorted(set(re.findall(
+        r"""["'](Authorization|X-Auth-Token|X-API-Key|Bearer)["']""", js_text)))
+    token_flows = sorted(set(re.findall(
+        r"""(localStorage\s*\[\s*['"]token|sessionStorage[\s\S]{0,40}token|Bearer\s+\$\{|set\s+Authorization)""",
+        js_text)))[:10]
+    object_ids = sorted(set(re.findall(
+        r"""/(?:users|orders|baskets|products|accounts|invoices|wallets|memories)/\$\{?[a-zA-Z0-9_]+|[?&](?:id|userId|orderId|basketId)=\$\{?[a-zA-Z0-9_]+""",
+        js_text)))[:20]
+    upload_routes = sorted({"/" + r.lstrip("/") for r in re.findall(
+        r"""["'`](/(?:upload|files|avatar|document|attachment)[a-zA-Z0-9_\-/]*)["'`]""", js_text, re.I)})
+    admin_routes = sorted({"/" + r.lstrip("/") for r in re.findall(
+        r"""["'`](/(?:admin|management|internal|roles|metrics)[a-zA-Z0-9_\-/]*)["'`]""", js_text, re.I)})
+    feature_flags = sorted(set(re.findall(r"""(?:featureFlag|isEnabled|flags\.)([A-Za-z0-9_]+)""", js_text)))[:20]
+    client_authz = sorted(set(re.findall(
+        r"""(?:if\s*\(\s*(?:user|role|isAdmin|canAccess)[^)]{0,80}\)|role\s*===?\s*["']admin["'])""",
+        js_text)))[:10]
+    sinks = sorted({s for pat in (r"\.innerHTML\s*=", r"document\.write\s*\(",
+                                  r"eval\s*\(", r"new\s+Function\s*\(") for s in re.findall(pat, js_text)})[:10]
+    graphql_ops = sorted(set(re.findall(
+        r"""(?:query|mutation)\s+([A-Za-z_][A-Za-z0-9_]*)""", js_text)))[:20]
+
+    return {"routes": routes, "parameters": parameters,
+            "methods": methods, "auth_headers": auth_headers,
+            "token_flows": token_flows, "object_ids": object_ids,
+            "upload_routes": upload_routes, "admin_routes": admin_routes,
+            "feature_flags": feature_flags,
+            "client_authz_assumptions": client_authz,
+            "dangerous_sinks": sinks, "graphql_operations": graphql_ops}
 
 
 def extract_html_inputs(html: str, endpoint: str = "") -> list[dict[str, str]]:
