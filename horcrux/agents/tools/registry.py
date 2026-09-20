@@ -107,9 +107,14 @@ class ToolRegistry:
                     scope_check = lambda t: policy.is_target_allowed(t)[0]  # noqa: E731
                 except Exception:
                     scope_check = None
+            live_local = False
+            if self.state is not None:
+                if getattr(self.state, "execution_mode", "LOCAL") != "SYNTHETIC":
+                    live_local = True
             self._capabilities = CapabilityRegistry(
                 workspace=self.workspace, runner=self.runner,
-                state=self.state, scope_check=scope_check)
+                state=self.state, scope_check=scope_check,
+                live_local=live_local)
         return self._capabilities
 
     def register(self, spec: ToolSpec) -> None:

@@ -237,8 +237,17 @@ def authenticated_crawl(app: Any, adapter: Any, base_url: str,
     except Exception as exc:
         summary["steps"].append(f"login:error:{exc}")
         return summary
-    # 4. crawl authenticated surface.
-    for path in (extra_paths or ["/", "/api", "/rest/basket/1", "/rest/users/1"]):
+    # 4. crawl authenticated surface (use discovered endpoints, not hardcoded app-specific paths).
+    discovered_paths = []
+    try:
+        for ep in getattr(app, "endpoints", [])[:8]:
+            p = ep.path.replace("{id}", "1").replace(":id", "1")
+            if p not in discovered_paths:
+                discovered_paths.append(p)
+    except Exception:
+        pass
+    crawl_paths = extra_paths or discovered_paths or ["/", "/api"]
+    for path in crawl_paths:
         try:
             obs = adapter.navigate(base + path)
             obs.identity = identity.label

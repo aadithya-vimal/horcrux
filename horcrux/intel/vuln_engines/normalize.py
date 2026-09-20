@@ -303,7 +303,7 @@ def correlate_finding_with_state(
     if version_match is False:
         updated.disposition = CorrelationDisposition.CONTRADICTED.value
         updated.disposition_reason = (
-            "scanner-reported product version differs from HORCRUX-observed version; "
+            "scanner-reported product version differs from HORCRUX-observed version (version mismatch conflict); "
             "requires investigation, not confirmation")
         reasons.append("version-mismatch")
     elif matched_service and (port_match or http_hint or version_match):
@@ -366,6 +366,10 @@ def apply_dispositions_to_entities(
                     corroborated = True
                 if not f.stale:
                     stale_all = False
+        if len(set(entity.sources)) >= 2 and best != CorrelationDisposition.CONTRADICTED.value:
+            best = CorrelationDisposition.CORROBORATED.value
+            best_reason = f"corroborated across {len(set(entity.sources))} external providers ({', '.join(sorted(set(entity.sources)))})"
+            corroborated = True
         entity.disposition = best
         entity.disposition_reason = best_reason
         entity.corroborated_by_native = corroborated

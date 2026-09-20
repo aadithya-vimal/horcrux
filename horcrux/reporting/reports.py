@@ -317,8 +317,16 @@ def markdown(ws, output: Path | None = None) -> Path:
         for idx, path in enumerate(state.attack_paths, 1):
             name = path.get("name", f"Attack Path #{idx}")
             prob = path.get("probability", "MEDIUM")
-            lines.append(f"### Path {idx}: {name} [{prob}] "
+            status = path.get("status", "HYPOTHESIS")
+            finding_ids = path.get("finding_ids", []) or []
+            lines.append(f"### Path {idx}: {name} [{prob}] [{status}] "
                          f"(score {path.get('rank_score', '?')})")
+            if finding_ids:
+                lines.append(f"- **Canonical finding**: `{finding_ids[0]}`")
+            elif status != "HYPOTHESIS":
+                lines.append(f"- **Adjudication**: {status} (no confirmed finding)")
+            else:
+                lines.append("- **Adjudication**: untested hypothesis (no finding)")
             for step in path.get("steps", []):
                 lines.append(f"- {redact_secrets(str(step))}")
             if path.get("prerequisites"):

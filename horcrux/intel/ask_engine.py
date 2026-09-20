@@ -181,9 +181,15 @@ def build_structured_context(state: Any, question: str,
     if "attack path" in q or "attack-path" in q:
         ctx["attack_path_detail"] = [
             {"name": p.get("name"), "probability": p.get("probability"),
+             "status": p.get("status", "HYPOTHESIS"),
+             "finding_ids": p.get("finding_ids", []),
+             "hypothesis_id": p.get("hypothesis_id", ""),
+             "investigation_ids": p.get("investigation_ids", []),
              "validation": p.get("validation_state"),
-             "nodes": [(n.get("node_type"), n.get("label")) for n in p.get("nodes", [])],
+             "nodes": [(n.get("node_type"), n.get("label"), n.get("status", ""),
+                        n.get("finding_id", "")) for n in p.get("nodes", [])],
              "edges": [{"type": e.get("edge_type"), "evidence": e.get("evidence", [])[:3],
+                        "security_evidence": e.get("security_evidence", False),
                         "inference": e.get("inference", False)} for e in p.get("edges", [])],
              "assumptions": p.get("assumptions", []),
              "rank_why": p.get("rank_why", "")}
@@ -540,10 +546,18 @@ def answer_deterministically(state: Any, question: str) -> str:
         return "\n".join(lines)
     if "attack_path_detail" in ctx and ctx["attack_path_detail"]:
         for p in ctx["attack_path_detail"][:2]:
-            lines.append(f"**Path:** {p['name']} [{p['probability']}, {p['validation']}]")
-            lines.append("Nodes: " + " → ".join(f"{t}:{l}" for t, l in p["nodes"][:6]))
+            lines.append(f"**Path:** {p['name']} [{p['probability']}, "
+                         f"{p.get('status', p['validation'])}]")
+            nodes = [tuple(n) for n in p["nodes"][:6]]
+            lines.append("Nodes: " + " → ".join(
+                f"{t}:{l}" + (f"[{s}]" if s else "") for t, l, s, *_ in nodes))
             for e in p["edges"][:6]:
-                tag = "inference" if e["inference"] else f"evidence({len(e['evidence'])})"
+                if e.get("inference"):
+                    tag = "inference"
+                elif e.get("security_evidence"):
+                    tag = "validator evidence"
+                else:
+                    tag = f"observation({len(e['evidence'])})"
                 lines.append(f"- edge {e['type']} [{tag}]")
             if p["assumptions"]:
                 lines.append(f"Assumptions: {'; '.join(p['assumptions'][:3])}")

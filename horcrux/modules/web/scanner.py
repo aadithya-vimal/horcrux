@@ -20,7 +20,8 @@ def scheme_for(port: int) -> str:
 
 def scan_http(ws, target: str, port: int, registry: ValidatorRegistry | None = None):
     registry = registry or ValidatorRegistry()
-    base = f"{scheme_for(port)}://{target}:{port}"
+    host = target.split(":")[0] if ":" in target else target
+    base = f"{scheme_for(port)}://{host}:{port}"
     findings: list[Finding] = []
     credentials: list[Credential] = []
     technologies: set[str] = set()

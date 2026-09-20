@@ -252,13 +252,13 @@ def test_actions_parameter_fuzzing_evidence_gating():
     state_with_params = WorkspaceState(
         target="10.0.0.1",
         services=[Service(host="10.0.0.1", port=80, protocol="tcp", service="http")],
-        parameters=[Parameter(name="id", location="query", endpoints=["/api/users"])],
+        parameters=[Parameter(name="id", location="query", endpoint="/api/users")],
         web_targets=[
             WebTarget(
                 host="10.0.0.1",
                 port=80,
                 endpoints=[DiscoveredPath(url="http://10.0.0.1/api/users", path="/api/users", status=200, size=500, validated=True)],
-                parameters=[Parameter(name="id", location="query", endpoints=["/api/users"])],
+                parameters=[Parameter(name="id", location="query", endpoint="/api/users")],
             )
         ],
     )

@@ -47,6 +47,87 @@ def run_network(ws, runner, target: str, profile: ScanProfile | None = None, dee
         target,
     )
 
+    if not services:
+        import socket
+        from horcrux.modules.web.scanner import WEB_PORTS
+        from horcrux.models import Service, Software
+        ports_to_probe = sorted(set(WEB_PORTS | {21, 22, 23, 25, 53, 80, 443, 445, 1433, 1521, 3306, 3389, 5432, 6379, 8000, 8080, 8443, 8888, 9000, 27017}))
+        host = target.split(":")[0] if ":" in target else target
+        if ":" in target:
+            try:
+                ports_to_probe.insert(0, int(target.split(":")[1]))
+            except ValueError:
+                pass
+
+        for port in ports_to_probe:
+            try:
+                with socket.create_connection((host, port), timeout=0.3):
+                    svc_name = "http" if port in WEB_PORTS else "unknown"
+                    services.append(Service(
+                        host=host,
+                        port=port,
+                        protocol="tcp",
+                        state="open",
+                        service=svc_name,
+                    ))
+                    try:
+                        st = ws.load()
+                        st.record_live_execution(
+                            capability_id="socket_connect",
+                            target=target,
+                            host=host,
+                            port=port,
+                            protocol="tcp",
+                            success=True,
+                            socket_result="connected",
+                            evidence_reference=f"tcp://{host}:{port}",
+                        )
+                        ws.save(st)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        for s in services:
+            if s.service == "http" or s.port in WEB_PORTS:
+                try:
+                    import httpx
+                    scheme = "https" if s.port in (443, 8443) else "http"
+                    url = f"{scheme}://{host}:{s.port}/"
+                    with httpx.Client(verify=False, timeout=2.0) as client:
+                        resp = client.get(url)
+                        try:
+                            st = ws.load()
+                            st.record_live_execution(
+                                capability_id="http_probe",
+                                target=target,
+                                host=host,
+                                port=s.port,
+                                protocol=scheme,
+                                success=True,
+                                status_code=resp.status_code,
+                                socket_result=f"HTTP {resp.status_code}",
+                                evidence_reference=url,
+                            )
+                            ws.save(st)
+                        except Exception:
+                            pass
+                        server = resp.headers.get("server", "")
+                        powered = resp.headers.get("x-powered-by", "")
+                        prod = server or powered
+                        if prod:
+                            s.product = prod
+                            software.append(Software(
+                                product=prod,
+                                version="",
+                                service="http",
+                                source="http_banner",
+                                confidence=0.8,
+                                evidence=[f"Banner on port {s.port}: Server={server} X-Powered-By={powered}"],
+                            ))
+                except Exception:
+                    pass
+
     ws.upsert_services(services)
     ws.upsert_software(software)
 

@@ -142,13 +142,24 @@ def finding_lineage(state: Any, finding_id: str) -> dict[str, Any]:
 
 
 def attack_path_lineage(state: Any, path_id: str) -> dict[str, Any]:
-    """Trace attack path -> findings/evidence + assumptions."""
+    """Trace attack path -> hypothesis/investigations/evidence + finding (if promoted)."""
     for p in getattr(state, "attack_paths", []) or []:
         if p.get("id") == path_id or p.get("name", "").startswith(path_id):
-            return {"path": p.get("name"), "nodes": len(p.get("nodes", [])),
+            return {"path": p.get("name"), "status": p.get("status", "HYPOTHESIS"),
+                    "finding_ids": p.get("finding_ids", []),
+                    "hypothesis_id": p.get("hypothesis_id", ""),
+                    "investigation_ids": p.get("investigation_ids", []),
+                    "nodes": [{"type": n.get("node_type"), "label": n.get("label"),
+                               "status": n.get("status", ""),
+                               "hypothesis_id": n.get("hypothesis_id", ""),
+                               "investigation_ids": n.get("investigation_ids", []),
+                               "finding_id": n.get("finding_id", "")}
+                              for n in p.get("nodes", [])],
                     "edges": [{"type": e.get("edge_type"), "evidence": e.get("evidence", []),
+                               "security_evidence": e.get("security_evidence", False),
                                "inference": e.get("inference", False)}
                               for e in p.get("edges", [])],
                     "assumptions": p.get("assumptions", []),
                     "rank_why": p.get("rank_why", "")}
-    return {"path": path_id, "nodes": 0, "edges": []}
+    return {"path": path_id, "status": "HYPOTHESIS", "finding_ids": [],
+            "hypothesis_id": "", "investigation_ids": [], "nodes": [], "edges": []}

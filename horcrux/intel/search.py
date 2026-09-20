@@ -191,5 +191,32 @@ def searchsploit_workspace(ws, runner):
             )
 
     ws.set_exploits(candidates)
+
+    # Reposition SearchSploit: attach exploit intelligence to matching findings
+    try:
+        fresh_state = ws.load()
+        findings_updated = False
+        for f in getattr(fresh_state, "findings", []):
+            for c in candidates:
+                cve_match = bool(c.cve and (c.cve in getattr(f, "cves", []) or c.cve in f.title or c.cve in f.id))
+                comp_match = bool(
+                    getattr(f, "affected_component", "")
+                    and c.product
+                    and (f.affected_component.lower() in c.product.lower() or c.product.lower() in f.affected_component.lower())
+                    and (not getattr(f, "affected_version", "") or not c.version or f.affected_version in c.version or c.version in f.affected_version)
+                )
+                if cve_match or comp_match:
+                    ref_str = f"SearchSploit: {c.title}" + (f" ({c.source})" if c.source else "")
+                    if ref_str not in getattr(f, "exploit_intelligence_refs", []):
+                        f.exploit_intelligence_refs.append(ref_str)
+                        findings_updated = True
+                    if c.exploitability and getattr(f, "exploitability_state", "MANUAL_REVIEW") in ("MANUAL_REVIEW", "UNSPECIFIED", ""):
+                        f.exploitability_state = c.exploitability
+                        findings_updated = True
+        if findings_updated:
+            ws.save(fresh_state)
+    except Exception:
+        pass
+
     return candidates
 

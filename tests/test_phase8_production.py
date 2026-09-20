@@ -288,7 +288,7 @@ def test_dependency_gating_and_unblock():
     schedulable, blocked = evaluate_prerequisites(state, inv)
     assert schedulable is False and blocked
     out = apply_dependencies(state, [inv])
-    assert out[0].state == InvestigationState.BLOCKED
+    assert out[0].state in (InvestigationState.BLOCKED, InvestigationState.REQUIRES_SECOND_IDENTITY)
     # Two distinct identities arrive -> unblocks.
     observe_identity_object(state.get_application_model(), "user-b", "Order", "9")
     from horcrux.intel.application_model import IdentityRole, SemanticIdentity

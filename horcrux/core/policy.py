@@ -110,7 +110,9 @@ class EngagementPolicy:
 
         if self.scope.allowed_targets:
             allowed = {t.strip().lower() for t in self.scope.allowed_targets}
-            if tgt in allowed:
+            allowed_hosts = {t.split(":")[0] for t in allowed}
+            tgt_host = tgt.split(":")[0]
+            if tgt in allowed or tgt_host in allowed or tgt in allowed_hosts or tgt_host in allowed_hosts:
                 return True, f"Target '{target}' is in authorized target scope."
 
             try:

@@ -119,13 +119,21 @@ def run(
         )
     ws.set_subsystem_state("web_discovery", SubsystemState.COMPLETE)
 
-    # Combine unique candidates (JS routes + clean fuzzer paths)
+    # Combine unique candidates (JS routes + clean fuzzer paths + standard targets)
     combined_paths: list[DiscoveredPath] = []
     seen_urls: set[str] = set()
     for p in js_candidate_paths + fuzzer_paths:
         if p.url not in seen_urls:
             seen_urls.add(p.url)
             combined_paths.append(p)
+
+    for def_path in ["/robots.txt", "/sitemap.xml", "/ftp", "/.env", "/.git/HEAD", "/admin"]:
+        def_url = f"{scheme}://{target}:{port}{def_path}"
+        if def_url not in seen_urls:
+            seen_urls.add(def_url)
+            # status=0: unprobed candidate; the validation loop below probes
+            # each URL live and records the real status.
+            combined_paths.append(DiscoveredPath(url=def_url, path=def_path, status=0, source="known_targets"))
 
     # 4. Endpoint Validation Pipeline
     ws.set_subsystem_state("web_validation", SubsystemState.RUNNING)
@@ -144,7 +152,11 @@ def run(
         is_spa=base_class == BaselineClassification.SPA_FALLBACK,
     )
 
-    for p in combined_paths:
+    idx = 0
+    while idx < len(combined_paths):
+        p = combined_paths[idx]
+        idx += 1
+
         # Never validate or emit findings for suppressed fallback noise
         if p.evidence_classification == EvidenceClassification.SUPPRESSED_FALLBACK:
             continue
@@ -156,6 +168,18 @@ def run(
             resp = client.get(url, timeout=6.0)
         except Exception:
             continue
+
+        if clean_path == "/robots.txt" and resp.status_code == 200:
+            import re
+            disallows = re.findall(r"(?im)^\s*disallow\s*:\s*(\S+)", resp.text)
+            for d in disallows:
+                d_clean = d.strip()
+                if not d_clean.startswith("/"):
+                    d_clean = "/" + d_clean
+                d_url = f"{scheme}://{target}:{port}{d_clean}"
+                if d_url not in seen_urls:
+                    seen_urls.add(d_url)
+                    combined_paths.append(DiscoveredPath(url=d_url, path=d_clean, status=0, source="robots.txt"))
 
         specific_validator = registry.get(clean_path)
         if specific_validator:
@@ -186,6 +210,7 @@ def run(
         }:
             p.evidence_classification = EvidenceClassification.VALIDATED
 
+            cwes_val = list(specific_validator.cwes) if specific_validator and getattr(specific_validator, "cwes", None) else []
             f = Finding(
                 id=f"web-discovered-{clean_path.strip('/').replace('/', '_') or 'root'}-{port}",
                 title=title,
@@ -199,6 +224,11 @@ def run(
                 protocol="tcp",
                 port=port,
                 source_tool=p.source or "web-fuzzer",
+                source_tools=[p.source or "web-fuzzer"],
+                source_providers=["horcrux_web"],
+                cwes=cwes_val,
+                access_context="unauthenticated",
+                correlation_status="NATIVE",
                 evidence=res.evidence,
                 artifacts=[f"raw/discovered-paths-{port}.json"],
                 why_it_matters=res.why_it_matters or "Discovered accessible endpoint exposing functionality or data.",

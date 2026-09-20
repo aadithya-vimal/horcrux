@@ -29,9 +29,11 @@ def on_recon_complete(workspace: Workspace, ai_manager=None) -> None:
 def run_full_assessment(
     workspace: Workspace,
     ai_manager=None,
-    max_iterations: int = 15,
+    max_iterations: int = 250,
     max_workers: int = 1,
     observer=None,
+    time_limit: int | None = None,
+    request_limit: int | None = None,
 ) -> None:
     """Run complete agentic assessment loop."""
     state = workspace.load()
@@ -41,9 +43,12 @@ def run_full_assessment(
     root = RootVAPTOrchestrator(workspace, ai_manager=ai_manager,
                                max_iterations=max_iterations,
                                max_workers=max_workers,
-                               observer=observer)
+                               observer=observer,
+                               time_limit=time_limit,
+                               request_limit=request_limit)
     root.run_assessment_loop()
     _sync_actions(workspace)
+
 
 
 def _sync_actions(workspace: Workspace) -> None:

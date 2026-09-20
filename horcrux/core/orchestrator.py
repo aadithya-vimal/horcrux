@@ -27,7 +27,10 @@ from horcrux.ui.progress import ScanProgressManager
 class Orchestrator:
     def __init__(self, target: str, workspace: Workspace, console: Console, profile: str | ScanProfile | None = None,
                  engines: list[str] | None = None, skip_engines: bool = False,
-                 engine_mode: str = "best", settings_manager=None):
+                 engine_mode: str = "best", settings_manager=None,
+                 time_limit: int | None = None, request_limit: int | None = None,
+                 rate_limit: str | None = None, identity: str | None = None,
+                 max_iterations: int | None = None):
         self.target = target
         self.workspace = workspace
         self.console = console
@@ -36,13 +39,41 @@ class Orchestrator:
         self.skip_engines = skip_engines
         self.engine_mode = engine_mode
         self._settings_manager = settings_manager
+        self.time_limit = time_limit
+        self.request_limit = request_limit
+        self.rate_limit = rate_limit
+        self.identity = identity
+        self.max_iterations = max_iterations
 
     def scan(self, deep: bool = False, verify: bool = False):
         profile = self.profile
         if deep:
             profile = get_profile("deep")
 
+        if self.identity:
+            try:
+                st = self.workspace.load()
+                eng_cfg = st.get_engagement_config()
+                cfg_dict = eng_cfg.model_dump() if hasattr(eng_cfg, "model_dump") else {}
+                identities = cfg_dict.get("test_identities", []) or []
+                parts = self.identity.split(":", 1)
+                role = parts[0]
+                token = parts[1] if len(parts) > 1 else ""
+                identities.append({
+                    "label": role,
+                    "role": role if role in ("user", "admin") else "user",
+                    "login_path": "/login",
+                    "headers": {"Authorization": f"Bearer {token}" if not token.lower().startswith("bearer") else token} if token else {},
+                })
+                cfg_dict["test_identities"] = identities
+                cfg_dict["test_identities_configured"] = True
+                st.set_engagement_config(cfg_dict)
+                self.workspace.save(st)
+            except Exception:
+                pass
+
         self.workspace.set_subsystem_state("scan", SubsystemState.RUNNING)
+
         try:
             with ScanProgressManager(self.console, self.target, profile.name) as progress:
                 runner = CommandRunner(
@@ -55,6 +86,11 @@ class Orchestrator:
                 progress.start_stage("reachability")
                 time.sleep(0.05)
                 self.workspace.write("raw/target.txt", f"Target: {self.target}\nProfile: {profile.name}")
+                import secrets as _secrets
+                state = self.workspace.load()
+                if not getattr(state, "assessment_run_id", ""):
+                    state.assessment_run_id = _secrets.token_hex(6)
+                    self.workspace.save(state)
                 progress.complete_stage("reachability")
 
                 # STAGE 2: Port Discovery
@@ -68,6 +104,20 @@ class Orchestrator:
                 )
                 for finding in network_findings:
                     self.workspace.upsert_finding(finding)
+
+                # Record live network execution observation & derive target provenance
+                from horcrux.core.acceptance import derive_target_provenance
+                state = self.workspace.load()
+                if state.services or network_findings:
+                    state.live_execution_observed = True
+                    state.provenance_source = "live_network_probe"
+                state.target_provenance, state.provenance_source = derive_target_provenance(
+                    self.target,
+                    state.live_execution_observed,
+                    getattr(state, "target_provenance", "UNKNOWN"),
+                    getattr(state, "provenance_source", ""),
+                )
+                self.workspace.save(state)
                 progress.complete_stage("ports")
 
                 # STAGE 3: Service Identification, Web Probing & Fingerprinting
@@ -78,10 +128,11 @@ class Orchestrator:
                         service.port in WEB_PORTS or service.service.lower() in {"http", "https"}
                     ):
                         scheme = scheme_for(service.port)
-                        base_url = f"{scheme}://{self.target}:{service.port}"
+                        target_host = self.target.split(":")[0] if ":" in self.target else self.target
+                        base_url = f"{scheme}://{target_host}:{service.port}"
                         web_target = state.get_web_target(service.port) or WebTarget(
                             scheme=scheme,
-                            host=self.target,
+                            host=target_host,
                             port=service.port,
                             base_url=base_url,
                             service_identifier=f"{scheme}-{service.port}",
@@ -110,7 +161,7 @@ class Orchestrator:
                             )
 
                             # 2. Technology & WAF Fingerprinting (WhatWeb, httpx, wafw00f)
-                            clean_techs, _ = run_fingerprinting(self.workspace, runner, self.target, service.port)
+                            clean_techs, _ = run_fingerprinting(self.workspace, runner, target_host, service.port)
                             state = self.workspace.load()
                             web_target.technologies = state.normalized_technologies
                             web_target.module_decisions.append(
@@ -126,7 +177,7 @@ class Orchestrator:
                                 disc_findings, _, disc_paths = web_discovery(
                                     self.workspace,
                                     runner,
-                                    self.target,
+                                    target_host,
                                     service.port,
                                     strategy=profile.wordlist_strategy,
                                 )
@@ -223,8 +274,16 @@ class Orchestrator:
                     if s.version and s.confidence >= 0.70 and s.product.lower() not in {"tcpwrapped", "unknown", "http", "https", "ppp"}
                 ]
 
-                if profile.cve_correlation and reliable_software:
+                should_run_intel = (profile.cve_correlation or profile.name in ("deep", "full", "service", "intel")) and reliable_software
+
+                if should_run_intel:
                     self.workspace.set_subsystem_state("cve_intelligence", SubsystemState.RUNNING)
+                    try:
+                        from horcrux.intel.cve import correlate_software_vulnerabilities
+                        correlate_software_vulnerabilities(self.workspace)
+                    except Exception as exc:
+                        self.workspace.write("raw/cve-resolver-error.txt", str(exc))
+
                     from horcrux.intel.search import searchsploit_workspace
                     candidates = searchsploit_workspace(self.workspace, runner)
 
@@ -273,8 +332,15 @@ class Orchestrator:
                     # Autonomous agent investigation loop for standard / deep / full profiles
                     if profile.name in ("full", "deep", "standard"):
                         from horcrux.agents.coordinator import run_full_assessment
-                        max_iter = 15 if profile.name == "full" else (10 if profile.name == "deep" else 5)
-                        run_full_assessment(self.workspace, ai_manager=ai_mgr, max_iterations=max_iter)
+                        default_iter = 250 if profile.name in ("full", "deep") else 50
+                        max_iter = self.max_iterations or default_iter
+                        run_full_assessment(
+                            self.workspace,
+                            ai_manager=ai_mgr,
+                            max_iterations=max_iter,
+                            time_limit=self.time_limit,
+                            request_limit=self.request_limit,
+                        )
                 except Exception as exc:
                     self.workspace.write("raw/agent-ingestion-error.txt", str(exc))
                 self.derive_actions()

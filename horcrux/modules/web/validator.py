@@ -110,6 +110,7 @@ class EndpointValidator:
     validator_fn: ContentValidatorFn
     title: str = ""
     description: str = ""
+    cwes: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +428,42 @@ def validate_backup_content(response: httpx.Response, baseline: BaselineFingerpr
     )
 
 
+def validate_ftp_directory_listing(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
+    """Validates exposed /ftp directory listing and sensitive backup files."""
+    if response.status_code != 200 or baseline.is_similar(response):
+        return ValidationResult(
+            is_valid=False,
+            confidence=0.0,
+            validation_state=ValidationState.false_positive,
+            audit_status=AuditStatus.hardened,
+            evidence=["Filtered out by baseline similarity or non-200."],
+        )
+    text = response.text.lower()
+    files = re.findall(r'<a\s+href="[^"]*\/([^"\/]+)">', response.text, re.I) or re.findall(r'([a-zA-Z0-9_\-\.]+\.(?:bak|kdbx|sql|json|md|egg|yml|yaml|conf|key|zip|tar\.gz))', response.text, re.I)
+    sensitive = [f for f in files if any(ext in f.lower() for ext in (".bak", ".kdbx", ".sql", ".conf", ".key", ".egg"))]
+    is_listing = ("directory listing" in text or "index of" in text or "<title>directory listing" in text or bool(sensitive))
+    if is_listing and response.status_code == 200:
+        return ValidationResult(
+            is_valid=True,
+            confidence=0.98,
+            validation_state=ValidationState.confirmed,
+            audit_status=AuditStatus.audited,
+            evidence=[
+                f"Accessible directory listing verified at /ftp containing {len(files)} file(s).",
+                f"Sensitive files disclosed: {', '.join(sensitive[:5]) if sensitive else ', '.join(files[:5])}",
+            ],
+            why_it_matters="Directory listing publicly exposes sensitive application backup files, credentials, or keys.",
+            recommended_next_action="Disable directory indexing and restrict public access to the /ftp directory.",
+        )
+    return ValidationResult(
+        is_valid=False,
+        confidence=0.0,
+        validation_state=ValidationState.false_positive,
+        audit_status=AuditStatus.hardened,
+        evidence=["Response does not match directory listing signature."],
+    )
+
+
 def validate_phpinfo_content(response: httpx.Response, baseline: BaselineFingerprint) -> ValidationResult:
     """Validates phpinfo disclosure."""
     if response.status_code != 200 or baseline.is_similar(response):
@@ -692,6 +729,7 @@ class ValidatorRegistry:
                 validator_fn=validate_env_content,
                 title="Exposed environment configuration file",
                 description="Configuration file leaking sensitive environment variables",
+                cwes=["CWE-552", "CWE-200"],
             )
         )
         self.register(
@@ -702,6 +740,7 @@ class ValidatorRegistry:
                 validator_fn=validate_git_head,
                 title="Exposed Git repository metadata",
                 description="Version control metadata allowing source code recovery",
+                cwes=["CWE-538"],
             )
         )
         self.register(
@@ -712,6 +751,7 @@ class ValidatorRegistry:
                 validator_fn=validate_passwd_content,
                 title="Arbitrary file disclosure (/etc/passwd)",
                 description="Sensitive operating system user database exposed",
+                cwes=["CWE-22"],
             )
         )
         self.register(
@@ -722,6 +762,7 @@ class ValidatorRegistry:
                 validator_fn=validate_admin_surface,
                 title="Administrative interface surface",
                 description="Privileged administrative control surface discovered",
+                cwes=["CWE-284"],
             )
         )
         self.register(
@@ -732,6 +773,7 @@ class ValidatorRegistry:
                 validator_fn=validate_robots_content,
                 title="Web crawlers policy (robots.txt)",
                 description="Information disclosure via crawler exclusions",
+                cwes=["CWE-200"],
             )
         )
         self.register(
@@ -742,6 +784,7 @@ class ValidatorRegistry:
                 validator_fn=validate_sitemap_content,
                 title="XML Sitemap discovery",
                 description="Discloses application endpoint index",
+                cwes=["CWE-200"],
             )
         )
         self.register(
@@ -752,6 +795,18 @@ class ValidatorRegistry:
                 validator_fn=validate_backup_content,
                 title="Database backup file exposure",
                 description="Publicly exposed database backup file",
+                cwes=["CWE-530"],
+            )
+        )
+        self.register(
+            EndpointValidator(
+                path="/ftp",
+                category="web-information-disclosure",
+                severity=Severity.high,
+                validator_fn=validate_ftp_directory_listing,
+                title="Directory listing and sensitive backup file exposure",
+                description="Publicly accessible directory listing exposing backup and sensitive files",
+                cwes=["CWE-548", "CWE-200"],
             )
         )
         self.register(
@@ -762,6 +817,7 @@ class ValidatorRegistry:
                 validator_fn=validate_phpinfo_content,
                 title="PHP configuration info disclosure",
                 description="Diagnostic phpinfo script publicly accessible",
+                cwes=["CWE-200"],
             )
         )
         self.register(
@@ -772,6 +828,7 @@ class ValidatorRegistry:
                 validator_fn=validate_swagger_openapi,
                 title="Interactive Swagger UI documentation",
                 description="Public API schema interface exposed",
+                cwes=["CWE-200"],
             )
         )
         self.register(
@@ -782,6 +839,7 @@ class ValidatorRegistry:
                 validator_fn=validate_actuator_content,
                 title="Spring Boot Actuator endpoints",
                 description="Diagnostic framework endpoints exposed",
+                cwes=["CWE-200"],
             )
         )
         self.register(
@@ -792,6 +850,7 @@ class ValidatorRegistry:
                 validator_fn=validate_graphql_content,
                 title="GraphQL service endpoint",
                 description="GraphQL schema query interface discovered",
+                cwes=["CWE-200"],
             )
         )
 

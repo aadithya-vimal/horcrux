@@ -313,7 +313,7 @@ def finding_header(title: str, validation: str, severity: str = "",
 def attack_tree(name: str, nodes: list[str],
                 edges: list[tuple[str, str]]) -> list[str]:
     """Readable vertical tree. edges: [(relation, kind)] where kind is
-    evidenced|inferred|unverified."""
+    confirmed|evidenced|observed|inferred|unverified."""
     lines = [f"[bold bright_white]{name}[/bold bright_white]"]
     for idx, node in enumerate(nodes):
         lines.append(f"  [dim]{ARROW_DOWN}[/dim]")
@@ -324,6 +324,8 @@ def attack_tree(name: str, nodes: list[str],
                 mark = f"[green]{EDGE_CONFIRMED * 2} {relation} (evidenced)[/green]"
             elif kind == "inferred":
                 mark = f"[yellow]{EDGE_INFERRED * 2} {relation} (inferred)[/yellow]"
+            elif kind == "observed":
+                mark = f"[dim]{EDGE_UNVERIFIED * 2} {relation} (observed)[/dim]"
             else:
                 mark = f"[dim]{EDGE_UNVERIFIED * 2} {relation} (unverified)[/dim]"
             lines.append(f"  {mark}")

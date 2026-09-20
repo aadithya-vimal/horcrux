@@ -63,10 +63,12 @@ class RootVAPTOrchestrator:
         self,
         workspace: Workspace,
         ai_manager=None,
-        max_iterations: int = 20,
+        max_iterations: int = 250,
         mock_mode: bool = False,
         max_workers: int = 1,
         observer=None,
+        time_limit: int | None = None,
+        request_limit: int | None = None,
     ):
         self.workspace = workspace
         self.ai_manager = ai_manager
@@ -74,6 +76,8 @@ class RootVAPTOrchestrator:
         self.mock_mode = mock_mode
         self.max_workers = max(1, int(max_workers))
         self.observer = observer
+        self.time_limit = time_limit
+        self.request_limit = request_limit
         try:
             runner = CommandRunner(workspace)
         except Exception:
@@ -117,12 +121,26 @@ class RootVAPTOrchestrator:
                                    state=state, observer=self.observer)
         self._emit("phase", {"name": "RECON"})
 
+        import time
+        loop_start = time.monotonic()
+        requests_executed = 0
         iteration = 0
         while iteration < self.max_iterations:
             # 1. load
             state = self.workspace.load()
             # Operator stop/pause gates.
             if state.operator_focus.stopped or state.operator_focus.paused:
+                break
+            # Operator limits (Phase A / Part 2)
+            if self.time_limit is not None and (time.monotonic() - loop_start) >= self.time_limit:
+                self._record_stop_reason(state, f"Operator time limit reached ({self.time_limit}s)")
+                state.assessment_phase = "LIMITED"
+                self.workspace.save(state)
+                break
+            if self.request_limit is not None and requests_executed >= self.request_limit:
+                self._record_stop_reason(state, f"Operator request limit reached ({self.request_limit})")
+                state.assessment_phase = "LIMITED"
+                self.workspace.save(state)
                 break
             # Completion gate: coverage + exhaustion + hypotheses + failures.
             if not assessment_has_actionable_work(state):
@@ -170,6 +188,7 @@ class RootVAPTOrchestrator:
             self.workspace.save(state)
 
             self._execute_batch(state, batch)
+            requests_executed += len(batch)
             self.workspace.save(state)
             self._emit("phase", {"name": "REASSESS"})
 
@@ -357,6 +376,35 @@ class RootVAPTOrchestrator:
             state.assessment_phase = "LIMITED"
         else:
             state.assessment_phase = AssessmentPhase.INVESTIGATION.value
+
+        # Deduplicate and canonicalize findings across tools (Phase H/I)
+        try:
+            from horcrux.intel.vulnerability_adjudicator import canonicalize_state_findings
+            canonicalize_state_findings(state)
+        except Exception:
+            pass
+
+        # Clean up any remaining READY / PENDING / RUNNING work at completion with explicit requirement states
+        from horcrux.intel.investigations import InvestigationState
+        from horcrux.intel.dependencies import evaluate_prerequisites
+        invs = state.get_investigations()
+        for inv in invs:
+            if inv.state in (InvestigationState.READY, InvestigationState.PENDING, InvestigationState.RUNNING):
+                schedulable, blocked = evaluate_prerequisites(state, inv)
+                blocked_str = "; ".join(blocked[:3]) if blocked else "prerequisite unsatisfied or execution budget reached"
+                b_lower = blocked_str.lower()
+                inv.result_summary = f"Blocked: {blocked_str}"
+                if any(k in b_lower for k in ("two", "second", "cross-context", "identity context")):
+                    inv.state = InvestigationState.REQUIRES_SECOND_IDENTITY
+                elif any(k in b_lower for k in ("auth", "session", "user access context", "admin access context", "authenticated")):
+                    inv.state = InvestigationState.REQUIRES_AUTH
+                elif any(k in b_lower for k in ("tool", "binary", "missing tool")):
+                    inv.state = InvestigationState.REQUIRES_TOOL
+                elif any(k in b_lower for k in ("operator", "approval")):
+                    inv.state = InvestigationState.REQUIRES_OPERATOR
+                else:
+                    inv.state = InvestigationState.BLOCKED
+        state.set_investigations(invs)
 
         update_agent_states(state)
         self.workspace.save(state)

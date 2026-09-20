@@ -145,8 +145,46 @@ class SemanticEndpoint(BaseModel):
         return self.id
 
     @property
+    def normalized_path(self) -> str:
+        """Path with scheme/host stripped so ID heuristics never match IPs."""
+        p = (self.path or "").strip()
+        if p.startswith(("http://", "https://")):
+            try:
+                from urllib.parse import urlparse as _urlparse
+                p = _urlparse(p).path or "/"
+            except Exception:
+                pass
+        if not p.startswith("/"):
+            p = "/" + p
+        return p or "/"
+
+    @property
+    def has_object_collection(self) -> bool:
+        """Collection-level object typing (e.g. /api/Products) without an
+        instance identifier. Never an authorization boundary by itself."""
+        return bool(self.object_type)
+
+    @property
     def has_object_reference(self) -> bool:
-        return bool(self.object_type) or "{" in self.path or re.search(r"/\d+", self.path)
+        """Instance-level object reference only (e.g. /api/Products/1,
+        /api/Users/{id}, /rest/basket/:id, UUID segments).
+
+        Collections (bare /api/Products) are NOT object references — a
+        publicly readable catalog is not evidence of an authorization
+        boundary failure. IP octets in absolute URLs must never match.
+        """
+        p = self.normalized_path
+        if "{" in p and "}" in p:
+            return True
+        if "/:" in p:
+            return True
+        if re.search(r"/\d+(?=/|$|\?|#)", p):
+            return True
+        if re.search(r"/[0-9a-fA-F-]{36}(?=/|$|\?|#)", p):
+            return True
+        if re.search(r"/[0-9a-fA-F]{16,32}(?=/|$|\?|#)", p):
+            return True
+        return False
 
 
 class SemanticParameter(BaseModel):

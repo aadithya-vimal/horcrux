@@ -20,6 +20,7 @@ from horcrux.intel.vuln_engines.normalize import (
 from horcrux.intel.vuln_engines.registry import get_engine, normalize_engine_id, provider_ids
 from horcrux.intel.vuln_engines.selector import select_engines
 from horcrux.intel.vuln_engines.types import (
+    CorrelationDisposition,
     CorrelatedVulnerability,
     EngineHealth,
     EngineReadiness,
@@ -377,6 +378,8 @@ def correlate_and_store(workspace: Any, state: Any,
             if entity.vuln_id not in seen:
                 existing.append(entity.model_dump())
         fresh.correlated_vulnerabilities = existing  # type: ignore[attr-defined]
+        # Promote corroborated/applicable vulnerabilities into canonical findings
+        _promote_entities_to_findings(fresh, entities)
         # external observations enter the unified Evidence model as RawObservations
         from horcrux.models import RawObservation
 
@@ -393,6 +396,118 @@ def correlate_and_store(workspace: Any, state: Any,
     except Exception:
         pass
     return entities
+
+
+def _promote_entities_to_findings(fresh: Any, entities: list[CorrelatedVulnerability]) -> None:
+    from horcrux.models import Finding, FindingStatus, Severity, ValidationState
+
+    sev_map = {
+        "critical": Severity.critical,
+        "high": Severity.high,
+        "medium": Severity.medium,
+        "low": Severity.low,
+        "info": Severity.info,
+    }
+
+    current_findings = list(getattr(fresh, "findings", []) or [])
+    by_cve: dict[str, Finding] = {}
+    by_id: dict[str, Finding] = {}
+    for f in current_findings:
+        by_id[f.id] = f
+        for c in getattr(f, "cves", []):
+            by_cve[c.upper()] = f
+
+    for entity in entities:
+        if entity.disposition in (
+            CorrelationDisposition.CONTRADICTED.value,
+            CorrelationDisposition.NOT_APPLICABLE.value,
+            CorrelationDisposition.STALE.value,
+        ):
+            continue
+
+        raw_sev = (entity.severity or "info").lower()
+        sev = sev_map.get(raw_sev, Severity.info)
+
+        # Check if already present by CVE
+        matched_finding: Optional[Finding] = None
+        for c in (entity.cves or ([entity.primary_cve] if entity.primary_cve else [])):
+            if c.upper() in by_cve:
+                matched_finding = by_cve[c.upper()]
+                break
+
+        if matched_finding:
+            for s in entity.sources:
+                if s not in matched_finding.source_providers:
+                    matched_finding.source_providers.append(s)
+                st = f"vuln:{s}"
+                if st not in matched_finding.source_tools:
+                    matched_finding.source_tools.append(st)
+            if entity.corroborated_by_native or entity.disposition == CorrelationDisposition.CORROBORATED.value:
+                matched_finding.validation_state = ValidationState.confirmed
+                matched_finding.status = FindingStatus.verified
+                matched_finding.correlation_status = "CORROBORATED"
+            if entity.max_cvss and (matched_finding.cvss is None or entity.max_cvss > matched_finding.cvss):
+                matched_finding.cvss = entity.max_cvss
+            for ref in entity.references[:5]:
+                if ref not in matched_finding.artifacts and ref not in matched_finding.reproduction:
+                    matched_finding.reproduction.append(ref)
+            continue
+
+        fid = f"ext-{entity.vuln_id[:32]}"
+        if fid in by_id:
+            continue
+
+        is_confirmed = entity.corroborated_by_native or entity.disposition == CorrelationDisposition.CORROBORATED.value
+        val_state = (
+            ValidationState.confirmed
+            if is_confirmed
+            else (
+                ValidationState.likely
+                if entity.disposition in (CorrelationDisposition.APPLICABLE.value, CorrelationDisposition.LIKELY_APPLICABLE.value)
+                else ValidationState.potential
+            )
+        )
+
+        f = Finding(
+            id=fid,
+            title=entity.title or (f"Vulnerability {entity.primary_cve}" if entity.primary_cve else "External Engine Vulnerability"),
+            category="external-vulnerability",
+            severity=sev,
+            confidence=0.92 if is_confirmed else 0.78,
+            status=FindingStatus.verified if is_confirmed else FindingStatus.suspected,
+            validation_state=val_state,
+            target=getattr(fresh, "target", "") or entity.asset or "",
+            affected_asset=entity.asset or getattr(fresh, "target", ""),
+            protocol="tcp",
+            port=entity.port,
+            source_tool=f"vuln:{entity.sources[0]}" if entity.sources else "vuln_engine",
+            source_tools=[f"vuln:{s}" for s in entity.sources] if entity.sources else ["vuln_engine"],
+            source_providers=entity.sources,
+            cves=entity.cves or ([entity.primary_cve] if entity.primary_cve else []),
+            cwes=entity.cwes,
+            cvss=entity.max_cvss,
+            affected_component=entity.product,
+            affected_version=entity.version,
+            affected_service=entity.service,
+            access_context="unauthenticated",
+            exploitability_state="PUBLIC_EXPLOIT_AVAILABLE" if entity.references else "MANUAL_REVIEW",
+            correlation_status="CORROBORATED" if is_confirmed else "EXTERNAL_PROMOTED",
+            evidence=entity.native_evidence + [
+                f"External engines: {', '.join(entity.sources)}",
+                f"Engine disposition: {entity.disposition}",
+            ] + ([f"Detail: {entity.disposition_reason}"] if entity.disposition_reason else []),
+            artifacts=[f"raw/vuln-{s}-results.json" for s in entity.sources],
+            reproduction=[f"External finding reference: {finding_id}" for finding_id in entity.finding_ids[:5]] + entity.references[:5],
+            why_it_matters=entity.description or f"Identified by external scanning engine(s): {', '.join(entity.sources)}.",
+            recommended_next_action=entity.remediation or "Remediate according to vendor advisory.",
+            next_action=entity.remediation or "Remediate according to vendor advisory.",
+        )
+        current_findings.append(f)
+        by_id[f.id] = f
+        for c in f.cves:
+            by_cve[c.upper()] = f
+
+    fresh.findings = current_findings
 
 
 def persist_runs(workspace: Any, runs: dict[str, Any]) -> None:
@@ -482,6 +597,7 @@ def feed_attack_paths(workspace: Any, entities: list[CorrelatedVulnerability]) -
                           "probability": "MEDIUM" if entity.severity == "high" else "HIGH",
                           "steps": steps,
                           "prerequisites": "operator must validate exploitability",
+                          "status": "HYPOTHESIS",
                           "assumptions": [f"scanner observation {entity.disposition.lower()}",
                                           "native service evidence present"],
                           "rank_score": 60 if entity.severity == "high" else 75,

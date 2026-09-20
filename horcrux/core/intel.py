@@ -53,6 +53,33 @@ def run_nuclei(ws, runner: CommandRunner, url: str) -> list[Finding]:
             curl_cmd = data.get("curl-command", "")
             extracted = data.get("extracted-results", [])
 
+            classification = info.get("classification") or {}
+            cve_field = classification.get("cve-id")
+            cves: list[str] = []
+            if isinstance(cve_field, list):
+                cves = [str(c).upper() for c in cve_field if c]
+            elif isinstance(cve_field, str) and cve_field:
+                cves = [cve_field.upper()]
+            if not cves and "cve-" in template_id.lower():
+                cve_match = re.search(r"cve-\d{4}-\d{4,7}", template_id, re.I)
+                if cve_match:
+                    cves = [cve_match.group(0).upper()]
+
+            cwe_field = classification.get("cwe-id")
+            cwes: list[str] = []
+            if isinstance(cwe_field, list):
+                cwes = [str(c).upper() for c in cwe_field if c]
+            elif isinstance(cwe_field, str) and cwe_field:
+                cwes = [cwe_field.upper()]
+
+            cvss_score = classification.get("cvss-score")
+            try:
+                cvss_val = float(cvss_score) if cvss_score is not None else None
+            except (ValueError, TypeError):
+                cvss_val = None
+            cvss_vector = str(classification.get("cvss-metrics") or "")
+            cpe = str(classification.get("cpe") or "")
+
             sev_map = {
                 "critical": Severity.critical,
                 "high": Severity.high,
@@ -61,11 +88,26 @@ def run_nuclei(ws, runner: CommandRunner, url: str) -> list[Finding]:
                 "info": Severity.info,
             }
             sev = sev_map.get(raw_sev, Severity.info)
-            val_state = (
-                ValidationState.confirmed
-                if sev in {Severity.critical, Severity.high}
-                else ValidationState.likely
+
+            # Deterministic evidence adjudication (Defect F)
+            # Confirmed ONLY when positive proof, extracted data, or explicit exploit verification exists
+            matcher_name = str(data.get("matcher-name") or "").lower()
+            has_proof = bool(extracted) or any(
+                m in matcher_name for m in ("proof", "rce", "extract", "token", "secret", "passwd", "leak", "flag")
             )
+
+            if has_proof:
+                val_state = ValidationState.confirmed
+                conf = 0.95
+            elif sev in {Severity.critical, Severity.high}:
+                val_state = ValidationState.likely
+                conf = 0.85
+            elif sev == Severity.medium:
+                val_state = ValidationState.likely
+                conf = 0.70
+            else:
+                val_state = ValidationState.potential
+                conf = 0.50
 
             evidence_items = [f"Matched: {matched_at}"]
             if extracted:
@@ -78,7 +120,7 @@ def run_nuclei(ws, runner: CommandRunner, url: str) -> list[Finding]:
                 title=name,
                 category="nuclei-vulnerability",
                 severity=sev,
-                confidence=0.94,
+                confidence=conf,
                 status=FindingStatus.verified if val_state == ValidationState.confirmed else FindingStatus.suspected,
                 validation_state=val_state,
                 target=parsed.hostname or ws.target,
@@ -86,6 +128,16 @@ def run_nuclei(ws, runner: CommandRunner, url: str) -> list[Finding]:
                 protocol="tcp",
                 port=port,
                 source_tool="nuclei",
+                source_tools=["nuclei"],
+                source_providers=["nuclei"],
+                cves=cves,
+                cwes=cwes,
+                cvss=cvss_val,
+                cvss_vector=cvss_vector,
+                cpe=cpe,
+                access_context="unauthenticated",
+                exploitability_state="PUBLIC_EXPLOIT_AVAILABLE" if cves else "MANUAL_REVIEW",
+                correlation_status="NATIVE",
                 evidence=evidence_items,
                 artifacts=[f"raw/nuclei-{port}.jsonl"],
                 why_it_matters=info.get("description", "Nuclei template match confirms vulnerability or misconfiguration."),

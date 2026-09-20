@@ -5,64 +5,58 @@ from horcrux.modules.web.scanner import WEB_PORTS
 
 
 def compute_investigation_actions(state: WorkspaceState) -> list[Action]:
-    """
-    Investigation-centric next actions derived from ApplicationModel, hypotheses,
-    and ranked investigations. Falls back to legacy scan actions when no agent state exists.
+    """Next actions sourced ONLY from materialized executable investigations.
+
+    - READY/PENDING/RUNNING investigations -> ranked actions (highest first).
+    - Otherwise -> a single explicit queue_drained terminal message.
+    Hypotheses, coverage gaps, and raw parameters never synthesize actions.
     """
     investigations = state.get_investigations()
-    hypotheses = state.get_hypotheses()
-    app = state.get_application_model()
     actions: list[Action] = []
 
-    if investigations or hypotheses or app.endpoints:
-        for inv in investigations:
-            if inv.state.value not in {"READY", "PENDING", "RUNNING"}:
-                continue
-            gain_boost = 10.0 if inv.expected_information_gain == "high" else 5.0
-            actions.append(
-                Action(
-                    id=f"investigate_{inv.id[:12]}",
-                    title=inv.objective,
-                    reason=inv.reason,
-                    score=min(99.0, 70.0 + inv.priority * 20 + gain_boost),
-                    command=f"assess focus investigation {inv.id}",
-                )
+    for inv in investigations:
+        if inv.state.value not in {"READY", "PENDING", "RUNNING"}:
+            continue
+        gain_boost = 10.0 if inv.expected_information_gain == "high" else 5.0
+        actions.append(
+            Action(
+                id=f"investigate_{inv.id[:12]}",
+                title=inv.objective,
+                reason=inv.reason,
+                score=min(99.0, 70.0 + inv.priority * 20 + gain_boost),
+                command=f"assess focus investigation {inv.id}",
             )
+        )
 
-        for hyp in hypotheses:
-            if hyp.status.value not in {"OPEN", "INVESTIGATING"}:
-                continue
-            actions.append(
-                Action(
-                    id=f"hypothesis_{hyp.id[:12]}",
-                    title=f"Investigate: {hyp.title[:60]}",
-                    reason=f"Open hypothesis ({hyp.confidence:.0%} confidence). Missing: {', '.join(hyp.validation_requirements[:2])}",
-                    score=min(95.0, 60.0 + hyp.confidence * 30),
-                    command=f"assess focus hypothesis {hyp.id}",
-                )
-            )
+    if actions:
+        unique: dict[str, Action] = {}
+        for a in sorted(actions, key=lambda x: -x.score):
+            if a.id not in unique:
+                unique[a.id] = a
+        return list(unique.values())
 
-        from horcrux.intel.coverage import assessment_completeness
-        completeness = assessment_completeness(state)
-        if not completeness["authorization_investigated"] and app.endpoints:
-            actions.append(
-                Action(
-                    id="authz_coverage_gap",
-                    title="Authorization has not been systematically investigated",
-                    reason="Object references or endpoints exist but authorization coverage is insufficient.",
-                    score=88.0,
-                    command="assess",
-                )
-            )
-
-        if actions:
-            unique: dict[str, Action] = {}
-            for a in sorted(actions, key=lambda x: -x.score):
-                if a.id not in unique:
-                    unique[a.id] = a
-            return list(unique.values())
-
-    return compute_next_actions(state)
+    # Queue drained: never manufacture an unrelated action from raw
+    # application-model parameters. Only materialized executable
+    # investigations may appear in next().
+    invs = state.get_investigations()
+    by_state: dict[str, int] = {}
+    for inv in invs:
+        by_state[inv.state.value] = by_state.get(inv.state.value, 0) + 1
+    hyps = state.get_hypotheses()
+    open_hyps = sum(1 for h in hyps if h.status.value in {"OPEN", "INVESTIGATING"})
+    return [Action(
+        id="queue_drained",
+        title="No executable investigations remain.",
+        reason=(f"Assessment state: {len(invs)} investigations "
+                f"({by_state.get('SUPPORTED', 0)} supported, "
+                f"{by_state.get('REFUTED', 0)} refuted, "
+                f"{by_state.get('INSUFFICIENT_EVIDENCE', 0)} insufficient, "
+                f"{by_state.get('BLOCKED', 0)} blocked), "
+                f"{open_hyps} open hypotheses, "
+                f"{len(state.findings)} canonical findings. See status."),
+        score=0.0,
+        command="status",
+    )]
 
 
 def compute_next_actions(state: WorkspaceState) -> list[Action]:
@@ -242,27 +236,56 @@ def compute_next_actions(state: WorkspaceState) -> list[Action]:
             )
         )
 
-    # 9. Discovered Parameters (STRICTLY GATED BY ACTUAL PARAMETER EVIDENCE)
-    # Scored by semantic class: object IDs, URL-fetchers, auth credentials,
-    # and file inputs compete at the top; cosmetic query flags do not.
+    # 9. Discovered Parameters (STRICTLY GATED BY SERVER-BOUND EVIDENCE)
+    # A JS-extracted token (e.g. isPeriodic from polyfills.js) is never
+    # actionable: the parameter must be bound to an actual server-side
+    # request/API route present in the discovered/model route set.
     if state.parameters:
-        sample_param = state.parameters[0]
         try:
-            app_params = {p.name.lower(): p.param_class
-                          for p in state.get_application_model().parameters}
-            param_class = app_params.get(sample_param.name.lower(), "general")
+            from horcrux.intel.parameters import is_server_bound_parameter
+            from horcrux.intel.test_matrix import normalize_matrix_path as _norm
+            known: set[str] = set()
+            try:
+                for ep in state.get_application_model().endpoints:
+                    known.add(_norm(ep.path))
+            except Exception:
+                pass
+            try:
+                for p in state.discovered_paths:
+                    known.add(_norm(p.path))
+            except Exception:
+                pass
+            try:
+                for wt in state.web_targets:
+                    for wep in wt.endpoints or []:
+                        known.add(_norm(wep.path))
+            except Exception:
+                pass
+            bound = [p for p in state.parameters if is_server_bound_parameter(p, known)]
         except Exception:
-            param_class = "general"
-        high_value_param = param_class in {"object_id", "url_fetch",
-                                           "auth_credential", "file"}
-        actions.append(
-            Action(
-                id="param_audit",
-                title=f"Audit input parameter '{sample_param.name}' ({sample_param.location})",
-                reason=f"Parameter evidence identified from {sample_param.source} on {sample_param.endpoint or 'web target'}; test input validation.",
-                score=91.5 if high_value_param else 62.0,
+            bound = []
+        if bound:
+            try:
+                app_params = {p.name.lower(): p.param_class
+                              for p in state.get_application_model().parameters}
+            except Exception:
+                app_params = {}
+            def _pkey(p):
+                cls = str(app_params.get(p.name.lower(), "general"))
+                high = cls in {"object_id", "url_fetch", "auth_credential", "file"}
+                return (0 if high else 1, p.name)
+            sample_param = sorted(bound, key=_pkey)[0]
+            param_class = str(app_params.get(sample_param.name.lower(), "general"))
+            high_value_param = param_class in {"object_id", "url_fetch",
+                                               "auth_credential", "file"}
+            actions.append(
+                Action(
+                    id="param_audit",
+                    title=f"Audit input parameter '{sample_param.name}' ({sample_param.location})",
+                    reason=f"Parameter evidence identified from {sample_param.source} on {sample_param.endpoint or 'web target'}; test input validation.",
+                    score=91.5 if high_value_param else 62.0,
+                )
             )
-        )
 
     # 10. CVE / SearchSploit Intelligence State
     # Gated by reliable software evidence: MUST have valid version and confidence >= 0.70

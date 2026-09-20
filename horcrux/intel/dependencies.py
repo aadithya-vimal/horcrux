@@ -183,8 +183,15 @@ def apply_dependencies(state: Any, investigations: list) -> list:
     evidence arrives.
     """
     from horcrux.intel.investigations import InvestigationState
+    blocked_states = (
+        InvestigationState.BLOCKED,
+        InvestigationState.REQUIRES_AUTH,
+        InvestigationState.REQUIRES_SECOND_IDENTITY,
+        InvestigationState.REQUIRES_TOOL,
+        InvestigationState.REQUIRES_OPERATOR,
+    )
     for inv in investigations:
-        parked_blocked = (inv.state == InvestigationState.BLOCKED
+        parked_blocked = (inv.state in blocked_states
                           and inv.result_summary.startswith("blocked prerequisite:"))
         if inv.state not in (InvestigationState.READY, InvestigationState.PENDING) \
                 and not parked_blocked:
@@ -197,8 +204,19 @@ def apply_dependencies(state: Any, investigations: list) -> list:
                 inv.state = InvestigationState.READY
                 inv.result_summary = ""
         else:
-            inv.state = InvestigationState.BLOCKED
-            inv.result_summary = "blocked prerequisite: " + "; ".join(blocked[:3])
+            blocked_str = "; ".join(blocked[:3])
+            inv.result_summary = "blocked prerequisite: " + blocked_str
+            b_lower = blocked_str.lower()
+            if any(k in b_lower for k in ("two", "second", "cross-context", "identity context")):
+                inv.state = InvestigationState.REQUIRES_SECOND_IDENTITY
+            elif any(k in b_lower for k in ("auth", "session", "user access context", "admin access context", "authenticated")):
+                inv.state = InvestigationState.REQUIRES_AUTH
+            elif any(k in b_lower for k in ("tool", "binary", "missing tool")):
+                inv.state = InvestigationState.REQUIRES_TOOL
+            elif any(k in b_lower for k in ("operator", "approval")):
+                inv.state = InvestigationState.REQUIRES_OPERATOR
+            else:
+                inv.state = InvestigationState.BLOCKED
     return investigations
 
 

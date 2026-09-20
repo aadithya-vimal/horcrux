@@ -68,7 +68,11 @@ def test_headless_scan_without_authentication_does_not_block(tmp_path: Path):
 
     # 2. Auth-dependent investigation is immediately BLOCKED with explicit reason
     target_inv = next(i for i in final_invs if i.id == authz_inv.id)
-    assert target_inv.state in (InvestigationState.BLOCKED, InvestigationState.UNAVAILABLE)
+    assert target_inv.state in (
+        InvestigationState.BLOCKED,
+        InvestigationState.UNAVAILABLE,
+        InvestigationState.REQUIRES_SECOND_IDENTITY,
+    )
     assert "MISSING_ACCESS_CONTEXT" in target_inv.result_summary
 
     # 3. Public/unrelated investigations continued and finished

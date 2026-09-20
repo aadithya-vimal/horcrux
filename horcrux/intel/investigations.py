@@ -28,6 +28,12 @@ class InvestigationState(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"  # capability unavailable
     SCOPE_BLOCKED = "SCOPE_BLOCKED"  # scope/policy blocked
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"  # operator approval required
+    REQUIRES_AUTH = "REQUIRES_AUTH"  # requires authenticated session
+    REQUIRES_SECOND_IDENTITY = "REQUIRES_SECOND_IDENTITY"  # requires distinct 2nd identity
+    REQUIRES_TOOL = "REQUIRES_TOOL"  # required tool binary unavailable
+    REQUIRES_OPERATOR = "REQUIRES_OPERATOR"  # manual operator action required
+    NOT_APPLICABLE = "NOT_APPLICABLE"  # surface retired; test no longer applicable
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"  # explicitly out of engagement scope
 
 
 ACTIONABLE_STATES = {InvestigationState.READY, InvestigationState.PENDING}
@@ -35,7 +41,14 @@ TERMINAL_EVIDENCE_STATES = {
     InvestigationState.SUPPORTED, InvestigationState.REFUTED,
     InvestigationState.COMPLETE, InvestigationState.INSUFFICIENT_EVIDENCE,
 }
-ALL_DONE_STATES = TERMINAL_EVIDENCE_STATES | {InvestigationState.FAILED}
+ALL_DONE_STATES = TERMINAL_EVIDENCE_STATES | {
+    InvestigationState.FAILED, InvestigationState.REQUIRES_AUTH,
+    InvestigationState.REQUIRES_SECOND_IDENTITY, InvestigationState.REQUIRES_TOOL,
+    InvestigationState.REQUIRES_OPERATOR, InvestigationState.NOT_APPLICABLE,
+    InvestigationState.OUT_OF_SCOPE, InvestigationState.BLOCKED,
+    InvestigationState.UNAVAILABLE, InvestigationState.SCOPE_BLOCKED,
+    InvestigationState.APPROVAL_REQUIRED,
+}
 
 
 #Cosmetic/low-value observations must never dominate scheduling.
@@ -104,7 +117,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Determine whether object IDs are authorization-bound",
             "capabilities": ["http", "proxy"],
-            "tools": ["http_probe", "identity_switch"],
+            "tools": ["authz_compare", "identity_switch", "http_probe"],
             "gain": "high",
             "specialist": "AuthorizationAgent",
             "impact": 0.9,
@@ -112,7 +125,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Map object ownership relationships across endpoints",
             "capabilities": ["http", "browser"],
-            "tools": ["http_probe", "browser_navigate"],
+            "tools": ["authz_compare", "http_probe", "browser_navigate"],
             "gain": "high",
             "specialist": "AuthorizationAgent",
             "impact": 0.85,
@@ -120,7 +133,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Compare object access across identities (horizontal/vertical)",
             "capabilities": ["http"],
-            "tools": ["identity_compare", "authz_compare"],
+            "tools": ["authz_compare", "identity_compare"],
             "gain": "high",
             "specialist": "AuthorizationAgent",
             "impact": 0.9,
@@ -131,7 +144,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Test privileged endpoints as anonymous and authenticated user",
             "capabilities": ["http"],
-            "tools": ["http_probe", "identity_switch"],
+            "tools": ["authz_compare", "identity_switch", "http_probe"],
             "gain": "high",
             "specialist": "AuthorizationAgent",
             "impact": 0.9,
@@ -159,7 +172,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Analyze JWT/session token structure and validation",
             "capabilities": ["http"],
-            "tools": ["http_probe", "jwt_analyze"],
+            "tools": ["jwt_analyze", "http_probe"],
             "gain": "high",
             "specialist": "AuthenticationAgent",
             "impact": 0.85,
@@ -179,7 +192,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Test input validation on search and filter parameters",
             "capabilities": ["http"],
-            "tools": ["http_probe", "param_fuzz"],
+            "tools": ["param_fuzz", "http_probe"],
             "gain": "medium",
             "specialist": "WebAgent",
             "impact": 0.7,
@@ -189,7 +202,7 @@ HYPOTHESIS_TO_INVESTIGATIONS: dict[HypothesisClass, list[dict[str, Any]]] = {
         {
             "objective": "Test GraphQL introspection and authorization boundaries",
             "capabilities": ["http"],
-            "tools": ["http_probe", "graphql_probe"],
+            "tools": ["graphql_probe", "http_probe"],
             "gain": "high",
             "specialist": "APIAgent",
             "impact": 0.85,
@@ -586,6 +599,18 @@ def generate_investigations(
             )
         )
 
+    # Deterministic test-matrix investigations derived from ApplicationModel assets (Phase B/C)
+    try:
+        from horcrux.intel.test_matrix import derive_applicable_tests, test_case_to_investigation
+        matrix_tests = derive_applicable_tests(app)
+        for tc in matrix_tests:
+            inv = test_case_to_investigation(tc)
+            if inv.objective.lower() not in seen_objectives:
+                seen_objectives.add(inv.objective.lower())
+                investigations.append(inv)
+    except Exception:
+        pass
+
     return investigations
 
 
@@ -609,10 +634,16 @@ def rank_investigations(investigations: list[Investigation]) -> list[Investigati
     """Rank investigations by information gain score.
 
     Low-value cosmetic observations (robots.txt, favicon, ...) are demoted so
-    information-dense security investigations dominate.
+    information-dense security investigations dominate. Matrix-derived
+    security tests are data-driven work items and are exempt from cosmetic
+    demotion — they must never starve behind heuristics.
     """
     for inv in investigations:
         inv.priority = inv.score.total
+        obs = getattr(inv, "observations", []) or []
+        is_matrix = any(str(o).startswith("matrix_tc_id:") for o in obs)
+        if is_matrix:
+            continue
         objective = (inv.objective or "").lower()
         if any(pat in objective for pat in LOW_VALUE_OBJECTIVE_PATTERNS):
             inv.priority = max(0.0, inv.priority - 0.35)
@@ -655,6 +686,12 @@ def merge_investigations(
         InvestigationState.SCOPE_BLOCKED,
         InvestigationState.APPROVAL_REQUIRED,
         InvestigationState.BLOCKED,
+        InvestigationState.REQUIRES_AUTH,
+        InvestigationState.REQUIRES_SECOND_IDENTITY,
+        InvestigationState.REQUIRES_TOOL,
+        InvestigationState.REQUIRES_OPERATOR,
+        InvestigationState.NOT_APPLICABLE,
+        InvestigationState.OUT_OF_SCOPE,
     }
     lookup = {i.id: i for i in existing}
     merged: list[Investigation] = []
@@ -684,3 +721,33 @@ def choose_highest_value_task(ranked: list[Investigation]) -> Investigation | No
         if inv.state in {InvestigationState.READY, InvestigationState.PENDING}:
             return inv
     return None
+
+
+def prune_stale_matrix_investigations(
+    existing: list[Investigation],
+    applicable_tc_ids: set[str],
+) -> list[Investigation]:
+    """Terminalize matrix investigations whose test no longer derives.
+
+    Continuous replenishment cuts both ways: new surface enqueues new tests,
+    and retired surface (e.g. static JS bundle pseudo-params that are now
+    excluded) must leave an explicit terminal state instead of lingering as
+    stale INSUFFICIENT/READY work. Only non-terminal matrix items are touched;
+    executed evidence is never rewritten.
+    """
+    for inv in existing:
+        tc_id = ""
+        for obs in getattr(inv, "observations", []) or []:
+            if str(obs).startswith("matrix_tc_id:"):
+                tc_id = str(obs).split(":", 1)[1]
+                break
+        if not tc_id or tc_id in applicable_tc_ids:
+            continue
+        if inv.state in (InvestigationState.READY, InvestigationState.PENDING,
+                         InvestigationState.RUNNING):
+            inv.state = InvestigationState.NOT_APPLICABLE
+            inv.result_summary = (
+                "Retired: matrix test no longer applicable to current attack "
+                "surface (e.g. static-asset or collection reclassification)."
+            )
+    return existing

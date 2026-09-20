@@ -40,7 +40,13 @@ class Workspace:
         for directory in (self.raw, self.responses, self.headers, self.reports):
             directory.mkdir(exist_ok=True)
 
-        self.state_file = self.root / "state.json"
+    @property
+    def state_file(self) -> Path:
+        return getattr(self, "_state_file", None) or (self.root / "state.json")
+
+    @state_file.setter
+    def state_file(self, value: Path) -> None:
+        self._state_file = Path(value)
 
     def load(self) -> WorkspaceState:
         if self.state_file.exists():

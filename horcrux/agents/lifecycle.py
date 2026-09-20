@@ -28,6 +28,12 @@ def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     ingest_workspace_state(state)
     app = state.get_application_model()
 
+    try:
+        from horcrux.intel.cve import correlate_software_vulnerabilities
+        correlate_software_vulnerabilities(state)
+    except Exception:
+        pass
+
     state.assessment_phase = AssessmentPhase.HYPOTHESIS_GENERATION.value
     hypotheses = update_hypotheses_from_state(state)
     state.set_hypotheses(hypotheses)
@@ -38,6 +44,16 @@ def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     candidates = generate_investigations(app, hypotheses, coverage_gaps)
     existing = state.get_investigations()
     merged = merge_investigations(existing, candidates)
+    # Continuous replenishment pruning: retire matrix work whose test no
+    # longer derives from the current attack surface (explicit NOT_APPLICABLE,
+    # never silent deletion).
+    try:
+        from horcrux.intel.investigations import prune_stale_matrix_investigations
+        from horcrux.intel.test_matrix import derive_applicable_tests
+        applicable_ids = {tc.ensure_id() for tc in derive_applicable_tests(app, state)}
+        merged = prune_stale_matrix_investigations(merged, applicable_ids)
+    except Exception:
+        pass
     # Dependency graph: score prerequisites, park impossible work as BLOCKED.
     try:
         from horcrux.intel.dependencies import apply_dependencies

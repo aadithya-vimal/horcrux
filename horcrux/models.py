@@ -203,6 +203,34 @@ class ArtifactRecord(BaseModel):
     status: str = "completed"
 
 
+class LiveExecutionRecord(BaseModel):
+    target: str = ""
+    resolved_host: str = ""
+    port: int = 0
+    protocol: str = "tcp"
+    capability_id: str = ""
+    timestamp: datetime = Field(default_factory=utcnow)
+    success: bool = True
+    status_code: Optional[int] = None
+    socket_result: str = ""
+    evidence_reference: str = ""
+
+
+class ExecutionProvenanceRecord(BaseModel):
+    assessment_run_id: str = ""
+    target_input: str = ""
+    resolved_target: str = ""
+    execution_mode: str = "LOCAL"
+    target_provenance: str = "UNKNOWN"
+    live_execution_observed: bool = False
+    provenance_source: str = ""
+    first_live_execution_timestamp: Optional[datetime] = None
+    last_live_execution_timestamp: Optional[datetime] = None
+    successful_live_capability: str = ""
+    successful_live_connection_target: str = ""
+    records: list[LiveExecutionRecord] = Field(default_factory=list)
+
+
 # Backward-compatible alias for existing tests and code
 class FindingStatus(str, Enum):
     suspected = "suspected"
@@ -266,6 +294,24 @@ class Finding(BaseModel):
     protocol: str = "tcp"
     port: Optional[int] = None
     source_tool: str = "horcrux"
+    source_tools: list[str] = Field(default_factory=list)
+    source_providers: list[str] = Field(default_factory=list)
+    cves: list[str] = Field(default_factory=list)
+    cwes: list[str] = Field(default_factory=list)
+    cvss: Optional[float] = None
+    cvss_vector: str = ""
+    cpe: str = ""
+    affected_component: str = ""
+    affected_version: str = ""
+    affected_service: str = ""
+    access_context: str = ""
+    exploitability_state: str = "MANUAL_REVIEW"
+    exploit_intelligence_refs: list[str] = Field(default_factory=list)
+    correlation_status: str = "NATIVE"
+    evidence_refs: list[str] = Field(default_factory=list)
+    investigation_id: str = ""
+    hypothesis_id: str = ""
+    validation_details: dict[str, Any] = Field(default_factory=dict)
     evidence: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
     reproduction: list[str] = Field(default_factory=list)
@@ -273,6 +319,12 @@ class Finding(BaseModel):
     recommended_next_action: str = ""
     next_action: str = ""
     timestamp: datetime = Field(default_factory=utcnow)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.source_tools and self.source_tool:
+            self.source_tools = [self.source_tool]
+        elif self.source_tools and not self.source_tool:
+            self.source_tool = self.source_tools[0]
 
 
 class Action(BaseModel):
@@ -336,7 +388,7 @@ PROFILES: dict[str, ScanProfile] = {
         port_spec="top1000",
         include_udp=True,
         udp_port_count=50,
-        enabled_modules=["network", "web_probe", "service_enum"],
+        enabled_modules=["network", "web_probe", "web_discovery", "service_enum"],
         expensive_checks=False,
         cve_correlation=False,
         wordlist_strategy="common",
@@ -350,7 +402,7 @@ PROFILES: dict[str, ScanProfile] = {
         udp_port_count=100,
         enabled_modules=["network", "web_probe", "web_discovery", "service_enum"],
         expensive_checks=True,
-        cve_correlation=False,
+        cve_correlation=True,
         wordlist_strategy="medium",
         command_timeout=900,
     ),
@@ -372,7 +424,7 @@ PROFILES: dict[str, ScanProfile] = {
         include_udp=False,
         enabled_modules=["network", "web_probe", "web_discovery"],
         expensive_checks=True,
-        cve_correlation=False,
+        cve_correlation=True,
         wordlist_strategy="common",
         command_timeout=450,
     ),
@@ -384,7 +436,7 @@ PROFILES: dict[str, ScanProfile] = {
         udp_port_count=50,
         enabled_modules=["network", "service_enum"],
         expensive_checks=False,
-        cve_correlation=False,
+        cve_correlation=True,
         command_timeout=300,
     ),
     "intel": ScanProfile(
@@ -575,6 +627,17 @@ class WorkspaceState(BaseModel):
     # --- Phase 9 engagement + quality ---
     engagement_config: dict[str, Any] = Field(default_factory=dict)
     execution_mode: str = "LOCAL"
+    # Provenance of the scan target — must be set explicitly by the operator or scan entrypoint.
+    # Valid values:
+    #   "SYNTHETIC_TEST_TARGET"  — fixture/mock; satisfies integration tests only, NEVER live acceptance
+    #   "REAL_LOCAL_TARGET"      — genuine service running locally (not a HORCRUX fixture)
+    #   "REAL_REMOTE_TARGET"     — genuine service on a remote host
+    #   "UNKNOWN"                — provenance not established (default; treated as SYNTHETIC for acceptance gates)
+    target_provenance: str = "UNKNOWN"
+    provenance_source: str = ""
+    live_execution_observed: bool = False
+    execution_provenance: Optional[ExecutionProvenanceRecord] = None
+    live_execution_records: list[LiveExecutionRecord] = Field(default_factory=list)
     false_negative_audit: dict[str, Any] = Field(default_factory=dict)
     quality_metrics: dict[str, Any] = Field(default_factory=dict)
     # --- External vulnerability engine fabric ---
@@ -592,7 +655,10 @@ class WorkspaceState(BaseModel):
             return EngagementPolicy.from_dict(self.policy)
         pol = EngagementPolicy()
         if self.target and self.target != "ready":
+            target_host = self.target.split(":")[0]
             pol.scope.allowed_targets = [self.target]
+            if target_host != self.target:
+                pol.scope.allowed_targets.append(target_host)
         return pol
 
     def set_policy(self, policy: Any) -> None:
@@ -709,4 +775,56 @@ class WorkspaceState(BaseModel):
             self.mission = mission
         elif mission is None:
             self.mission = {}
+
+    def record_live_execution(
+        self,
+        capability_id: str,
+        target: str,
+        host: str = "",
+        port: int = 0,
+        protocol: str = "tcp",
+        success: bool = True,
+        status_code: Optional[int] = None,
+        socket_result: str = "",
+        evidence_reference: str = "",
+    ) -> LiveExecutionRecord:
+        now = utcnow()
+        res_host = host or (target.split(":")[0] if ":" in target else target)
+        res_port = port or (int(target.split(":")[1]) if ":" in target and target.split(":")[1].isdigit() else (443 if protocol == "https" else 80))
+        rec = LiveExecutionRecord(
+            target=target,
+            resolved_host=res_host,
+            port=res_port,
+            protocol=protocol,
+            capability_id=capability_id,
+            timestamp=now,
+            success=success,
+            status_code=status_code,
+            socket_result=socket_result,
+            evidence_reference=evidence_reference,
+        )
+        self.live_execution_records.append(rec)
+        if success:
+            self.live_execution_observed = True
+            if not self.execution_provenance:
+                self.execution_provenance = ExecutionProvenanceRecord(
+                    assessment_run_id=self.assessment_run_id,
+                    target_input=self.target or target,
+                    resolved_target=f"{res_host}:{res_port}",
+                    execution_mode=self.execution_mode,
+                    target_provenance=self.target_provenance,
+                    live_execution_observed=True,
+                    provenance_source=f"live_{capability_id}",
+                    first_live_execution_timestamp=now,
+                    last_live_execution_timestamp=now,
+                    successful_live_capability=capability_id,
+                    successful_live_connection_target=f"{res_host}:{res_port}",
+                )
+            else:
+                self.execution_provenance.last_live_execution_timestamp = now
+                if not self.execution_provenance.successful_live_capability:
+                    self.execution_provenance.successful_live_capability = capability_id
+                    self.execution_provenance.successful_live_connection_target = f"{res_host}:{res_port}"
+            self.execution_provenance.records.append(rec)
+        return rec
 

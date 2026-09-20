@@ -49,6 +49,11 @@ def scan(
     engines: str = typer.Option("", "--engines", help="Comma-separated vulnerability engines to use (tenable,qualys,rapid7,greenbone,msdefender)"),
     skip_engines: bool = typer.Option(False, "--skip-engines", help="Skip all external vulnerability engines (native only)"),
     engine_mode: str = typer.Option("best", "--engine-mode", help="Engine strategy: best (dedupe redundant) or all"),
+    time_limit: int = typer.Option(None, "--time-limit", "-t", help="Max run duration in seconds"),
+    request_limit: int = typer.Option(None, "--request-limit", help="Max target HTTP requests"),
+    rate_limit: str = typer.Option("normal", "--rate-limit", help="Rate limit profile: conservative, normal, aggressive"),
+    identity: str = typer.Option("", "--identity", help="Test identity specification (role:token or label:username:password)"),
+    max_iterations: int = typer.Option(None, "--max-iterations", "-n", help="Max investigation loop iterations"),
 ):
     """Run full automated attack surface reconnaissance against a target."""
     console = Console()
@@ -64,7 +69,13 @@ def scan(
         engines=engine_list,
         skip_engines=skip_engines,
         engine_mode=engine_mode,
+        time_limit=time_limit,
+        request_limit=request_limit,
+        rate_limit=rate_limit,
+        identity=identity,
+        max_iterations=max_iterations,
     ).scan(deep=deep, verify=verify)
+
     from horcrux.ui.ascii import fanfare
     fanfare(console, f"TARGET SYNTHESIS COMPLETE: {target}")
 
@@ -225,7 +236,10 @@ def ai_cli(ctx: typer.Context):
 @app.command()
 def assess(
     target: str = typer.Argument(..., help="Target workspace to assess"),
-    iterations: int = typer.Option(15, "--iterations", "-n", help="Max investigation loop iterations"),
+    iterations: int = typer.Option(250, "--iterations", "-n", help="Max investigation loop iterations"),
+    time_limit: int = typer.Option(None, "--time-limit", "-t", help="Max run duration in seconds"),
+    request_limit: int = typer.Option(None, "--request-limit", help="Max target HTTP requests"),
+    identity: str = typer.Option("", "--identity", help="Test identity specification (role:token)"),
 ):
     """Run agentic VAPT assessment loop against a target workspace."""
     from horcrux.agents.coordinator import run_full_assessment
@@ -233,10 +247,31 @@ def assess(
 
     console = Console()
     ws = Workspace(target)
-    state = ws.load()
+    if identity:
+        try:
+            st = ws.load()
+            eng_cfg = st.get_engagement_config()
+            cfg_dict = eng_cfg.model_dump() if hasattr(eng_cfg, "model_dump") else {}
+            identities = cfg_dict.get("test_identities", []) or []
+            parts = identity.split(":", 1)
+            role = parts[0]
+            token = parts[1] if len(parts) > 1 else ""
+            identities.append({
+                "label": role,
+                "role": role if role in ("user", "admin") else "user",
+                "login_path": "/login",
+                "headers": {"Authorization": f"Bearer {token}" if not token.lower().startswith("bearer") else token} if token else {},
+            })
+            cfg_dict["test_identities"] = identities
+            cfg_dict["test_identities_configured"] = True
+            st.set_engagement_config(cfg_dict)
+            ws.save(st)
+        except Exception:
+            pass
+
     console.print(f"\n[bold bright_magenta]⚡ ASSESSMENT:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]\n")
 
-    run_full_assessment(ws, max_iterations=iterations)
+    run_full_assessment(ws, max_iterations=iterations, time_limit=time_limit, request_limit=request_limit)
 
     state = ws.load()
     app = state.get_application_model()
@@ -267,6 +302,7 @@ def assess(
 
     console.print(f"\n[bold]Hypotheses:[/bold] {len(state.get_hypotheses())}  [bold]Findings:[/bold] {len(state.findings)}")
     fanfare(console, f"ASSESSMENT CYCLE COMPLETE: {target}")
+
 
 
 # ── HEADLESS AUTONOMOUS COMMANDS ──────────────────────────────────────────
@@ -476,11 +512,119 @@ def headless_export(
 app.add_typer(headless_app, name="headless")
 
 
+# ── SECURITY COVERAGE COMMANDS ──────────────────────────────────────────
+coverage_app = typer.Typer(
+    name="coverage",
+    help="Inspect security control coverage and test matrix completeness",
+    no_args_is_help=True,
+)
+
+
+def _render_security_coverage(target: str):
+    console = Console()
+    ws = _resolve_workspace_for_mission(target)
+    if not ws.state_file.exists():
+        console.print(f"[bold red]Workspace state not found for target:[/bold red] {target}")
+        raise typer.Exit(code=1)
+    state = ws.load()
+    from horcrux.intel.test_matrix import compute_security_test_coverage
+    cov = compute_security_test_coverage(state)
+
+    console.print(f"\n[bold bright_magenta]🛡  SECURITY CONTROL & TEST MATRIX COVERAGE:[/bold bright_magenta] [bold bright_cyan]{target}[/bold bright_cyan]\n")
+
+    elems = cov["surface_elements"]
+    console.print(f"[bold white]Attack Surface Elements Mapped:[/bold white] "
+                  f"[cyan]{elems['endpoints']}[/cyan] endpoints | "
+                  f"[cyan]{elems['parameters']}[/cyan] parameters | "
+                  f"[cyan]{elems['objects']}[/cyan] objects | "
+                  f"[cyan]{elems['workflows']}[/cyan] workflows | "
+                  f"[cyan]{elems['services']}[/cyan] services\n")
+
+    table = Table(box=box.ROUNDED, header_style="bold bright_white")
+    table.add_column("Security Domain / Test Family", style="cyan", min_width=32)
+    table.add_column("Applicable", justify="right", style="bold")
+    table.add_column("Executable", justify="right", style="white")
+    table.add_column("Executed", justify="right", style="blue")
+    table.add_column("Supported (Flaw)", justify="right", style="bold red")
+    table.add_column("Refuted (Secure)", justify="right", style="green")
+    table.add_column("Blocked / Req", justify="right", style="yellow")
+    table.add_column("Insufficient", justify="right", style="yellow")
+    table.add_column("Not Tested", justify="right", style="dim")
+    table.add_column("Confirmed Findings", justify="right", style="bold magenta")
+
+    total_executable = int(cov.get("total_executable", 0))
+    total_findings = 0
+    total_insufficient = int(cov.get("total_insufficient", 0))
+    total_not_tested = int(cov.get("total_pending", cov.get("total_not_tested", 0)))
+
+    for row in cov["family_breakdown"]:
+        supp_str = f"[bold red]{row.get('supported', 0)}[/bold red]" if row.get('supported', 0) > 0 else "0"
+        ref_str = f"[green]{row.get('refuted', 0)}[/green]" if row.get('refuted', 0) > 0 else "0"
+        findings_count = row.get("confirmed_findings", 0)
+        find_str = f"[bold magenta]{findings_count}[/bold magenta]" if findings_count > 0 else "-"
+        executable = row.get("executable", 0)
+        total_findings += findings_count
+
+        table.add_row(
+            row["name"],
+            str(row["applicable"]),
+            str(executable),
+            str(row["executed"]),
+            supp_str,
+            ref_str,
+            str(row["blocked"]),
+            str(row.get("insufficient", 0)),
+            str(row.get("pending", 0)),
+            find_str,
+        )
+
+    table.add_section()
+    table.add_row(
+        "[bold white]TOTAL DERIVED TESTS[/bold white]",
+        f"[bold white]{cov['total_applicable']}[/bold white]",
+        f"[bold white]{total_executable}[/bold white]",
+        f"[bold blue]{cov['total_executed']}[/bold blue]",
+        f"[bold red]{cov['total_supported']}[/bold red]",
+        f"[bold green]{cov['total_refuted']}[/bold green]",
+        f"[bold yellow]{cov['total_blocked']}[/bold yellow]",
+        f"[yellow]{total_insufficient}[/yellow]",
+        f"[dim]{total_not_tested}[/dim]",
+        f"[bold magenta]{total_findings}[/bold magenta]",
+    )
+
+    console.print(table)
+    console.print(f"\n[bold]Testing Completeness:[/bold] [bold cyan]{cov['completeness_percentage']:.1f}%[/bold cyan] "
+                  f"([blue]{cov['total_executed']}[/blue] executed / [white]{cov['total_applicable']}[/white] applicable derived tests)")
+    console.print(f"[dim]Executable: {total_executable} | Blocked/requirements: {cov['total_blocked']} | "
+                  f"Insufficient evidence: {total_insufficient} | Not tested: {total_not_tested}[/dim]")
+    console.print("[bold yellow]⚠ INVARIANT:[/bold yellow] [dim]NOT TESTED != SECURE. Absence of evidence is not evidence of absence.[/dim]\n")
+
+
+@coverage_app.command("security")
+def coverage_security(
+    target: str = typer.Argument(..., help="Target IP, hostname, or workspace"),
+):
+    """Report derived security test matrix coverage across endpoints, params, and objects."""
+    _render_security_coverage(target)
+
+
+@coverage_app.command("assessment")
+def coverage_assessment(
+    target: str = typer.Argument(..., help="Target IP, hostname, or workspace"),
+):
+    """Report assessment completeness and security test matrix coverage."""
+    _render_security_coverage(target)
+
+
+app.add_typer(coverage_app, name="coverage")
+
+
 KNOWN_COMMANDS = {
-    "scan", "assess", "headless", "doctor", "tools", "console", "gallery", "artifacts",
+    "scan", "assess", "coverage", "headless", "doctor", "tools", "console", "gallery", "artifacts",
     "settings", "report", "ask", "ai", "status", "replay", "benchmark",
     "engines", "--help", "-h", "--version", "-v",
 }
+
 
 
 
@@ -493,8 +637,12 @@ def main():
     # If the operator runs `horcrux 10.10.10.10 [--deep]`, route to `scan` command
     if first not in KNOWN_COMMANDS and not first.startswith("-"):
         sys.argv.insert(1, "scan")
+    elif first == "coverage" and len(sys.argv) >= 3:
+        if sys.argv[2].lower() not in ("security", "assessment", "--help", "-h"):
+            sys.argv.insert(2, "security")
 
     app()
+
 
 
 if __name__ == "__main__":

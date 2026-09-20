@@ -102,6 +102,48 @@ def get_audit_badge(status_val: str) -> str:
     return f"[dim]{status_val}[/dim]"
 
 
+PATH_STATUS_BADGES = {
+    "CONFIRMED": "[bold red]CONFIRMED FINDING[/bold red]",
+    "SUPPORTED": "[green]SUPPORTED[/green]",
+    "REFUTED": "[dim]REFUTED[/dim]",
+    "INSUFFICIENT_EVIDENCE": "[yellow]INSUFFICIENT_EVIDENCE[/yellow]",
+    "BLOCKED": "[yellow]BLOCKED[/yellow]",
+    "HYPOTHESIS": "[cyan]HYPOTHESIS[/cyan]",
+}
+
+
+def path_status_badge(status: str) -> str:
+    """Canonical graph status label. Unknown/missing means HYPOTHESIS."""
+    return PATH_STATUS_BADGES.get(str(status or "HYPOTHESIS"), f"[dim]{status}[/dim]")
+
+
+def edge_display_kind(edge: dict) -> str:
+    """One of inferred|evidenced|observed|unverified.
+
+    'evidenced' requires validator/adjudication evidence
+    (security_evidence); discovery observations render as 'observed'.
+    """
+    e = edge or {}
+    if e.get("inference"):
+        return "inferred"
+    if e.get("security_evidence"):
+        return "evidenced"
+    if e.get("evidence"):
+        return "observed"
+    return "unverified"
+
+
+def _edge_display_line(edge: dict) -> str:
+    kind = edge_display_kind(edge)
+    if kind == "inferred":
+        return "[yellow]╌ inferred — needs validation[/yellow]"
+    if kind == "evidenced":
+        return "[green]━ evidenced (validator)[/green]"
+    if kind == "observed":
+        return "[dim]┄ observed (not security evidence)[/dim]"
+    return "[dim]┄ unverified[/dim]"
+
+
 def get_validation_badge(val_state: str) -> str:
     vs = str(val_state).upper()
     if vs == "CONFIRMED":
@@ -1187,16 +1229,15 @@ class ConsoleApp:
             for path in attack_paths[:5]:
                 name = path.get("name", "path")
                 prob = path.get("probability", "")
-                node = paths_branch.add(
-                    f"[bright_white]{name}[/bright_white] [dim]({prob})[/dim]"
-                )
+                status = str(path.get("status", "") or "HYPOTHESIS")
+                finding_ids = path.get("finding_ids", []) or []
+                badge = path_status_badge(status)
+                header = f"[bright_white]{name}[/bright_white] [dim]({prob})[/dim] {badge}"
+                if finding_ids:
+                    header += f" [dim]finding:{finding_ids[0][:12]}[/dim]"
+                node = paths_branch.add(header)
                 for edge in path.get("edges", [])[:4]:
-                    if edge.get("inference"):
-                        node.add("[yellow]╌ inferred — needs validation[/yellow]")
-                    elif edge.get("evidence"):
-                        node.add("[green]━ evidenced[/green]")
-                    else:
-                        node.add("[dim]┄ unverified[/dim]")
+                    node.add(_edge_display_line(edge))
 
         # Credentials branch
         if state.credentials:

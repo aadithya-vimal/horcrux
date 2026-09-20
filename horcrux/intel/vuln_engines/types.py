@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utcnow() -> datetime:
@@ -160,6 +160,57 @@ class NormalizedExternalFinding(BaseModel):
     disposition_reason: str = ""
     stale: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "engine_id" in data and "provider" not in data:
+                data["provider"] = data["engine_id"]
+            if "provider_name" in data and "source_product" not in data:
+                data["source_product"] = data["provider_name"]
+            if "native_id" in data and "source_finding_id" not in data:
+                data["source_finding_id"] = data["native_id"]
+            if "cve" in data and "cves" not in data:
+                val = data["cve"]
+                data["cves"] = [val] if isinstance(val, str) and val else (val or [])
+            if "cwe" in data and "cwes" not in data:
+                val = data["cwe"]
+                data["cwes"] = [val] if isinstance(val, str) and val else (val or [])
+            if "cvss_score" in data and "cvss" not in data:
+                data["cvss"] = data["cvss_score"]
+            if "affected_component" in data and "product" not in data:
+                data["product"] = data["affected_component"]
+            if "affected_version" in data and "version" not in data:
+                data["version"] = data["affected_version"]
+            if "raw_evidence" in data:
+                ev = data.get("evidence", [])
+                if isinstance(ev, list):
+                    ev.append(data["raw_evidence"])
+                    data["evidence"] = ev
+                elif isinstance(ev, str):
+                    data["evidence"] = [ev, data["raw_evidence"]]
+        return data
+
+    @property
+    def cve(self) -> str:
+        return self.cves[0] if self.cves else ""
+
+    @property
+    def cwe(self) -> str:
+        return self.cwes[0] if self.cwes else ""
+
+    @property
+    def engine_id(self) -> str:
+        return self.provider
+
+    @property
+    def affected_component(self) -> str:
+        return self.product
+
+    @property
+    def affected_version(self) -> str:
+        return self.version
+
 
 class CorrelatedVulnerability(BaseModel):
     """HORCRUX vulnerability entity — deduplicated across engines."""
@@ -186,3 +237,11 @@ class CorrelatedVulnerability(BaseModel):
     description: str = ""
     remediation: str = ""
     references: list[str] = Field(default_factory=list)
+
+    @property
+    def cve(self) -> str:
+        return self.primary_cve or (self.cves[0] if self.cves else "")
+
+    @property
+    def notes(self) -> str:
+        return self.disposition_reason
