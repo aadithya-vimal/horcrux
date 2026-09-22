@@ -752,9 +752,18 @@ def _adapter_param_fuzz(ctx: dict) -> CapabilityResult:
     if not interesting and params:
         interesting = list(params)[:5]
 
-    # Ownership gate: never spray globally discovered or default parameter
-    # names onto unrelated endpoints. Only endpoint-owned parameters may
-    # be fuzzed; otherwise refuse (no requests, no model contamination).
+    if _use_offline(target, ctx):
+        ms = int((time.monotonic() - t0) * 1000)
+        return _ok("param_fuzz", {"endpoint": endpoint, "tested": params,
+                                  "interesting": interesting, "synthetic": True},
+                   evidence=[_ev("parameter_observation", {"endpoint": endpoint, "parameter": p},
+                                 source="param_fuzz", confidence=0.6) for p in interesting],
+                   provenance="horcrux.modules.web.scanner:param", duration_ms=ms)
+
+    # Ownership gate (live only): never spray globally discovered or
+    # default parameter names onto unrelated endpoints. Only
+    # endpoint-owned parameters may be fuzzed; otherwise refuse
+    # (no requests, no model contamination).
     try:
         from horcrux.intel.parameters import is_owned_in_model as _owned_in_model
         _app = ctx.get("application_model")
@@ -773,14 +782,6 @@ def _adapter_param_fuzz(ctx: dict) -> CapabilityResult:
                                   "target": target, "access_context": "anonymous"},
                    evidence=[], provenance="horcrux.security:ownership-gate",
                    duration_ms=ms)
-
-    if _use_offline(target, ctx):
-        ms = int((time.monotonic() - t0) * 1000)
-        return _ok("param_fuzz", {"endpoint": endpoint, "tested": params,
-                                  "interesting": interesting, "synthetic": True},
-                   evidence=[_ev("parameter_observation", {"endpoint": endpoint, "parameter": p},
-                                 source="param_fuzz", confidence=0.6) for p in interesting],
-                   provenance="horcrux.modules.web.scanner:param", duration_ms=ms)
 
     # Live active parameter differential probe execution
     _family = str(ctx.get("matrix_family", "") or "")
@@ -1231,6 +1232,43 @@ def _validate_auth_generic(req, method: str, url: str, cap_id: str, test_id: str
             return req(method, url, headers_=h, cookies_=c)
         return sv.validate_auth_enforcement(anon, _authed, url, capability=cap_id, test_id=test_id)
     enforced = sv.validate_auth_enforcement(anon, None, url, capability=cap_id, test_id=test_id)
+    # Unauthenticated mutation testing: never infer POST/PUT/DELETE posture
+    # from a GET 401. Actually attempt minimal state-changing requests on
+    # mutation-candidate resources (bounded, non-destructive shapes).
+    try:
+        low_url = (url or "").lower()
+        if method.upper() == "GET" and re.search(
+                r"/(?:api|rest|v\d+)/[a-z_-]+/?$|feedback|basket|order|address|card|user|register",
+                low_url):
+            for _m, _body in (("POST", {}), ("PUT", {"probe_only": True}),
+                               ("DELETE", None)):
+                try:
+                    _r = req(_m, url, body=_body, headers_=headers, cookies_=cookies)
+                except Exception:
+                    continue
+                _st = _r.get("status", 0)
+                if _st in (401, 403, 405):
+                    continue
+                _txt = _r.get("text", "") or ""
+                _low = _txt.lower()
+                _created = (_st in (201, 202)) or bool(re.search(
+                    r'"id"\s*:\s*\d+|"created(at|d)"|created successfully|"token"\s*:|"success"\s*:\s*true',
+                    _txt, re.I))
+                _error_only = bool(re.search(
+                    r"error|invalid|failed|exception|not allowed|forbidden|missing|required",
+                    _low, re.I)) and not _created
+                if _error_only:
+                    continue
+                if _st in (200, 201, 204) and len(_txt) > 20 and _created:
+                    ev = [sv.build_evidence(cap_id, test_id, url,
+                                         {"method": _m, "identity": "anonymous"},
+                                         _r, _txt[:800], "", stage="SUPPORTED",
+                                         extra={"unauth_mutation": True})]
+                    return sv.ValidatorResult("STRONG_UNAUTH_MUTATION", 0.85, ev,
+                                           {"unauth_mutation": True, "method": _m,
+                                            "status": _st}, "SUPPORTED")
+    except Exception:
+        pass
     # Login surfaces get an authentication-bypass attempt: SQL injection
     # in the identity field with an auth-token oracle (deterministic,
     # no AI). Only login-ish endpoints; never sprayed elsewhere.
@@ -1345,6 +1383,60 @@ def _augment_xss_with_browser(ctx: dict, result: CapabilityResult) -> Capability
     payload_url = base_url + endpoint
     sep = "&" if "?" in payload_url else "?"
     payload_url = f"{payload_url}{sep}{param}={token}"
+    # Static DOM-flow analysis first: pair URL-sourced parameter reads
+    # with dangerous sinks in same-origin bundles (deterministic, no
+    # browser needed). A paired flow upgrades to STRONG.
+    try:
+        from horcrux.modules.web.js_analyzer import (
+            detect_dom_xss_flows, extract_script_sources)
+        _flows: list[dict] = []
+        try:
+            import httpx as _hx
+            _root = _hx.Client(verify=False, timeout=8.0).get(base_url + "/")
+            _scripts = extract_script_sources(_root.text or "", base_url)
+        except Exception:
+            _scripts = []
+        from urllib.parse import urlparse as _up
+        _base_host = _up(base_url).netloc
+        import httpx as _hx2
+        for _s in _scripts[:3]:
+            try:
+                if _up(_s).netloc and _up(_s).netloc != _base_host:
+                    continue
+                _jt = _hx2.Client(verify=False, timeout=8.0).get(_s)
+                if _jt.status_code != 200 or len(_jt.text) > 3000000:
+                    continue
+                _flows.extend(detect_dom_xss_flows(_jt.text, param))
+                if _flows:
+                    break
+            except Exception:
+                continue
+        if _flows:
+            _f0 = _flows[0]
+            result.evidence.append(_ev("validator_evidence", {
+                "capability": "xss_probe", "test_id": data.get("test_id", ""),
+                "stage": "CONFIRMED",
+                "extra": {"dom_flow": True, "source": _f0["source"],
+                          "sink": _f0["sink_kind"],
+                          "excerpt": _f0["excerpt"][:200]},
+            }, source="xss_probe", confidence=0.85))
+            data["verdict"] = "STRONG_XSS_EVIDENCE"
+            data["xss_confirmed"] = True
+            data["unescaped_payload_reflected"] = True
+            data["confirmed_via"] = "dom-flow"
+            data["dom_check"] = "static-flow-confirmed"
+            # Overwrite the stale HTTP-probe context: the confirmation
+            # comes from the DOM source->sink flow, not HTTP reflection.
+            data["context"] = "dom-sink:" + str(_f0.get("sink_kind", ""))
+            data["dom_flow"] = {"source": _f0.get("source", ""),
+                                "sink": _f0.get("sink_kind", ""),
+                                "excerpt": _f0.get("excerpt", "")[:200]}
+            result.structured_data = data
+            print(f"XSS_PROBE TEST  param={param} endpoint={endpoint} "
+                  f"verdict=STRONG_XSS_EVIDENCE conf=0.85 via=dom-flow")
+            return result
+    except Exception:
+        pass
     probe = _playwright_probe()
     if not probe["ok"]:
         result.evidence.append(_ev("validator_evidence", {
@@ -1431,6 +1523,217 @@ def _adapter_upload_probe(ctx: dict) -> CapabilityResult:
 
 def _adapter_auth_probe(ctx: dict) -> CapabilityResult:
     return _run_validator_adapter("auth_probe", ctx, "auth")
+
+
+def _adapter_file_probe(ctx: dict) -> CapabilityResult:
+    """Directory listing -> artifact download -> magic/secret/XOR analysis."""
+    import time as _t
+    t0 = _t.monotonic()
+    target = ctx.get("target", "")
+    endpoint = _norm_endpoint(ctx.get("endpoint", ctx.get("path", "/ftp")))
+    matrix_family = str(ctx.get("matrix_family", "") or "")
+    test_id = f"file_probe:{endpoint}"
+    if _use_offline(target, ctx):
+        ms = int((_t.monotonic() - t0) * 1000)
+        return _ok("file_probe", {"endpoint": endpoint, "verdict": "NO_EFFECT",
+                                  "synthetic": True, "test_id": test_id,
+                                  "matrix_family": matrix_family,
+                                  "target": target, "access_context": "anonymous"},
+                   evidence=[], provenance="horcrux.security_validators:file:offline",
+                   duration_ms=ms)
+    try:
+        from horcrux.modules.web import security_validators as sv
+        base_url = _live_base_url(ctx, target)
+        req = _live_request_fn(ctx)
+        # Fetch the full listing body for link extraction: the shared
+        # request helper truncates text at 8000 chars, which hides file
+        # entries buried under page CSS (e.g. serve-index <ul id="files">).
+        links: list[str] | None = None
+        for _cand in ([endpoint] if endpoint.endswith("/") else [endpoint, endpoint + "/"]):
+            try:
+                import httpx as _hx
+                import re as _re
+                from urllib.parse import urljoin as _uj, urlparse as _up
+                with _hx.Client(verify=False, timeout=10.0) as _c:
+                    _r = _c.get(base_url + _cand)
+                    if _r.status_code == 200 and len(_r.text) > 100:
+                        # Resolve relative hrefs against the fetched URL
+                        # ("/ftp" + "ftp/x" must become "/ftp/x", not doubled).
+                        _paths = []
+                        for _h in _re.findall(r'href="([^"]+)"', _r.text)[:40]:
+                            try:
+                                _paths.append(_up(_uj(base_url + _cand, _h)).path or "/")
+                            except Exception:
+                                continue
+                        if _paths:
+                            links = _paths
+                            endpoint = _cand
+                            break
+            except Exception:
+                continue
+        res = sv.validate_file_artifact(req, base_url, endpoint, links=links,
+                                        capability="file_probe", test_id=test_id)
+        # Directory roots often render an index only with trailing slash.
+        if res.verdict == "INSUFFICIENT_EVIDENCE" and not endpoint.endswith("/"):
+            try:
+                res = sv.validate_file_artifact(req, base_url, endpoint + "/",
+                                                capability="file_probe",
+                                                test_id=test_id)
+                endpoint = endpoint + "/"
+            except Exception:
+                pass
+        ms = int((_t.monotonic() - t0) * 1000)
+        structured = _structured_from_validator("file_probe", res, {"endpoint": endpoint})
+        if isinstance(res.details, dict):
+            for key in ("artifacts",):
+                if key in res.details:
+                    structured[key] = res.details[key]
+        structured.setdefault("test_id", test_id)
+        structured.setdefault("matrix_family", matrix_family)
+        structured.setdefault("target", target)
+        structured.setdefault("access_context", "anonymous")
+        structured.setdefault("security_property", "sensitive file exposure")
+        print(f"FILE_PROBE TEST  endpoint={endpoint} verdict={res.verdict} "
+              f"conf={res.confidence:.2f} artifacts={len((res.details or {}).get('artifacts', []))}")
+        return _ok("file_probe", structured,
+                   evidence=_validator_evidence("file_probe", res),
+                   provenance="horcrux.modules.web.security_validators:file:live",
+                   duration_ms=ms)
+    except Exception as exc:
+        return _fail("file_probe", FailureClass.TOOL_FAILED,
+                     f"file_probe failed: {exc}")
+
+
+def _adapter_controls_probe(ctx: dict) -> CapabilityResult:
+    """Security headers + behavioral CORS + bounded rate-limit audit."""
+    import time as _t
+    t0 = _t.monotonic()
+    target = ctx.get("target", "")
+    endpoint = _norm_endpoint(ctx.get("endpoint", ctx.get("path", "/")))
+    matrix_family = str(ctx.get("matrix_family", "") or "")
+    test_id = f"controls_probe:{endpoint}"
+    if _use_offline(target, ctx):
+        ms = int((_t.monotonic() - t0) * 1000)
+        return _ok("controls_probe", {"endpoint": endpoint, "verdict": "NO_EFFECT",
+                                      "synthetic": True, "test_id": test_id,
+                                      "matrix_family": matrix_family,
+                                      "target": target, "access_context": "anonymous"},
+                   evidence=[], provenance="horcrux.security_validators:controls:offline",
+                   duration_ms=ms)
+    try:
+        from horcrux.modules.web import security_validators as sv
+        base_url = _live_base_url(ctx, target)
+        scheme = str(ctx.get("scheme", "http"))
+        req = _live_request_fn(ctx)
+        paths = [endpoint]
+        try:
+            app = ctx.get("application_model")
+            seen = {endpoint}
+            for e in (getattr(app, "endpoints", []) or []):
+                p = str(getattr(e, "path", "") or "")
+                if p in seen or len(paths) >= 4:
+                    continue
+                if p.lower().endswith((".js", ".css", ".png", ".map")):
+                    continue
+                # Rate-limit bursts run only against the primary endpoint
+                # when it is itself an auth surface; extras never trigger
+                # repeated bursts (one bounded burst per surface).
+                if any(k in p.lower() for k in ("login", "register", "signin",
+                                                "reset", "otp", "verify")) \
+                        and not any(k in endpoint.lower() for k in
+                                    ("login", "register", "signin", "reset",
+                                     "otp", "verify")):
+                    continue
+                seen.add(p)
+                paths.append(p)
+        except Exception:
+            pass
+        res = sv.validate_security_controls(
+            req, base_url, paths, is_https=(scheme == "https"),
+            capability="controls_probe", test_id=test_id)
+        ms = int((_t.monotonic() - t0) * 1000)
+        structured = _structured_from_validator("controls_probe", res, {"endpoint": endpoint})
+        for key in ("csp_missing", "headers_missing", "cors_reflection",
+                    "cors_wildcard", "rate_limit_absent", "rate_limit_enforced"):
+            if key in (res.details or {}):
+                structured[key] = res.details[key]
+        structured.setdefault("test_id", test_id)
+        structured.setdefault("matrix_family", matrix_family)
+        structured.setdefault("target", target)
+        structured.setdefault("access_context", "anonymous")
+        structured.setdefault("security_property", "security configuration")
+        print(f"CONTROLS_PROBE TEST  endpoint={endpoint} verdict={res.verdict} conf={res.confidence:.2f}")
+        return _ok("controls_probe", structured,
+                   evidence=_validator_evidence("controls_probe", res),
+                   provenance="horcrux.modules.web.security_validators:controls:live",
+                   duration_ms=ms)
+    except Exception as exc:
+        return _fail("controls_probe", FailureClass.TOOL_FAILED,
+                     f"controls_probe failed: {exc}")
+
+
+def _adapter_registration_probe(ctx: dict) -> CapabilityResult:
+    """Unauthenticated registration -> JWT issuance -> verified use."""
+    import time as _t
+    t0 = _t.monotonic()
+    target = ctx.get("target", "")
+    base_url = _live_base_url(ctx, target)
+    matrix_family = str(ctx.get("matrix_family", "") or "")
+    endpoint = _norm_endpoint(ctx.get("endpoint", ctx.get("path", "/register")))
+    test_id = f"registration_probe:{endpoint}"
+    if _use_offline(target, ctx):
+        ms = int((_t.monotonic() - t0) * 1000)
+        return _ok("registration_probe", {"endpoint": endpoint, "verdict": "NO_EFFECT",
+                                          "synthetic": True, "test_id": test_id,
+                                          "matrix_family": matrix_family,
+                                          "target": target, "access_context": "anonymous"},
+                   evidence=[], provenance="horcrux.security_validators:registration:offline",
+                   duration_ms=ms)
+    try:
+        from horcrux.modules.web import security_validators as sv
+        app = ctx.get("application_model")
+        reg_paths, login_paths = _registration_surfaces(app, endpoint)
+        req = _live_request_fn(ctx)
+        res = sv.validate_registration_jwt_flow(
+            req, base_url, reg_paths, login_paths,
+            verify_paths=["/rest/user/whoami", "/me", "/api/Users",
+                          "/users/v1/name1", endpoint],
+            capability="registration_probe", test_id=test_id)
+        ms = int((_t.monotonic() - t0) * 1000)
+        structured = _structured_from_validator("registration_probe", res, {
+            "endpoint": endpoint,
+            "registration_jwt_confirmed": res.verdict == "STRONG_REGISTRATION_JWT"})
+        structured.setdefault("test_id", test_id)
+        structured.setdefault("matrix_family", matrix_family)
+        structured.setdefault("target", target)
+        structured.setdefault("access_context", "anonymous")
+        structured.setdefault("security_property", "unauthenticated authentication-material issuance")
+        print(f"REGISTRATION_PROBE TEST  endpoint={endpoint} verdict={res.verdict} conf={res.confidence:.2f}")
+        return _ok("registration_probe", structured,
+                   evidence=_validator_evidence("registration_probe", res),
+                   provenance="horcrux.modules.web.security_validators:registration:live",
+                   duration_ms=ms)
+    except Exception as exc:
+        return _fail("registration_probe", FailureClass.TOOL_FAILED,
+                     f"registration_probe failed: {exc}")
+
+
+def _registration_surfaces(app: Any, endpoint: str) -> tuple[list[str], list[str]]:
+    """Registration/login candidate paths from the model + endpoint."""
+    reg = [endpoint] if any(k in endpoint.lower() for k in
+                            ("register", "signup", "sign-up", "users")) else []
+    login: list[str] = []
+    try:
+        for e in (getattr(app, "endpoints", []) or []):
+            p = str(getattr(e, "path", "") or "")
+            pl = p.lower()
+            if any(k in pl for k in ("register", "signup", "sign-up")) and p not in reg:
+                reg.append(p)
+            if any(k in pl for k in ("login", "signin", "sign-in", "authenticate")) and p not in login:
+                login.append(p)
+    except Exception:
+        pass
+    return reg[:4] or [endpoint], login[:4]
 
 
 def _adapter_api_probe(ctx: dict) -> CapabilityResult:
@@ -1577,21 +1880,47 @@ def _adapter_authz_compare(ctx: dict) -> CapabilityResult:
 
             _cross = re.sub(r"/([1-9]\d*)", lambda m: f"/{int(m.group(1)) + 1}", endpoint, count=1) \
                 if re.search(r"/[1-9]\d*", endpoint) else endpoint
-            _res = _sv.validate_authz_differential(_fetch_a, _fetch_b, endpoint, _cross,
+            # Proven instance URLs (from object-instance discovery) take
+            # precedence over blind numeric increment.
+            _obj_a = str(ctx.get("object_url_a", "") or "")
+            _obj_b = str(ctx.get("object_url_b_cross", "") or "")
+            _base_ep = _obj_a or endpoint
+            _cross_ep = _obj_b or _cross
+            _res = _sv.validate_authz_differential(_fetch_a, _fetch_b, _base_ep, _cross_ep,
                                                    identity_a="user-a", identity_b=str(_ident_b))
+            # Public-data guard (§13): a cross-identity "differential" on an
+            # anonymously readable object is not an authorization boundary.
+            # Downgrade to public-collection before any promotion.
+            if _res.verdict in ("STRONG_AUTHZ_EVIDENCE", "BEHAVIORAL_DIFFERENTIAL"):
+                try:
+                    _anon = _req("GET", _cross_ep if _cross_ep.startswith("http")
+                                 else f"{scheme}://{host}:{port}{_cross_ep}")
+                    _abody = _anon.get("text", "") or ""
+                    from horcrux.modules.web.security_validators import _fingerprint as _fp
+                    from horcrux.modules.web.security_validators import redact as _redact
+                    _hashes = {_fp(str(e.get("response_excerpt", "") or ""))["hash"]
+                               for e in (_res.evidence or [])}
+                    if _anon.get("status") == 200 and len(_abody) > 30 \
+                            and _fp(_redact(_abody)[:2000])["hash"] in _hashes:
+                        from horcrux.modules.web.security_validators import ValidatorResult as _VR
+                        _res = _VR("NO_EFFECT", 0.85, list(_res.evidence or []),
+                                   {"enforced": False, "public_collection": True,
+                                    "anonymous_readable": True}, "REFUTED")
+                except Exception:
+                    pass
             ms = int((time.monotonic() - t0) * 1000)
             structured = _structured_from_validator("authz_compare", _res,
-                                                    {"endpoint": endpoint, "affected_asset": _cross,
+                                                    {"endpoint": _base_ep, "affected_asset": _cross_ep,
                                                      "verdict": _res.verdict})
             if _res.verdict in ("STRONG_AUTHZ_EVIDENCE", "BEHAVIORAL_DIFFERENTIAL"):
                 structured.update({"potential_gap": True, "idor_confirmed": True,
                                    "private_entity": True,
                                    "status_anonymous": _res.evidence[0].get("response_meta", {}).get("status") if _res.evidence else 200})
-                print(f"AUTHZ TEST  A -> {endpoint}  B -> {_cross}  result: CROSS-BOUNDARY-ACCESS")
+                print(f"AUTHZ TEST  A -> {_base_ep}  B -> {_cross_ep}  result: CROSS-BOUNDARY-ACCESS")
             else:
                 structured.update({"potential_gap": False,
                                    "authorization_enforced": _res.verdict == "NO_EFFECT"})
-                print(f"AUTHZ TEST  A -> {endpoint}  B -> {_cross}  result: FORBIDDEN")
+                print(f"AUTHZ TEST  A -> {_base_ep}  B -> {_cross_ep}  result: FORBIDDEN")
             return _ok("authz_compare", structured,
                        evidence=_validator_evidence("authz_compare", _res),
                        provenance="horcrux.security_validators:authz-differential:live",
@@ -2117,6 +2446,21 @@ def build_production_capabilities() -> list[Capability]:
                    SafetyClass.LOW, _adapter_auth_probe, _availability("none"),
                    30, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
                    "Anonymous vs authenticated enforcement; REQUIRES_AUTH when creds absent"),
+        Capability("registration_probe", "Unauthenticated registration JWT issuance validator", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.MEDIUM, _adapter_registration_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Anonymous registration -> JWT issuance -> verified protected access"),
+        Capability("controls_probe", "Security headers / CORS / rate-limit auditor", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.LOW, _adapter_controls_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Header audit with context + behavioral CORS + bounded rate-limit burst"),
+        Capability("file_probe", "Exposed file download + artifact classifier", CapabilityCategory.VALIDATION,
+                   ["endpoint"], ["endpoint"], ["validator_evidence"],
+                   SafetyClass.LOW, _adapter_file_probe, _availability("none"),
+                   60, "horcrux.modules.web.security_validators", "horcrux.modules.web.security_validators",
+                   "Directory enumeration + magic-byte + secret + XOR-recovery analysis"),
         Capability("api_probe", "API security semantics validator", CapabilityCategory.VALIDATION,
                    ["endpoint"], ["endpoint"], ["validator_evidence"],
                    SafetyClass.MEDIUM, _adapter_api_probe, _availability("none"),

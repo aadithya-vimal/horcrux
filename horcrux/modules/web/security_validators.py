@@ -99,8 +99,13 @@ def httpx_request_fn(method: str, url: str, query: dict | None = None,
             elif body is not None:
                 kw["json"] = body
             resp = c.request(method, url, params=query, **kw)
+            try:
+                _prefix = bytes(resp.content[:64]).hex()
+            except Exception:
+                _prefix = ""
             return {"status": resp.status_code, "headers": dict(resp.headers),
-                    "text": resp.text[:8000], "elapsed_ms": (time.monotonic() - t0) * 1000.0}
+                    "text": resp.text[:8000], "elapsed_ms": (time.monotonic() - t0) * 1000.0,
+                    "content_prefix": _prefix}
     except Exception as exc:
         return {"status": 0, "headers": {}, "text": f"request failed: {exc}",
                 "elapsed_ms": (time.monotonic() - t0) * 1000.0, "error": str(exc)}
@@ -532,6 +537,144 @@ def validate_auth_enforcement(anon_fn: Callable[[], dict], auth_fn: Callable[[],
     return ValidatorResult("NO_EFFECT", 0.5, ev, {}, "OBSERVED")
 
 
+def validate_registration_jwt_flow(request_fn: Callable, base_url: str,
+                                   register_paths: list[str],
+                                   login_paths: list[str],
+                                   verify_paths: list[str] | None = None,
+                                   capability: str = "registration_probe",
+                                   test_id: str = "registration-jwt",
+                                   auth_context: str = "anonymous") -> ValidatorResult:
+    """Unauthenticated registration -> JWT issuance -> verified use.
+
+    Registers a random throwaway account, extracts a structurally valid
+    JWT, and verifies it against a protected resource. Confirmation
+    requires all three links; token strings are never stored in evidence
+    (header/payload metadata only).
+    """
+    import json as _j
+    import secrets as _ss
+    ev: list[dict] = []
+
+    def _jwt_meta(tok: str) -> dict:
+        try:
+            import base64 as _b
+            parts = tok.split(".")
+            if len(parts) != 3:
+                return {}
+            pad = lambda s: s + "=" * (-len(s) % 4)
+            header = _j.loads(_b.urlsafe_b64decode(pad(parts[0])).decode("utf-8", "replace"))
+            payload = _j.loads(_b.urlsafe_b64decode(pad(parts[1])).decode("utf-8", "replace"))
+            if not isinstance(header, dict) or not isinstance(payload, dict):
+                return {}
+            return {"alg": str(header.get("alg", "")), "typ": str(header.get("typ", "")),
+                    "sub": str(payload.get("sub", payload.get("id", payload.get("email", ""))))[:60]}
+        except Exception:
+            return {}
+
+    tag = f"hx{_ss.token_hex(3)}"
+    creds = {"email": f"{tag}@horcrux.test", "username": f"{tag}",
+             "password": f"Hx-{_ss.token_hex(8)}!"}
+    registered_at = ""
+    for path in (register_paths or [])[:3]:
+        try:
+            r = request_fn("POST", base_url + path, body=dict(creds))
+        except Exception:
+            continue
+        ev.append(build_evidence(capability, test_id, base_url + path,
+                                 {"email": creds["email"]}, r,
+                                 (r.get("text", "") or "")[:600], "",
+                                 auth_context=auth_context, stage="OBSERVED"))
+        if r.get("status") in (200, 201):
+            registered_at = path
+            break
+    if not registered_at:
+        return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.35, ev,
+                               {"registration": "no 2xx from candidates"},
+                               "INSUFFICIENT_EVIDENCE")
+    token, token_where = "", ""
+    for path in (login_paths or [])[:3]:
+        for ident in ({"email": creds["email"], "password": creds["password"]},
+                      {"username": creds["username"], "password": creds["password"]}):
+            try:
+                r = request_fn("POST", base_url + path, body=dict(ident))
+            except Exception:
+                continue
+            try:
+                data = _j.loads(r.get("text", "") or "{}")
+            except Exception:
+                data = {}
+            t = _extract_registration_token(data)
+            if r.get("status") == 200 and t:
+                token, token_where = t, path
+                break
+        if token:
+            break
+    # Some APIs return the token directly at registration.
+    if not token:
+        try:
+            data = _j.loads((ev[-1].get("response_meta", {}) or {}).get("text", "") or "{}")
+        except Exception:
+            data = {}
+        token = _extract_registration_token(data)
+        token_where = registered_at if token else ""
+    meta = _jwt_meta(token) if token else {}
+    if not meta:
+        return ValidatorResult("NO_EFFECT", 0.7, ev,
+                               {"registration": registered_at,
+                                "jwt_issued": False}, "REFUTED")
+    verified_at = ""
+    for probe in (verify_paths or ["/rest/user/whoami", "/me", "/api/Users",
+                                   "/users/v1/name1"])[:6]:
+        for _attempt in range(2):
+            try:
+                r = request_fn("GET", base_url + probe,
+                               headers_={"Authorization": f"Bearer {token}"})
+            except Exception:
+                continue
+            if r.get("status") == 200 and len(r.get("text", "")) > 10:
+                verified_at = probe
+                break
+        if verified_at:
+            break
+    ev.append(build_evidence(capability, test_id, base_url + registered_at,
+                             {"registered": registered_at, "token_from": token_where,
+                              "jwt_alg": meta.get("alg", ""), "jwt_sub": meta.get("sub", ""),
+                              "verified_at": verified_at or "unverified"},
+                             {"status": 200}, "", auth_context=auth_context,
+                             stage="CONFIRMED" if verified_at else "OBSERVED",
+                             extra={"jwt_meta": meta}))
+    if verified_at:
+        return ValidatorResult("STRONG_REGISTRATION_JWT", 0.93, ev,
+                               {"registration": registered_at,
+                                "jwt_issued": True, "jwt_alg": meta.get("alg", ""),
+                                "verified_at": verified_at,
+                                "follow_up": "token grants authenticated access"},
+                               "CONFIRMED")
+    return ValidatorResult("BEHAVIORAL_DIFFERENTIAL", 0.6, ev,
+                           {"registration": registered_at, "jwt_issued": True,
+                            "verified_at": ""}, "SUPPORTED")
+
+
+def _extract_registration_token(data: Any) -> str:
+    if isinstance(data, dict):
+        for k in ("token", "accessToken", "access_token", "auth_token",
+                  "idToken",
+                  "id_token", "jwt", "authToken", "authentication"):
+            v = data.get(k)
+            if isinstance(v, str) and v.count(".") == 2 and len(v) > 20:
+                return v
+        for v in data.values():
+            t = _extract_registration_token(v)
+            if t:
+                return t
+    elif isinstance(data, list):
+        for v in data:
+            t = _extract_registration_token(v)
+            if t:
+                return t
+    return ""
+
+
 def _ownership_fields(body: str) -> dict:
     out: dict[str, str] = {}
     for k in ("userid", "user_id", "ownerid", "owner_id", "email", "username"):
@@ -539,6 +682,372 @@ def _ownership_fields(body: str) -> dict:
         if m:
             out[k] = m.group(1)[:80]
     return out
+
+
+_FILE_MAGIC = (
+    (b"\x03\xd9\xa2\x9a", "keepass-kdbx"),
+    (b"-----BEGIN ", "pem-key"),
+    (b"SQLite format 3\x00", "sqlite-db"),
+    (b"PK\x03\x04", "zip-archive"),
+    (b"\x1f\x8b", "gzip-archive"),
+    (b"%PDF", "pdf-document"),
+)
+
+_SECRET_RES = (
+    ("password", re.compile(r"(?i)\b(password|passwd|pwd)\b\s*[:=]\s*\S+")),
+    ("api_key", re.compile(r"(?i)\b(api[_-]?key|apikey)\b\s*[:=]\s*\S+")),
+    ("token", re.compile(r"(?i)\b(token|secret|client_secret)\b\s*[:=]\s*\S+")),
+    ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("connection_string", re.compile(r"(?i)(mongodb|mysql|postgres)://\S+")),
+    ("internal_url", re.compile(r"https?://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)\S+")),
+)
+
+_TEXT_CT = ("text/", "json", "yaml", "xml", "javascript")
+
+
+def _classify_blob(raw: bytes) -> str:
+    for magic, kind in _FILE_MAGIC:
+        if raw.startswith(magic):
+            return kind
+    return ""
+
+
+def _classify_text_body(body: str) -> str:
+    """Magic matching tolerant of text-decoded binary (utf-8 and latin-1)."""
+    for enc in ("utf-8", "latin-1"):
+        try:
+            kind = _classify_blob(body.encode(enc, "replace")[:16])
+        except Exception:
+            continue
+        if kind:
+            return kind
+    return ""
+
+
+def _xor_recover(raw: bytes) -> tuple[str, int]:
+    """Single-byte XOR brute force scored on English-likeness (chi-squared
+    over letter frequencies). Returns (text, key) or ("", -1). Opaque
+    blobs without recovery are not findings."""
+    _freq = {"e": 12.7, "t": 9.1, "a": 8.2, "o": 7.5, "i": 7.0, "n": 6.7,
+             "s": 6.3, "h": 6.1, "r": 6.0, "d": 4.3, "l": 4.0, "u": 2.8,
+             " ": 13.0}
+    best, best_key, best_score = "", -1, float("inf")
+    sample = raw[:4000]
+    if not sample:
+        return "", -1
+    for key in range(1, 256):
+        dec = bytes(b ^ key for b in sample)
+        try:
+            txt = dec.decode("ascii")
+        except Exception:
+            continue
+        if not txt:
+            continue
+        printable = sum(1 for c in txt if 32 <= ord(c) < 127 or c in "\n\r\t")
+        if printable / len(txt) < 0.95:
+            continue
+        low = txt.lower()
+        chi = 0.0
+        for ch, exp in _freq.items():
+            obs = low.count(ch) / len(low) * 100.0
+            chi += (obs - exp) ** 2 / exp
+        if chi < best_score:
+            best, best_key, best_score = txt, key, chi
+    if best_key >= 0 and best_score < 300.0:
+        return best, best_key
+    return "", -1
+
+
+def validate_file_artifact(request_fn: Callable, base_url: str, path: str,
+                           links: list[str] | None = None,
+                           capability: str = "file_probe",
+                           test_id: str = "file",
+                           max_files: int = 8,
+                           max_bytes: int = 262144) -> ValidatorResult:
+    """Directory -> enumerate -> download (capped, text-safe) -> magic
+    signature -> secret scan -> XOR recovery attempt. Extension alone
+    never confirms; magic bytes or recovered content required."""
+    ev: list[dict] = []
+    artifacts: list[dict] = []
+    if links is None:
+        try:
+            r = request_fn("GET", base_url + path)
+        except Exception:
+            return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, ev, {}, "INSUFFICIENT_EVIDENCE")
+        if r.get("status") != 200:
+            return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, ev, {}, "INSUFFICIENT_EVIDENCE")
+        links = re.findall(r'href="([^"]+)"', r.get("text", "") or "")
+    seen: set[str] = set()
+    for link in (links or [])[:max_files * 2]:
+        href = str(link).strip()
+        if not href or href in (".", "..", "/", "#") or href.startswith(("?", "#", "mailto:", "javascript:")):
+            continue
+        if href.startswith(("http://", "https://")):
+            continue
+        if href.lower().endswith(("/", ".css", ".js", ".png", ".jpg", ".svg", ".ico", ".woff2")):
+            continue
+        # Resolve against the listing URL (handles both absolute paths
+        # and relative hrefs without doubling the directory segment).
+        try:
+            from urllib.parse import urljoin as _uj2, urlparse as _up2
+            fpath = _up2(_uj2(base_url + path if path.endswith("/") else base_url + path + "/", href)).path or "/"
+        except Exception:
+            fpath = path.rstrip("/") + "/" + href.lstrip("/")
+        if fpath.rstrip("/") == path.rstrip("/") or fpath in seen or len(artifacts) >= max_files:
+            continue
+        seen.add(fpath)
+        try:
+            r = request_fn("GET", base_url + fpath)
+        except Exception:
+            continue
+        if r.get("status") != 200:
+            continue
+        ctype = str((r.get("headers", {}) or {}).get("content-type", "")).lower()
+        body = r.get("text", "") or ""
+        raw = body.encode("utf-8", "replace")[:max_bytes]
+        kind = _classify_text_body(body)
+        if not kind:
+            # Raw-byte magic: decoded text mangles binary signatures.
+            try:
+                _raw = bytes.fromhex(str(r.get("content_prefix", "") or "")[:128])
+                kind = _classify_blob(_raw)
+            except Exception:
+                pass
+        text_ok = any(t in ctype for t in _TEXT_CT) or (not kind and len(body) < 20000)
+        entry: dict[str, Any] = {"path": fpath, "kind": kind or "unknown",
+                                 "size": len(raw)}
+        if kind in ("keepass-kdbx", "pem-key", "sqlite-db"):
+            entry["sensitive_store"] = True
+        if text_ok:
+            found = []
+            for sname, rx in _SECRET_RES:
+                m = rx.search(body)
+                if m:
+                    found.append(sname)
+            if found:
+                entry["secrets"] = found
+                entry["excerpt"] = body[:200].replace("\n", " ")
+        if not kind and not entry.get("secrets"):
+            # Opaque blob: try each plausible decoding (hex, decimal
+            # groups, base64); keep the first that recovers readable text.
+            clean = re.sub(r"\s+", "", body)[:8000]
+            candidates: list[bytes] = []
+            if re.fullmatch(r"[0-9a-fA-F]+", clean or "") and len(clean) >= 64:
+                try:
+                    candidates.append(bytes.fromhex(clean))
+                except Exception:
+                    pass
+            if re.fullmatch(r"[0-9]+", clean or "") and len(clean) >= 64:
+                try:
+                    candidates.append(bytes(int(clean[i:i + 3]) % 256
+                                            for i in range(0, min(len(clean) - 2, 1200), 3)))
+                except Exception:
+                    pass
+            if re.fullmatch(r"[A-Za-z0-9+/=]+", clean or "") and len(clean) >= 64 \
+                    and not re.fullmatch(r"[0-9]+", clean or ""):
+                try:
+                    import base64 as _b
+                    candidates.append(_b.b64decode(clean))
+                except Exception:
+                    pass
+            for blob in candidates:
+                if not blob:
+                    continue
+                txt, key = _xor_recover(blob)
+                if txt:
+                    entry["kind"] = "xor-recovered"
+                    entry["xor_key"] = key
+                    entry["excerpt"] = txt[:200].replace("\n", " ")
+                    break
+        artifacts.append(entry)
+        ev.append(build_evidence(capability, test_id, base_url + fpath,
+                                 {"artifact": fpath}, r, body[:600], "",
+                                 stage="SUPPORTED" if (entry.get("sensitive_store")
+                                                       or entry.get("secrets")
+                                                       or entry.get("kind") == "xor-recovered")
+                                 else "OBSERVED",
+                                 extra={"artifact_kind": entry["kind"]}))
+    details = {"artifacts": artifacts}
+    strong = [a for a in artifacts if a.get("sensitive_store") or a.get("secrets")
+              or a.get("kind") == "xor-recovered"]
+    if strong:
+        return ValidatorResult("STRONG_FILE_EVIDENCE", 0.88, ev, details, "CONFIRMED")
+    if artifacts:
+        return ValidatorResult("NO_EFFECT", 0.65, ev, details, "REFUTED")
+    return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.35, ev, details, "INSUFFICIENT_EVIDENCE")
+
+
+def classify_response(status: int, headers: dict, body: str) -> str:
+    """Semantic HTTP response classification, reusable across detectors."""
+    h = {str(k).lower(): v for k, v in (headers or {}).items()}
+    b = body or ""
+    if status == 429 or "retry-after" in h:
+        return "rate_limited"
+    if status in (401, 403):
+        return "authentication_required" if status == 401 else "authorization_denied"
+    if status in (301, 302, 303, 307, 308):
+        return "redirect"
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "server_error"
+    if status in (200, 201, 204):
+        if re.search(r"\"(?:token|accessToken|jwt)\"\s*:", b):
+            return "authentication_material"
+        if len(b) > 200 and ("password" in b.lower() or "secret" in b.lower()):
+            return "data_disclosure"
+        return "success"
+    if status in (400, 422):
+        return "validation_error"
+    return "success" if status and status < 400 else "not_found"
+
+
+_ATTACKER_ORIGIN = "https://attacker.example"
+
+
+def validate_security_controls(request_fn: Callable, base_url: str, paths: list[str],
+                               is_https: bool = False,
+                               capability: str = "controls_probe",
+                               test_id: str = "controls") -> ValidatorResult:
+    """Security-header audit + behavioral CORS + bounded rate-limit test.
+
+    Headers are judged with context (HSTS only on HTTPS; CSP only on HTML).
+    CORS is behaviorally tested (reflection, preflight, credentials) — a
+    static wildcard alone is a low-severity misconfiguration, credentialed
+    reflection is higher. Rate limiting uses a bounded burst with early
+    exit on any throttle signal; absence of a single 429 proves nothing.
+    """
+    ev: list[dict] = []
+    details: dict[str, Any] = {}
+    targets = [p for p in (paths or ["/"]) if p][:4] or ["/"]
+    csp_missing: list[str] = []
+    headers_missing: dict[str, list[str]] = {}
+    cors: dict[str, Any] = {}
+    for path in targets:
+        try:
+            r = request_fn("GET", base_url + path,
+                           headers_={"Origin": _ATTACKER_ORIGIN})
+        except Exception:
+            continue
+        if r.get("status") == 0:
+            continue
+        hdrs = r.get("headers", {}) or {}
+        low = {str(k).lower(): v for k, v in hdrs.items()}
+        body = r.get("text", "") or ""
+        ctype = low.get("content-type", "")
+        is_html = "html" in ctype or "<html" in body.lower()[:500]
+        if is_html and "content-security-policy" not in low:
+            csp_missing.append(path)
+        missing = [h for h in ("x-frame-options", "x-content-type-options",
+                               "referrer-policy", "permissions-policy")
+                   if h not in low]
+        if is_https and "strict-transport-security" not in low:
+            missing.append("strict-transport-security")
+        if missing:
+            headers_missing[path] = missing
+        ev.append(build_evidence(capability, test_id, base_url + path,
+                                 {"origin": _ATTACKER_ORIGIN}, r, body[:400],
+                                 "", stage="OBSERVED",
+                                 extra={"response_class": classify_response(
+                                     r.get("status", 0), hdrs, body)}))
+        acao = low.get("access-control-allow-origin", "")
+        acac = low.get("access-control-allow-credentials", "").lower() == "true"
+        if acao == _ATTACKER_ORIGIN:
+            cors["reflected"] = True
+            cors["credentialed"] = cors.get("credentialed", False) or acac
+            cors["path"] = path
+        elif acao == "*" and "cors_wildcard" not in cors:
+            cors["cors_wildcard"] = True
+            cors["path"] = path
+    # Preflight with attacker origin on the first target.
+    try:
+        r = request_fn("OPTIONS", base_url + targets[0],
+                       headers_={"Origin": _ATTACKER_ORIGIN,
+                                 "Access-Control-Request-Method": "POST",
+                                 "Access-Control-Request-Headers": "content-type,authorization"})
+        low = {str(k).lower(): v for k, v in (r.get("headers", {}) or {}).items()}
+        if low.get("access-control-allow-origin") == _ATTACKER_ORIGIN:
+            cors["preflight_reflection"] = True
+        if low.get("access-control-allow-origin") == "*":
+            cors.setdefault("cors_wildcard", True)
+        methods = low.get("access-control-allow-methods", "")
+        if methods:
+            cors["allowed_methods"] = methods[:120]
+    except Exception:
+        pass
+    if csp_missing:
+        details["csp_missing"] = sorted(set(csp_missing))
+    if headers_missing:
+        details["headers_missing"] = headers_missing
+    if cors.get("reflected"):
+        details["cors_reflection"] = cors
+    elif cors.get("cors_wildcard"):
+        details["cors_wildcard"] = cors
+    # Bounded rate-limit probe on authentication surfaces only.
+    for path in targets:
+        if not any(k in path.lower() for k in ("login", "register", "signin",
+                                               "reset", "otp", "verify")):
+            continue
+        rl = _probe_rate_limit(request_fn, base_url + path, capability, test_id)
+        ev.extend(rl["evidence"])
+        if rl.get("throttled"):
+            details.setdefault("rate_limit_enforced", []).append(path)
+        else:
+            details.setdefault("rate_limit_absent", []).append(path)
+        break  # one auth surface bounds the cost
+    if details.get("cors_reflection") or details.get("csp_missing"):
+        return ValidatorResult("STRONG_CONTROLS_EVIDENCE", 0.82, ev, details, "SUPPORTED")
+    if details.get("cors_wildcard") or details.get("headers_missing") \
+            or details.get("rate_limit_absent"):
+        return ValidatorResult("STRONG_CONTROLS_EVIDENCE", 0.7, ev, details, "SUPPORTED")
+    if details.get("rate_limit_enforced"):
+        return ValidatorResult("NO_EFFECT", 0.75, ev, details, "REFUTED")
+    if not ev:
+        # Nothing observed (all requests failed): never report NO_EFFECT.
+        return ValidatorResult("INSUFFICIENT_EVIDENCE", 0.3, ev, details,
+                               "INSUFFICIENT_EVIDENCE")
+    return ValidatorResult("NO_EFFECT", 0.7, ev, details, "REFUTED")
+
+
+def _probe_rate_limit(request_fn: Callable, url: str, capability: str,
+                      test_id: str, attempts: int = 25) -> dict:
+    """Bounded burst with early exit on any throttle signal."""
+    import time as _t
+    ev: list[dict] = []
+    lat: list[float] = []
+    for i in range(max(5, min(attempts, 30))):
+        try:
+            r = request_fn("POST", url,
+                           body={"email": f"hx-ratelimit-{i}@horcrux.test",
+                                 "password": "HorcruxInvalid1!"})
+        except Exception:
+            continue
+        st = r.get("status", 0)
+        body = (r.get("text", "") or "").lower()
+        lat.append(float(r.get("elapsed_ms", 0) or 0))
+        throttle = (st == 429 or "retry-after" in
+                    {str(k).lower() for k in (r.get("headers", {}) or {})}
+                    or "locked" in body or "too many" in body
+                    or "captcha" in body or "throttl" in body)
+        if throttle:
+            ev.append(build_evidence(capability, test_id, url,
+                                     {"attempt": i + 1}, r, body[:300], "",
+                                     stage="REFUTED",
+                                     extra={"throttle_signal": True}))
+            return {"throttled": True, "evidence": ev}
+        if len(lat) >= 6:
+            base = sorted(lat[:5])[2]
+            if base > 0 and lat[-1] > base * 4:
+                ev.append(build_evidence(capability, test_id, url,
+                                         {"attempt": i + 1}, r, "",
+                                         "", stage="OBSERVED",
+                                         extra={"progressive_delay": True}))
+                return {"throttled": True, "evidence": ev}
+    ev.append(build_evidence(capability, test_id, url,
+                             {"attempts": len(lat),
+                              "all_accepted": True}, {}, "", stage="SUPPORTED",
+                             extra={"no_throttle_signal": True}))
+    return {"throttled": False, "evidence": ev}
 
 
 _TOKEN_RE = re.compile(

@@ -1,0 +1,183 @@
+benchmark: OWASP Juice Shop (docker bkimminich/juice-shop, v20.x)
+mode: black-box, target-only input, unauthenticated start
+scale: [critical, high, medium, low]
+
+# Severity here is the benchmark's observed reference. Production
+# adjudication must still verify exploitability context before confirming.
+# A "negative" case must never confirm even if superficially similar.
+
+findings:
+  - id: VULN-001
+    title: Unauthenticated user registration issues JWT
+    severity: critical
+    type: positive
+    property: UNAUTHENTICATED_AUTHENTICATION_MATERIAL_ISSUANCE
+    asset: POST /api/Users
+    verification:
+      - anonymous POST with minimally valid body returns 2xx
+      - response carries structurally valid JWT (header.payload.signature)
+      - token grants authenticated access to a protected resource
+    negative:
+      - id: VULN-001-N1
+        title: Registration rejects without token
+        verification: [no token issued, 4xx]
+
+  - id: VULN-002
+    title: IDOR / cross-user user-data access
+    severity: high
+    type: positive
+    property: BROKEN_OBJECT_LEVEL_AUTHORIZATION
+    asset: /api/Users/{id}
+    verification:
+      - two independent authenticated identities
+      - object instance with proven owner
+      - cross-identity read returns victim-owned private data
+    negative:
+      - id: VULN-002-N1
+        title: Uniform denial or public object
+        verification: [401/403/404 uniform, or same object anonymous]
+
+  - id: VULN-003
+    title: SQL injection
+    severity: high
+    type: positive
+    property: SQL_INJECTION
+    asset: query parameter owned by endpoint
+    verification:
+      - baseline vs boolean-true vs boolean-false differential, or
+      - DB-specific error signature with repeatability
+      - single generic error string is never sufficient
+    negative:
+      - id: VULN-003-N1
+        title: Neutral input handling
+        verification: [mutation neutral vs baseline]
+
+  - id: VULN-004
+    title: FTP directory / sensitive-file exposure
+    severity: high
+    type: positive
+    property: DIRECTORY_LISTING_SENSITIVE_EXPOSURE
+    asset: /ftp
+    verification:
+      - live directory index markers
+      - file entries including sensitive artifacts
+    negative:
+      - id: VULN-004-N1
+        title: Plain route without listing markers
+        verification: [no index markers]
+
+  - id: VULN-005
+    title: Missing Content-Security-Policy
+    severity: medium
+    type: positive
+    property: SECURITY_HEADER_DEFICIENCY
+    asset: HTML application responses
+    verification:
+      - HTML content served without CSP header
+      - applicable only where active content is served
+    negative:
+      - id: VULN-005-N1
+        title: API-only JSON endpoint without CSP
+        verification: [non-HTML response is not a CSP finding]
+
+  - id: VULN-006
+    title: CORS wildcard / origin reflection
+    severity: medium
+    type: positive
+    property: CORS_MISCONFIGURATION
+    asset: any endpoint
+    verification:
+      - attacker Origin reflected or wildcard with credentials, behaviorally tested
+      - simple request and preflight where meaningful
+    negative:
+      - id: VULN-006-N1
+        title: Static ACAO header without reflection
+        verification: [no behavioral reflection]
+
+  - id: VULN-007
+    title: Missing security headers
+    severity: low
+    type: positive
+    property: SECURITY_HEADER_DEFICIENCY
+    asset: application responses
+    verification:
+      - multiple baseline headers absent on live responses
+      - HSTS judged only on HTTPS-served applications
+    negative:
+      - id: VULN-007-N1
+        title: Headers present
+        verification: [headers observed]
+
+  - id: VULN-008
+    title: KeePass database exposure
+    severity: high
+    type: positive
+    property: SENSITIVE_CREDENTIAL_STORE_EXPOSURE
+    asset: /ftp file artifact
+    verification:
+      - artifact downloaded over HTTP
+      - magic-byte / structural signature identifies KeePass KDBX
+      - reachable without authentication
+    negative:
+      - id: VULN-008-N1
+        title: Extension-only match without signature
+        verification: [no magic-byte confirmation]
+
+  - id: VULN-009
+    title: Weak/XOR-encrypted exposed data recoverable
+    severity: medium
+    type: positive
+    property: WEAK_CRYPTOGRAPHIC_PROTECTION
+    asset: downloadable artifact with key material exposed alongside
+    verification:
+      - encoded blob plus exposed key/material
+      - deterministic recovery demonstrated
+      - encryption alone without recoverability is not a finding
+    note: key material must be retrievable over HTTP (e.g. encrypt.pyc
+      returns 403 on the reference deployment, which makes recovery
+      BLOCKED rather than a detector failure)
+    negative:
+      - id: VULN-009-N1
+        title: Opaque encrypted blob, no key, no recovery
+        verification: [no recovery demonstrated]
+
+  - id: VULN-010
+    title: Reflected XSS
+    severity: medium
+    type: positive
+    property: REFLECTED_XSS
+    asset: owned text-bearing parameter
+    verification:
+      - unescaped reflection in executable context
+      - escaped reflection is REJECTED, never a finding
+    negative:
+      - id: VULN-010-N1
+        title: Escaped or absent reflection
+        verification: [encoded or not reflected]
+
+  - id: VULN-011
+    title: Missing rate limiting on authentication/registration surface
+    severity: low
+    type: positive
+    property: RATE_LIMIT_DEFICIENCY
+    asset: registration / login endpoints
+    verification:
+      - bounded burst (e.g. 30 sequential) all succeed with no 429/lockout/delay/CAPTCHA
+      - single absence of 429 is insufficient
+    negative:
+      - id: VULN-011-N1
+        title: Throttling observed
+        verification: [429 or Retry-After or lockout or progressive delay]
+
+  - id: VULN-012
+    title: Information disclosure (sensitive data in API responses)
+    severity: low
+    type: positive
+    property: EXCESSIVE_DATA_EXPOSURE
+    asset: API endpoints
+    verification:
+      - sensitive fields (password hash, token, role, internal) to unauthorized actor
+    negative:
+      - id: VULN-012-N1
+        title: Minimal schema
+        verification: [no sensitive fields]

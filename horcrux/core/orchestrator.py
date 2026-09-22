@@ -24,8 +24,19 @@ from horcrux.core.intel import run_nuclei
 from horcrux.ui.progress import ScanProgressManager
 
 
+def _pinned_port(target: str) -> int | None:
+    """Explicit `host:port` targets pin web assessment to that service."""
+    try:
+        if ":" in (target or ""):
+            return int(target.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
 class Orchestrator:
-    def __init__(self, target: str, workspace: Workspace, console: Console, profile: str | ScanProfile | None = None,
+    def __init__(self, target: str, workspace: Workspace, console: Console,
+                 profile: str | ScanProfile | None = None,
                  engines: list[str] | None = None, skip_engines: bool = False,
                  engine_mode: str = "best", settings_manager=None,
                  time_limit: int | None = None, request_limit: int | None = None,
@@ -134,7 +145,14 @@ class Orchestrator:
                 # STAGE 3: Service Identification, Web Probing & Fingerprinting
                 progress.start_stage("services")
                 state = self.workspace.load()
+                # Pinned-port scope: `host:port` targets assess that service
+                # only. A host-wide scan must not merge foreign services'
+                # routes/specs (e.g. another app's openapi.json) into one
+                # model and must not spend the budget off-target.
+                _pinned: int | None = _pinned_port(self.target)
                 for service in state.services:
+                    if _pinned is not None and service.port != _pinned:
+                        continue
                     if "web_probe" in profile.enabled_modules and (
                         service.port in WEB_PORTS or service.service.lower() in {"http", "https"}
                     ):
@@ -339,11 +357,50 @@ class Orchestrator:
                     except Exception:
                         pass
                     on_recon_complete(self.workspace, ai_manager=ai_mgr)
+                    # Test-identity provisioning + object-instance discovery
+                    # (bounded; authorized test environments only; never fatal).
+                    try:
+                        from horcrux.intel.provisioning import (
+                            discover_object_instances,
+                            needs_provisioning,
+                            provision_test_identities,
+                        )
+                        from horcrux.modules.web.security_validators import (
+                            httpx_request_fn as _req_fn,
+                        )
+                        _st = self.workspace.load()
+
+                        def _mkreq(ctx):
+                            def _fn(method, url, query=None, body=None,
+                                    headers=None, cookies=None, **kw):
+                                return _req_fn(method, url, query=query,
+                                               body=body, headers=headers,
+                                               cookies=cookies)
+                            return _fn
+                        _wts = [w for w in _st.web_targets if w.base_url]
+                        if needs_provisioning(_st) and _wts:
+                            _prov = provision_test_identities(
+                                _st, _mkreq({}), _wts[0].base_url)
+                            self.workspace.save(_st)
+                            self.workspace.write(
+                                "raw/identity-provisioning.json",
+                                str({"provisioned": _prov.get("provisioned", []),
+                                     "reason": _prov.get("reason", "")})[:2000])
+                        _st = self.workspace.load()
+                        try:
+                            _inst = discover_object_instances(
+                                _st, _mkreq({}),
+                                (_wts[0].base_url if _wts else f"http://{_st.target}"))
+                            self.workspace.save(_st)
+                        except Exception:
+                            pass
+                    except Exception as exc:
+                        self.workspace.write("raw/provisioning-error.txt", str(exc)[:1000])
 
                     # Autonomous agent investigation loop for standard / deep / full profiles
                     if profile.name in ("full", "deep", "standard"):
                         from horcrux.agents.coordinator import run_full_assessment
-                        default_iter = 250 if profile.name in ("full", "deep") else 50
+                        default_iter = 400 if profile.name in ("full", "deep") else 50
                         max_iter = self.max_iterations or default_iter
                         run_full_assessment(
                             self.workspace,

@@ -191,3 +191,53 @@ def test_auth_bypass_rejects_hardened_login():
 
     res = sv.validate_auth_bypass_sqli(_login, "http://t.local/login")
     assert res.verdict == "NO_EFFECT"
+
+
+def test_js_template_literal_binds_param_to_endpoint():
+    from horcrux.modules.web.js_analyzer import extract_endpoint_param_bindings
+    js = ("search(e){return this.http.get(`${this.hostServer}/rest/products/search?q=${e}`)}"
+          'axios.get("/api/search", {params: {query: "x"}})')
+    bindings = extract_endpoint_param_bindings(js)
+    assert {"endpoint": "/rest/products/search", "name": "q"} in bindings
+    # Bare tokens elsewhere must NOT become bindings.
+    assert all(b["endpoint"].startswith(("/api/", "/rest/")) for b in bindings)
+
+
+def test_dom_flow_pairs_source_and_sink():
+    from horcrux.modules.web.js_analyzer import detect_dom_xss_flows
+    vuln = ("filterTable(){let e=this.route.snapshot.queryParams.q;"
+            "this.searchValue=this.sanitizer.bypassSecurityTrustHtml(e)}")
+    flows = detect_dom_xss_flows(vuln, "q")
+    assert flows and flows[0]["sink_kind"] == "bypassSecurityTrustHtml"
+    assert flows[0]["source"].startswith("url-query:q")
+    # Wrong parameter: no pairing.
+    assert detect_dom_xss_flows(vuln, "other") == []
+    # Sink without URL source: no pairing.
+    assert detect_dom_xss_flows("el.innerHTML = staticText;", "q") == []
+    assert detect_dom_xss_flows("no sinks here", "q") == []
+
+
+def test_dom_flow_adjudication_records_flow_evidence():
+    from horcrux.intel.investigations import Investigation, InvestigationState
+    from horcrux.intel.vulnerability_adjudicator import adjudicate_capability_outcome
+    from horcrux.models import WorkspaceState
+
+    class _R:
+        capability_id = "xss_probe"
+        data = {"verdict": "STRONG_XSS_EVIDENCE",
+                "endpoint": "/rest/products/search",
+                "parameter": "q", "confirmed_via": "dom-flow",
+                "dom_flow": {"source": "url-query:q via e",
+                             "sink": "bypassSecurityTrustHtml",
+                             "excerpt": "e"}}
+        evidence = [{"stage": "CONFIRMED"}]
+
+    st = WorkspaceState(target="t.local")
+    inv = Investigation(id="inv-dom", objective="xss check",
+                        candidate_tools=["xss_probe"],
+                        required_capabilities=["http"], specialist="WebAgent",
+                        state=InvestigationState.READY)
+    out = adjudicate_capability_outcome(_R(), inv, None, st)
+    assert out["state"] == InvestigationState.SUPPORTED, out
+    assert any("DOM-Based" in f.title for f in st.findings)
+    assert "reflected-unknown-context" not in str(st.findings)

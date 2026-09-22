@@ -150,6 +150,16 @@ BENCHMARK_MANIFEST: list[BenchmarkCase] = [
                   vulnerable_evidence=_e(usable_after_logout=True),
                   hardened_evidence=_e(invalidated=True),
                   ambiguous_evidence=_e()),
+    BenchmarkCase(property_id="FILE_KEEPASS_EXPOSURE", asset="/ftp/store.kdbx",
+                  prerequisites=["directory_listing"],
+                  vulnerable_evidence=_e(magic="keepass-kdbx", reachable=True),
+                  hardened_evidence=_e(magic="", reachable=True),
+                  ambiguous_evidence=_e(magic="", reachable=False)),
+    BenchmarkCase(property_id="WEAK_CRYPTO_RECOVERY", asset="/ftp/blob.enc",
+                  prerequisites=["artifact"],
+                  vulnerable_evidence=_e(recovered=True, key_exposed=True),
+                  hardened_evidence=_e(recovered=False, tested=True),
+                  ambiguous_evidence=_e()),
 ]
 
 

@@ -138,6 +138,69 @@ def report(
 
 
 @app.command()
+def findings(
+    target: str = typer.Argument(..., help="Target workspace to list canonical findings for"),
+):
+    """List canonical findings with severity, asset, and evidence-chain size."""
+    from rich.table import Table
+    from horcrux.models import canonical_finding_severity
+    console = Console()
+    ws = Workspace(target)
+    state = ws.load()
+    table = Table(title=f"Canonical findings — {target}", show_header=True)
+    table.add_column("ID", style="dim")
+    table.add_column("Severity", justify="center")
+    table.add_column("Title", style="bold white")
+    table.add_column("Asset", style="cyan")
+    table.add_column("Evidence", justify="right")
+    for f in state.findings:
+        table.add_row(f.id[:16], canonical_finding_severity(f).upper(),
+                      f.title[:70], (f.affected_asset or f.target)[:40],
+                      str(len(f.evidence or [])))
+    console.print(table)
+    n_conf = sum(1 for f in state.findings
+                 if str(getattr(f.validation_state, "value", f.validation_state)).upper() == "CONFIRMED")
+    console.print(f"[dim]{len(state.findings)} canonical findings "
+                  f"({n_conf} confirmed)[/dim]")
+
+
+@app.command()
+def graph(
+    target: str = typer.Argument(..., help="Target workspace to show attack paths for"),
+):
+    """Show attack paths derived from confirmed findings."""
+    from rich.table import Table
+    console = Console()
+    ws = Workspace(target)
+    state = ws.load()
+    paths = state.attack_paths or []
+    table = Table(title=f"Attack paths — {target}", show_header=True)
+    table.add_column("#", justify="right")
+    table.add_column("Name", style="bold white")
+    table.add_column("Status", justify="center")
+    table.add_column("Findings", style="magenta")
+    for idx, p in enumerate(paths, 1):
+        table.add_row(str(idx), str(p.get("name", ""))[:70],
+                      str(p.get("status", "")), ",".join(p.get("finding_ids", []) or [])[:32])
+    console.print(table)
+    console.print(f"[dim]{len(paths)} attack paths[/dim]")
+
+
+@app.command()
+def next(
+    target: str = typer.Argument(..., help="Target workspace to show next actions for"),
+):
+    """Show authoritative next actions (never fabricated)."""
+    from horcrux.core.actions import compute_investigation_actions
+    console = Console()
+    ws = Workspace(target)
+    state = ws.load()
+    for a in compute_investigation_actions(state)[:10]:
+        console.print(f"[bold yellow]{a.id}[/bold yellow] (score {int(a.score)}): {a.title}")
+        console.print(f"  [dim]{a.reason[:200]}[/dim]")
+
+
+@app.command()
 def status(
     target: str = typer.Argument(..., help="Target workspace to show status for"),
 ):
@@ -644,7 +707,8 @@ app.add_typer(coverage_app, name="coverage")
 KNOWN_COMMANDS = {
     "scan", "assess", "coverage", "headless", "doctor", "tools", "console", "gallery", "artifacts",
     "settings", "report", "ask", "ai", "status", "replay", "benchmark",
-    "engines", "--help", "-h", "--version", "-v",
+    "engines", "findings", "graph", "next",
+    "--help", "-h", "--version", "-v",
 }
 
 

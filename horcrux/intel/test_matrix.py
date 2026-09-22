@@ -90,6 +90,7 @@ class SecurityTestCase(BaseModel):
                 self.target_method,
                 self.target_path,
                 self.target_parameter,
+                self.name,
             )
         return self.id
 
@@ -527,9 +528,33 @@ def derive_applicable_tests(
                     evidence_refs=[ep.id],
                 )
             )
+            # Registration surfaces get an unauthenticated JWT-issuance
+            # test routed to registration_probe first (VULN-001 class).
+            if any(k in pl for k in ("register", "signup", "sign-up")) or re.fullmatch(
+                    r"/(?:api/)?users/?", pl or ""):
+                _add(
+                    EndpointSecurityTest(family=TestFamily.API_SECURITY,
+                        name=f"Unauthenticated registration JWT issuance on {method} {path}",
+                        asset_id=ep.id,
+                        asset_type="endpoint",
+                        target_path=path,
+                        target_method="POST",
+                        specialist="WebAgent",
+                        candidate_tools=["registration_probe", "api_probe"],
+                        required_capabilities=["http"],
+                        prerequisites=["web_target"],
+                        vulnerability_classes=["authentication"],
+                        priority=0.90,
+                        evidence_refs=[ep.id],
+                    )
+                )
 
         # Sensitive Directory / Information Exposure Tests
         if path in ("/ftp", "/ftp/", "/robots.txt", "/sitemap.xml") or path.endswith((".env", ".git", ".bak", ".kdbx")):
+            _tools = ["http_probe", "endpoint_validate"]
+            if path in ("/ftp", "/ftp/"):
+                # Directory roots get artifact download + classification first.
+                _tools = ["file_probe", "http_probe", "endpoint_validate"]
             _add(
                 EndpointSecurityTest(family=TestFamily.CONFIG_EXPOSURE,
                     name=f"Inspect sensitive directory or configuration exposure at {path}",
@@ -538,7 +563,7 @@ def derive_applicable_tests(
                     target_path=path,
                     target_method="GET",
                     specialist="WebAgent",
-                    candidate_tools=["http_probe", "endpoint_validate"],
+                    candidate_tools=_tools,
                     required_capabilities=["http"],
                     prerequisites=["web_target"],
                     vulnerability_classes=["information_disclosure"],
@@ -766,7 +791,7 @@ def derive_applicable_tests(
                     target_path=ep_path,
                     target_method="GET",
                     specialist="WebAgent",
-                    candidate_tools=["http_probe", "endpoint_validate"],
+                    candidate_tools=["controls_probe", "http_probe", "endpoint_validate"],
                     required_capabilities=["http"],
                     prerequisites=["web_target"],
                     vulnerability_classes=["information_disclosure"],

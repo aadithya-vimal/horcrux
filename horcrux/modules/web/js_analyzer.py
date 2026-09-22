@@ -175,6 +175,20 @@ def analyze_javascript_and_routes(
                         )
                     )
 
+            # Endpoint-bound parameters from request construction literals.
+            # Same-literal co-occurrence is endpoint-specific evidence;
+            # bare tokens stay anchored to the bundle (never owned).
+            for b in extract_endpoint_param_bindings(js_text):
+                parameters.append(
+                    Parameter(
+                        name=b["name"],
+                        location="query",
+                        source="javascript",
+                        endpoint=b["endpoint"],
+                        confidence=0.85,
+                    )
+                )
+
             # Extract Parameters from JS
             param_matches = _JS_PARAM_PATTERN.finditer(js_text)
             for p_match in param_matches:
@@ -294,10 +308,108 @@ def analyze_javascript_content(js_text: str, source_name: str = "") -> dict[str,
             "dangerous_sinks": sinks, "graphql_operations": graphql_ops}
 
 
+_BOUND_QUERY_RE = re.compile(
+    r"""["'`](?:\$\{[^}]*\})?(/(?:api|rest|v\d+/)[^"'`\s]*?)\?([^"'`\s]+)["'`]""")
+
+
+def extract_endpoint_param_bindings(js_text: str) -> list[dict[str, str]]:
+    """Endpoint-specific parameter evidence from client request construction.
+
+    Template literals such as `/rest/products/search?q=${e}` bind parameter
+    `q` to that exact endpoint (JS_REQUEST_CONSTRUCTION provenance). Only
+    same-literal co-occurrence counts — never global token promotion.
+    """
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _BOUND_QUERY_RE.finditer(js_text or ""):
+        ep, qs = "/" + m.group(1).lstrip("/"), m.group(2)
+        for part in re.split(r"[&;]", qs):
+            name = re.split(r"[=}$]", part, maxsplit=1)[0].strip().strip("${}")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\-]{0,63}", name or ""):
+                continue
+            key = (ep, name)
+            if key not in seen:
+                seen.add(key)
+                out.append({"endpoint": ep, "name": name})
+    return out
+
+
 def extract_html_inputs(html: str, endpoint: str = "") -> list[dict[str, str]]:
     """Extracts form input parameters as a list of dicts with name and endpoint."""
     params = extract_form_parameters(html, endpoint or "http://target.local")
     return [{"name": p.name, "endpoint": p.endpoint, "location": p.location} for p in params]
+
+
+_SOURCE_RES = (
+    re.compile(r"queryParams\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"queryParams\s*:\s*\{[^}]*?([A-Za-z_][A-Za-z0-9_]*)", re.S),
+    re.compile(r"queryParamMap\s*\.\s*get\s*\(\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*\)"),
+    re.compile(r"location\s*\.\s*(?:search|hash)"),
+    re.compile(r"""\.get\(['"]([A-Za-z_][A-Za-z0-9_]*)['"]\)"""),
+)
+
+_SINK_RES = (
+    ("bypassSecurityTrustHtml", re.compile(r"bypassSecurityTrustHtml\s*\(([\s\S]{1,400}?)\)")),
+    ("innerHTML", re.compile(r"\.innerHTML\s*=\s*([^\n;]{1,300})")),
+    ("document.write", re.compile(r"document\.write\s*\(([^)]{1,300})\)")),
+)
+
+
+def detect_dom_xss_flows(js_text: str, param: str = "") -> list[dict[str, str]]:
+    """Pair attacker-influenced sources (URL query params) with dangerous
+    sinks (sanitizer bypass / innerHTML / document.write).
+
+    A flow confirms only when the SAME parameter name read from the URL
+    appears in the sink expression. Unpaired sinks or sourceless sinks
+    are never findings.
+    """
+    text = js_text or ""
+    if not text:
+        return []
+    names: set[str] = set()
+    for rx in _SOURCE_RES:
+        for m in rx.finditer(text):
+            try:
+                name = m.group(1)
+            except IndexError:
+                name = ""
+            if name and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+                names.add(name)
+    # Scope-local pairing: minified bundles reuse single-letter vars
+    # across functions, so aliases are resolved per sink within a bounded
+    # backward window (same-function heuristic), never bundle-global.
+    flows: list[dict[str, str]] = []
+    for kind, rx in _SINK_RES:
+        for m in rx.finditer(text):
+            expr = m.group(1)
+            window = text[max(0, m.start() - 2000):m.start()]
+            hit = ""
+            for name in names:
+                if param and name != param:
+                    continue
+                if not re.search(rf"queryParams\s*\.\s*{re.escape(name)}\b", window) \
+                        and not re.search(rf"queryParamMap\s*\.\s*get\s*\(\s*['\"]{re.escape(name)}['\"]", window):
+                    continue
+                if re.search(rf"\b{re.escape(name)}\b", expr):
+                    hit = name
+                    break
+                # Single-hop alias inside the window: var assigned from the
+                # URL read, then used in the sink expression.
+                for am in re.finditer(
+                        r"(?:(?:let|var|const)\s+)?(?:this\.)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]{1,200})",
+                        window):
+                    var, rhs = am.group(1), am.group(2)
+                    if re.search(rf"queryParams\s*\.\s*{re.escape(name)}\b", rhs) \
+                            and re.search(rf"\b{re.escape(var)}\b", expr):
+                        hit = f"{name} via {var}"
+                        break
+                if hit:
+                    break
+            if hit:
+                flows.append({"source": f"url-query:{hit}",
+                              "sink_kind": kind,
+                              "excerpt": expr[:200]})
+    return flows[:5]
 
 
 extract_script_urls = extract_script_sources

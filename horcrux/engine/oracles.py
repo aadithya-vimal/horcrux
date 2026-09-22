@@ -455,6 +455,45 @@ def known_vuln_oracle(evidence: dict, pid: str = "INFRA_KNOWN_VULN_COMPONENT") -
     return _ins(pid, ["version/intel unproven"])
 
 
+def registration_jwt_oracle(evidence: dict,
+                              pid: str = "UNAUTHENTICATED_AUTHENTICATION_MATERIAL_ISSUANCE") -> OracleResult:
+    if bool(evidence.get("registered_2xx", False)) and bool(evidence.get("jwt_valid", False)) \
+            and bool(evidence.get("verified_use", False)):
+        return _conf(pid, 0.93, ["anonymous registration 2xx", "structurally valid JWT",
+                                 "token verified on protected resource"])
+    if bool(evidence.get("registered_2xx", False)) and bool(evidence.get("jwt_valid", False)):
+        return _ins(pid, ["JWT issued but protected-use unverified"])
+    if bool(evidence.get("tested", False)):
+        return _ref(pid, 0.7, ["no usable token issued"])
+    return _ins(pid, ["registration flow untested"])
+
+
+def rate_limit_oracle(evidence: dict, pid: str = "RATE_LIMIT_DEFICIENCY") -> OracleResult:
+    if bool(evidence.get("throttled", False)):
+        return _ref(pid, 0.8, ["throttle signal observed"])
+    if int(evidence.get("attempts", 0) or 0) >= 10 and bool(evidence.get("all_accepted", False)):
+        return _conf(pid, 0.8, [f"bounded burst of {evidence['attempts']} accepted without throttle"])
+    if bool(evidence.get("tested", False)):
+        return _ref(pid, 0.7, ["throttling present"])
+    return _ins(pid, ["rate behavior untested"])
+
+
+def keepass_oracle(evidence: dict, pid: str = "FILE_KEEPASS_EXPOSURE") -> OracleResult:
+    if bool(evidence.get("reachable", False)) and str(evidence.get("magic", "")) == "keepass-kdbx":
+        return _conf(pid, 0.9, ["KDBX magic bytes in anonymously downloadable artifact"])
+    if bool(evidence.get("tested", False)) or bool(evidence.get("reachable", False)):
+        return _ref(pid, 0.75, ["no magic signature"])
+    return _ins(pid, ["artifact untested"])
+
+
+def weak_crypto_oracle(evidence: dict, pid: str = "WEAK_CRYPTO_RECOVERY") -> OracleResult:
+    if bool(evidence.get("recovered", False)):
+        return _conf(pid, 0.82, ["opaque blob deterministically recovered"])
+    if bool(evidence.get("tested", False)) or "recovered" in evidence:
+        return _ref(pid, 0.7, ["recovery attempted, nothing recovered"])
+    return _ins(pid, ["recovery untested"])
+
+
 ORACLES = {
     "sqli_oracle": sqli_oracle,
     "nosql_oracle": nosql_oracle,
@@ -494,6 +533,10 @@ ORACLES = {
     "graphql_authz_oracle": graphql_authz_oracle,
     "exposed_service_oracle": exposed_service_oracle,
     "known_vuln_oracle": known_vuln_oracle,
+    "registration_jwt_oracle": registration_jwt_oracle,
+    "rate_limit_oracle": rate_limit_oracle,
+    "keepass_oracle": keepass_oracle,
+    "weak_crypto_oracle": weak_crypto_oracle,
 }
 
 

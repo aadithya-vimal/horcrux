@@ -263,11 +263,36 @@ def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
                         break
             except Exception:
                 pass
-        if not any(p.id == sem.id for p in app.parameters):
+        _dup = next((p for p in app.parameters if p.id == sem.id), None)
+        if _dup is None:
             app.parameters.append(sem)
+        else:
+            # Provenance upgrade: stronger endpoint-specific evidence
+            # replaces weaker records sharing one fingerprint id.
+            from horcrux.intel.parameters import ParameterProvenance as _PP
+            def _prank(v: str) -> int:
+                return 0 if str(v or "").upper() == _PP.UNKNOWN.value else 1
+            try:
+                if _prank(getattr(_dup, "provenance", "UNKNOWN")) < _prank(
+                        getattr(sem, "provenance", "UNKNOWN")):
+                    _dup.provenance = sem.provenance
+                    _dup.confidence = max(float(getattr(_dup, "confidence", 0) or 0),
+                                          float(getattr(sem, "confidence", 0) or 0))
+                    _dup.evidence_refs = list(set(list(getattr(_dup, "evidence_refs", []) or [])
+                                                  + list(getattr(sem, "evidence_refs", []) or [])))
+                    if sem.endpoint_id and not _dup.endpoint_id:
+                        _dup.endpoint_id = sem.endpoint_id
+            except Exception:
+                pass
 
         if param.endpoint:
             # Never promote static JS bundle / asset URLs into server endpoints.
+            # And never fabricate endpoints from unowned parameters: the
+            # endpoint must already be modeled or the parameter owned.
+            from horcrux.intel.parameters import ParameterProvenance as _PP2
+            _owning = str(getattr(sem, "provenance", "") or "").upper() != _PP2.UNKNOWN.value
+            if not _owning and not sem.endpoint_id:
+                continue
             ep_path = (param.endpoint or "").strip()
             if "://" in ep_path:
                 try:
@@ -283,6 +308,9 @@ def _ingest_parameters(state: WorkspaceState, app: ApplicationModel) -> None:
                 path=ep_path,
                 parameters=[param.name],
                 sources=[param.source],
+                # Parameter-derived candidates are source-only until a live
+                # probe confirms them; never presented as HTTP observations.
+                discovery_state="DISCOVERED_FROM_SOURCE",
             )
             app.upsert_endpoint(ep)
 
@@ -550,7 +578,23 @@ def ingest_http_request(
     parameters: list[str] | None = None,
     source: str = "proxy",
 ) -> SemanticEndpoint:
-    """Ingest proxy/browser HTTP observation."""
+    """Ingest proxy/browser HTTP observation.
+
+    Instance-variant guard: a path differing from a modeled endpoint only
+    by trailing numeric ID folds into the pattern endpoint instead of
+    spawning unbounded /1, /2, /3 ... endpoints (enumeration loop).
+    """
+    collapsed = re.sub(r"/\d+(?=/|$|\?|#)", "/{id}", path or "")
+    for existing in getattr(app, "endpoints", []) or []:
+        epath = str(getattr(existing, "path", "") or "")
+        if not epath or existing.method.upper() != method.upper():
+            continue
+        if re.sub(r"/\d+(?=/|$|\?|#)", "/{id}", epath) == collapsed and epath != path:
+            existing.evidence_refs = list(set(existing.evidence_refs + [f"{source}:{method}:{path}"]))
+            existing.sources = list(set(existing.sources + [source]))
+            if identity not in existing.observed_identities:
+                existing.observed_identities.append(identity)
+            return existing
     ep = SemanticEndpoint(
         method=method.upper(),
         path=path,
@@ -923,6 +967,11 @@ def ingest_capability_evidence(app: ApplicationModel, capability_id: str,
                     if not re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$", str(pname)):
                         continue
                     try:
+                        # Corroborate-only like vparam above: validator runs
+                        # never manufacture ownership.
+                        from horcrux.intel.parameters import is_owned_in_model as _owned_ep
+                        if not _owned_ep(app.parameters, str(pname), vpath):
+                            continue
                         sem2 = SemanticParameter(name=str(pname), location="query",
                                                  endpoint=vpath, source=source,
                                                  evidence_refs=[f"{source}:param:{pname}"])
@@ -1181,6 +1230,24 @@ def ingest_client_side(app: ApplicationModel, js_text: str,
     if findings["routes"]:
         ingest_javascript_routes(app, findings["routes"],
                                  findings["parameters"], source=source)
+    # Endpoint-bound parameters from request construction (owned evidence).
+    try:
+        from horcrux.modules.web.js_analyzer import extract_endpoint_param_bindings
+        from horcrux.intel.parameters import provenance_for_source as _prov_for
+        bindings = extract_endpoint_param_bindings(js_text or "")
+        findings["bound_parameters"] = bindings
+        for b in bindings:
+            sem = SemanticParameter(name=b["name"], location="query",
+                                    endpoint=b["endpoint"], source=source,
+                                    evidence_refs=[f"{source}:bound:{b['name']}@{b['endpoint']}"],
+                                    provenance=_prov_for("javascript", ""),
+                                    confidence=0.85,
+                                    first_seen=f"{source}:{b['endpoint']}")
+            sem.ensure_id()
+            if not any(p.id == sem.id for p in app.parameters):
+                app.parameters.append(sem)
+    except Exception:
+        findings["bound_parameters"] = []
     for pat, kind in SECRET_PATTERNS:
         if pat.search(js_text or ""):
             findings["secrets"].append({"kind": kind, "redacted": True,

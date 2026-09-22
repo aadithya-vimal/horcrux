@@ -21,11 +21,73 @@ if TYPE_CHECKING:
     from horcrux.models import WorkspaceState
 
 
+def _maybe_provision_and_refresh(state, app):
+    """Opportunistic identity provisioning + instance refresh (bounded).
+
+    Transient startup failures must not permanently disable authz testing.
+    Gated on live evidence (or loopback): synthetic/offline targets must
+    never incur network waits here.
+    """
+    try:
+        _host = str(getattr(state, "target", "") or "").split(":")[0].lower()
+        _allowed = _host in ("127.0.0.1", "localhost", "::1") or bool(
+            getattr(state, "live_execution_observed", False))
+    except Exception:
+        _allowed = False
+    if not _allowed:
+        return
+    try:
+        from horcrux.intel.provisioning import (
+            discover_object_instances,
+            needs_provisioning,
+            provision_test_identities,
+        )
+        from horcrux.modules.web.security_validators import (
+            httpx_request_fn as _req_fn,
+        )
+    except Exception:
+        return
+
+    def _mkreq(method, url, query=None, body=None,
+               headers=None, cookies=None, **kw):
+        return _req_fn(method, url, query=query, body=body,
+                       headers=headers, cookies=cookies)
+
+    try:
+        sched = state.scheduler_state or {}
+        attempts = int(sched.get("provision_attempts", 0) or 0)
+        if needs_provisioning(state) and attempts < 3 and app.web_targets:
+            base = app.web_targets[0].base_url or f"http://{state.target}"
+            out = provision_test_identities(state, _mkreq, base)
+            sched = state.scheduler_state or {}
+            sched["provision_attempts"] = attempts + 1
+            sched["provision_last"] = out.get("reason", "")
+            state.scheduler_state = sched
+    except Exception:
+        pass
+    try:
+        import hashlib as _hl
+        eps_sig = ",".join(sorted(
+            f"{e.method}:{e.path}" for e in app.endpoints))[:4000]
+        sig = _hl.sha256(eps_sig.encode()).hexdigest()[:12]
+        sched = state.scheduler_state or {}
+        if sched.get("instance_eps_sig") != sig and app.web_targets:
+            base = app.web_targets[0].base_url or f"http://{state.target}"
+            discover_object_instances(state, _mkreq, base)
+            sched = state.scheduler_state or {}
+            sched["instance_eps_sig"] = sig
+            state.scheduler_state = sched
+    except Exception:
+        pass
+
+
 def reassess(state: WorkspaceState, ai_manager=None) -> WorkspaceState:
     """Full reassessment cycle: ingest → hypothesize → investigate queue → coverage."""
     state.assessment_phase = AssessmentPhase.APPLICATION_MODELING.value
 
     ingest_workspace_state(state)
+    app = state.get_application_model()
+    _maybe_provision_and_refresh(state, app)
     app = state.get_application_model()
 
     try:

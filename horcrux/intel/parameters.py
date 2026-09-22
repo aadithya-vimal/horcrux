@@ -97,8 +97,14 @@ _SOURCE_TO_PROVENANCE: dict[str, ParameterProvenance] = {
 
 
 def provenance_for_source(source: str, explicit: str = "") -> str:
-    """Resolve explicit provenance, else map legacy source strings."""
-    if explicit and explicit in {p.value for p in ParameterProvenance}:
+    """Resolve explicit provenance, else map legacy source strings.
+
+    An explicit UNKNOWN carries no information and falls through to the
+    source mapping (otherwise records explicitly marked UNKNOWN could
+    never be upgraded by their source channel).
+    """
+    if explicit and explicit != ParameterProvenance.UNKNOWN.value \
+            and explicit in {p.value for p in ParameterProvenance}:
         return explicit
     return _SOURCE_TO_PROVENANCE.get((source or "").lower(), ParameterProvenance.UNKNOWN).value
 

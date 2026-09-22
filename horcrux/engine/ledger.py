@@ -55,7 +55,8 @@ FAMILY_PROPERTIES: dict[str, list[str]] = {
     "authz_horizontal": ["AUTHZ_HORIZONTAL"],
     "authz_vertical": ["AUTHZ_VERTICAL_PRIVESC", "AUTHZ_FUNCTION_LEVEL"],
     "auth_enforcement": ["AUTHN_UNAUTH_PROTECTED_ACCESS", "AUTHN_BYPASS"],
-    "api_security": ["API_EXCESSIVE_DATA", "API_MASS_ASSIGNMENT", "API_METHOD_AUTH"],
+    "api_security": ["API_EXCESSIVE_DATA", "API_MASS_ASSIGNMENT", "API_METHOD_AUTH",
+                     "UNAUTHENTICATED_AUTHENTICATION_MATERIAL_ISSUANCE"],
     "param_sqli": ["INJECT_SQL", "INJECT_NOSQL"],
     "param_cmdi": ["INJECT_COMMAND"],
     "param_traversal": ["PATH_TRAVERSAL"],
@@ -68,7 +69,8 @@ FAMILY_PROPERTIES: dict[str, list[str]] = {
     "workflow_tampering": ["BIZ_QUANTITY_MANIPULATION", "BIZ_PRICE_MANIPULATION"],
     "config_exposure": ["CONFIG_DIR_LISTING", "CONFIG_BACKUP_EXPOSURE",
                         "CONFIG_ADMIN_EXPOSURE", "CONFIG_DEBUG_EXPOSURE",
-                        "CONFIG_CORS", "CONFIG_HEADERS"],
+                        "CONFIG_CORS", "CONFIG_HEADERS", "RATE_LIMIT_DEFICIENCY",
+                        "CORS_MISCONFIGURATION", "SECURITY_HEADER_DEFICIENCY"],
     "service_exploit_intel": ["INFRA_EXPOSED_SERVICE", "INFRA_KNOWN_VULN_COMPONENT"],
 }
 

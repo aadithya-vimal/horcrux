@@ -723,6 +723,10 @@ class WorkspaceState(BaseModel):
     engine_operator_exclusions: list[str] = Field(default_factory=list)
     # --- Autonomous Headless Mission state ---
     mission: dict[str, Any] = Field(default_factory=dict)
+    # --- Detection-recovery state (labels/metadata only; live secrets stay
+    # in the process-local IdentityVault and are never persisted) ---
+    object_instances: list[dict[str, Any]] = Field(default_factory=list)
+    provisioned_identities: list[dict[str, Any]] = Field(default_factory=list)
 
     def get_policy(self) -> Any:
         from horcrux.core.policy import EngagementPolicy

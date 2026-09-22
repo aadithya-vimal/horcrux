@@ -302,6 +302,11 @@ def run_capability_for_investigation(state: Any, investigation: Investigation,
                 "terminal_state": terminal, "summary": reason}
 
     inputs = build_capability_inputs(state, investigation, capability_id)
+    try:
+        from horcrux.intel.provisioning import inject_identity_contexts
+        inputs = inject_identity_contexts(state, investigation, inputs) or inputs
+    except Exception:
+        pass
     _emit(observer, "investigation_step", {"step": "executing"})
     try:
         result = registry.execute(capability_id, inputs, request_id=request_id)

@@ -85,10 +85,20 @@ class CanonicalFinding(BaseModel):
 
 def dedup_key(property_id: str, asset: str, endpoint: str, parameter: str,
               object: str, source_identity: str, target_identity: str) -> str:
-    parts = [property_id, asset, endpoint, parameter, object,
-             source_identity, target_identity]
+    parts = [property_id, _collapse_instance(asset),
+             _collapse_instance(endpoint),
+             parameter, object, source_identity, target_identity]
     norm = "|".join(p.strip().lower() for p in parts)
     return hashlib.sha256(norm.encode()).hexdigest()[:16]
+
+
+def _collapse_instance(path: str) -> str:
+    """Collapse instance identifiers so the same weakness on /1 and /2
+    deduplicates (same IDOR x every ID is one finding)."""
+    import re as _re
+    p = _re.sub(r"/\d+(?=/|$|\?|#)", "/{id}", path or "")
+    p = _re.sub(r"/[0-9a-fA-F-]{36}(?=/|$|\?|#)", "/{id}", p)
+    return p
 
 
 def deduplicate(findings: list[CanonicalFinding]) -> list[CanonicalFinding]:
